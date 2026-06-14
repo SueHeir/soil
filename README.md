@@ -26,11 +26,12 @@ mechanism (`#[forward]` / `#[reverse]` / `#[zero]`). It is documented in
 
 | crate | role |
 |---|---|
-| `soil_core` | base `Atom` + `AtomData` registry, comm, domain decomposition, neighbor, regions, groups |
-| `soil_derive` | `#[derive(AtomData)]` proc macro |
-| `soil_verlet` | velocity-Verlet translational integration |
-| `soil_print` | thermo output, dump files (CSV/binary/VTP), restart |
-| `soil_deform` | box deformation (engineering strain rate, velocity, target size) |
+| [`soil_core`](crates/soil_core/README.md) | base `Atom` + `AtomData` registry, comm, domain decomposition, neighbor, regions, groups |
+| [`soil_derive`](crates/soil_derive/README.md) | `#[derive(AtomData)]` proc macro |
+| [`soil_verlet`](crates/soil_verlet/README.md) | velocity-Verlet translational integration |
+| [`soil_print`](crates/soil_print/README.md) | thermo output, dump files (CSV/binary/VTP), restart |
+| [`soil_deform`](crates/soil_deform/README.md) | box deformation (engineering strain rate, velocity, target size) |
+| [`soil_fixes`](crates/soil_fixes/README.md) | method-agnostic kinematic constraints (freeze, pin, prescribed motion, velocity damping) on base `Atom` state |
 
 Built on [grass](https://github.com/SueHeir/grass). Consumed by
 [dirt](https://github.com/SueHeir/dirt) (DEM) and intended for other

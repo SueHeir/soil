@@ -1,0 +1,16 @@
+target/
+Cargo.lock
+**/*.rs.bk
+.DS_Store
+.claude
+
+# Generated simulation artifacts
+**/vtp/
+*.vtp
+**/data/
+*.csv
+schedule.dot
+schedule.png
+*.svg
+**/profile*.json
+**/*.log

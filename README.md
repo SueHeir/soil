@@ -15,10 +15,6 @@ or damage. Physics tiers extend a particle by registering an `AtomData` column;
 the substrate then carries it through every migration, ghost exchange,
 permutation, and restart automatically.
 
-It suits explicit, time-stepping particle and grid solvers whose state is
-resource-shaped with separable read/write sets. It is not aimed at implicit
-global solvers (FEM, spectral, Newton-Krylov) where state is one large coupled
-matrix.
 
 ## The interface
 

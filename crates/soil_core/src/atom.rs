@@ -17,7 +17,7 @@ use std::{
 
 use grass_app::prelude::*;
 use grass_scheduler::prelude::*;
-use crate::{CommState, ParticleSimScheduleSet};
+use crate::{Accum, CommState, ParticleSimScheduleSet, Real};
 
 /// Number of `f64`s packed/unpacked for one atom's base fields
 /// (tag, origin_index, cutoff_radius, atom_type, pos×3, vel×3, force×3, mass, image×3).
@@ -293,12 +293,12 @@ macro_rules! for_each_atom_vec {
             (atom_type, u32),
             (origin_index, i32),
             (is_ghost, bool),
-            (pos, [f64; 3]),
-            (vel, [f64; 3]),
-            (force, [f64; 3]),
-            (cutoff_radius, f64),
-            (mass, f64),
-            (inv_mass, f64),
+            (pos, [Real; 3]),
+            (vel, [Real; 3]),
+            (force, [Accum; 3]),
+            (cutoff_radius, Real),
+            (mass, Real),
+            (inv_mass, Real),
             (image, [i32; 3]),
         }
     };
@@ -323,13 +323,13 @@ pub struct Atom {
     pub is_ghost: Vec<bool>,
 
     // Interleaved arrays: field[i] = [x, y, z]
-    pub pos: Vec<[f64; 3]>,
-    pub vel: Vec<[f64; 3]>,
-    pub force: Vec<[f64; 3]>,
+    pub pos: Vec<[Real; 3]>,
+    pub vel: Vec<[Real; 3]>,
+    pub force: Vec<[Accum; 3]>,
 
-    pub cutoff_radius: Vec<f64>,
-    pub mass: Vec<f64>,
-    pub inv_mass: Vec<f64>,
+    pub cutoff_radius: Vec<Real>,
+    pub mass: Vec<Real>,
+    pub inv_mass: Vec<Real>,
     /// PBC image flags: number of times atom has crossed each periodic boundary.
     pub image: Vec<[i32; 3]>,
 }
@@ -412,7 +412,7 @@ impl Atom {
 
     /// Dimension-indexed position access for comm.rs border detection.
     pub fn pos_component(&self, i: usize, dim: usize) -> f64 {
-        self.pos[i][dim]
+        self.pos[i][dim] as f64
     }
 
     /// Returns the highest global tag among all stored atoms, or 0 if empty.
@@ -425,18 +425,18 @@ impl Atom {
     fn pack_atom_inner(&self, i: usize, origin_index_val: f64, pos_offset: [f64; 3], buf: &mut Vec<f64>) {
         buf.push(self.tag[i] as f64);
         buf.push(origin_index_val);
-        buf.push(self.cutoff_radius[i]);
+        buf.push(self.cutoff_radius[i] as f64);
         buf.push(self.atom_type[i] as f64);
-        buf.push(self.pos[i][0] + pos_offset[0]);
-        buf.push(self.pos[i][1] + pos_offset[1]);
-        buf.push(self.pos[i][2] + pos_offset[2]);
-        buf.push(self.vel[i][0]);
-        buf.push(self.vel[i][1]);
-        buf.push(self.vel[i][2]);
-        buf.push(self.force[i][0]);
-        buf.push(self.force[i][1]);
-        buf.push(self.force[i][2]);
-        buf.push(self.mass[i]);
+        buf.push(self.pos[i][0] as f64 + pos_offset[0]);
+        buf.push(self.pos[i][1] as f64 + pos_offset[1]);
+        buf.push(self.pos[i][2] as f64 + pos_offset[2]);
+        buf.push(self.vel[i][0] as f64);
+        buf.push(self.vel[i][1] as f64);
+        buf.push(self.vel[i][2] as f64);
+        buf.push(self.force[i][0] as f64);
+        buf.push(self.force[i][1] as f64);
+        buf.push(self.force[i][2] as f64);
+        buf.push(self.mass[i] as f64);
         buf.push(self.image[i][0] as f64);
         buf.push(self.image[i][1] as f64);
         buf.push(self.image[i][2] as f64);
@@ -457,13 +457,13 @@ impl Atom {
     pub fn unpack_atom(&mut self, buf: &[f64], is_ghost: bool) -> usize {
         self.tag.push(buf[0] as u32);
         self.origin_index.push(buf[1] as i32);
-        self.cutoff_radius.push(buf[2]);
+        self.cutoff_radius.push(buf[2] as Real);
         self.atom_type.push(buf[3] as u32);
-        self.pos.push([buf[4], buf[5], buf[6]]);
-        self.vel.push([buf[7], buf[8], buf[9]]);
-        self.force.push([buf[10], buf[11], buf[12]]);
-        self.mass.push(buf[13]);
-        self.inv_mass.push(1.0 / buf[13]);
+        self.pos.push([buf[4] as Real, buf[5] as Real, buf[6] as Real]);
+        self.vel.push([buf[7] as Real, buf[8] as Real, buf[9] as Real]);
+        self.force.push([buf[10] as Accum, buf[11] as Accum, buf[12] as Accum]);
+        self.mass.push(buf[13] as Real);
+        self.inv_mass.push((1.0 / buf[13]) as Real);
         self.image.push([buf[14] as i32, buf[15] as i32, buf[16] as i32]);
         self.is_ghost.push(is_ghost);
         ATOM_PACK_SIZE
@@ -474,12 +474,12 @@ impl Atom {
         self.tag.push(tag);
         self.atom_type.push(0);
         self.origin_index.push(0);
-        self.pos.push(pos);
+        self.pos.push([pos[0] as Real, pos[1] as Real, pos[2] as Real]);
         self.vel.push([0.0; 3]);
         self.force.push([0.0; 3]);
-        self.mass.push(mass);
-        self.inv_mass.push(1.0 / mass);
-        self.cutoff_radius.push(radius);
+        self.mass.push(mass as Real);
+        self.inv_mass.push((1.0 / mass) as Real);
+        self.cutoff_radius.push(radius as Real);
         self.image.push([0, 0, 0]);
         self.is_ghost.push(false);
     }
@@ -496,7 +496,8 @@ pub fn compute_ke(atoms: &Atom, mask: Option<&[bool]>) -> f64 {
             }
         }
         let v = atoms.vel[i];
-        ke += atoms.mass[i] * (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+        let (vx, vy, vz) = (v[0] as f64, v[1] as f64, v[2] as f64);
+        ke += atoms.mass[i] as f64 * (vx * vx + vy * vy + vz * vz);
     }
     0.5 * ke
 }

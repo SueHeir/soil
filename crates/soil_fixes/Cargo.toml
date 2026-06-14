@@ -9,6 +9,13 @@ description = "Method-agnostic position/velocity constraints for SOIL (e.g. pin)
 keywords = ["constraint", "fix", "dem", "simulation"]
 categories = ["simulation", "science"]
 
+[features]
+# Forward the precision config to soil_core. Exactly one must be active.
+default = ["precision-mixed"]
+precision-double = ["soil_core/precision-double"]
+precision-mixed = ["soil_core/precision-mixed"]
+precision-single = ["soil_core/precision-single"]
+
 [dependencies]
 soil_core = { path = "../soil_core", version = "0.1.3", default-features = false }
 grass_app = { git = "https://github.com/SueHeir/grass.git", rev = "ea21ea3629de990a717cc1421747901e5d64a66b" }

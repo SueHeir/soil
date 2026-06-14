@@ -26,7 +26,7 @@ pub use grass_mpi::{CommBackend, CommResource, SingleProcessComm, finalize_mpi};
 #[cfg(feature = "mpi_backend")]
 pub use grass_mpi::{MpiCommBackend, get_mpi_world};
 
-use crate::{Atom, AtomDataRegistry, CommState, Config, Domain, Neighbor, ParticleSimScheduleSet, ScheduleSetupSet};
+use crate::{Accum, Atom, AtomDataRegistry, CommState, Config, Domain, Neighbor, ParticleSimScheduleSet, Real, ScheduleSetupSet};
 
 // ── CommConfig ──────────────────────────────────────────────────────────────
 
@@ -270,7 +270,7 @@ fn pack_border_atoms(
     // Use ghost_cutoff if set (> 0), otherwise fall back to per-atom skin * 4.0 (DEM default)
     for i in 0..scan_end {
         let pos_dim = atoms.pos_component(i, dim);
-        let cut = if ghost_cutoff > 0.0 { ghost_cutoff } else { atoms.cutoff_radius[i] * 4.0 };
+        let cut = if ghost_cutoff > 0.0 { ghost_cutoff } else { atoms.cutoff_radius[i] as f64 * 4.0 };
         let in_skin = if swap == 0 {
             pos_dim < domain.sub_domain_low[dim] + cut
         } else {
@@ -357,8 +357,8 @@ fn unpack_forward(msg: &[f64], atoms: &mut Atom, registry: &AtomDataRegistry, re
     let stride = FORWARD_PACK_SIZE + extra_per_atom;
     for k in 0..recv_count {
         let base = k * stride;
-        atoms.pos[recv_start + k] = [msg[base], msg[base + 1], msg[base + 2]];
-        atoms.vel[recv_start + k] = [msg[base + 3], msg[base + 4], msg[base + 5]];
+        atoms.pos[recv_start + k] = [msg[base] as Real, msg[base + 1] as Real, msg[base + 2] as Real];
+        atoms.vel[recv_start + k] = [msg[base + 3] as Real, msg[base + 4] as Real, msg[base + 5] as Real];
         if extra_per_atom > 0 {
             registry.unpack_forward_all(recv_start + k, &msg[base + FORWARD_PACK_SIZE..]);
         }
@@ -386,9 +386,15 @@ fn forward_comm(
 
         // Pack positions and velocities (6 f64s per atom) + registry forward fields
         for &idx in &swap.send_indices {
+            // Geometry math is done in f64 (wire format); positions widen from Real.
+            let pos_f64 = [
+                atoms.pos[idx][0] as f64,
+                atoms.pos[idx][1] as f64,
+                atoms.pos[idx][2] as f64,
+            ];
             let offset = if is_self_send {
                 compute_per_atom_offset(
-                    &atoms.pos[idx],
+                    &pos_f64,
                     &swap.periodic_offset,
                     &domain.boundaries_low,
                     &domain.boundaries_high,
@@ -397,12 +403,12 @@ fn forward_comm(
             } else {
                 swap.periodic_offset
             };
-            buf.push(atoms.pos[idx][0] + offset[0]);
-            buf.push(atoms.pos[idx][1] + offset[1]);
-            buf.push(atoms.pos[idx][2] + offset[2]);
-            buf.push(atoms.vel[idx][0]);
-            buf.push(atoms.vel[idx][1]);
-            buf.push(atoms.vel[idx][2]);
+            buf.push(pos_f64[0] + offset[0]);
+            buf.push(pos_f64[1] + offset[1]);
+            buf.push(pos_f64[2] + offset[2]);
+            buf.push(atoms.vel[idx][0] as f64);
+            buf.push(atoms.vel[idx][1] as f64);
+            buf.push(atoms.vel[idx][2] as f64);
             registry.pack_forward_all(idx, buf);
         }
 
@@ -598,9 +604,9 @@ pub fn reverse_send_force(
             debug_assert!(atoms.is_ghost[i], "reverse_send_force: atom {} is not ghost", i);
             send_buff.push(atoms.tag[i] as f64);
             send_buff.push(atoms.origin_index[i] as f64);
-            send_buff.push(atoms.force[i][0]);
-            send_buff.push(atoms.force[i][1]);
-            send_buff.push(atoms.force[i][2]);
+            send_buff.push(atoms.force[i][0] as f64);
+            send_buff.push(atoms.force[i][1] as f64);
+            send_buff.push(atoms.force[i][2] as f64);
             registry.pack_reverse_all(i, &mut send_buff);
         }
 
@@ -613,9 +619,9 @@ pub fn reverse_send_force(
                     send_buff[base] as u32, atoms.tag[origin],
                     "reverse_send_force: tag mismatch"
                 );
-                atoms.force[origin][0] += send_buff[base + 2];
-                atoms.force[origin][1] += send_buff[base + 3];
-                atoms.force[origin][2] += send_buff[base + 4];
+                atoms.force[origin][0] += send_buff[base + 2] as Accum;
+                atoms.force[origin][1] += send_buff[base + 3] as Accum;
+                atoms.force[origin][2] += send_buff[base + 4] as Accum;
                 if per_atom > 5 {
                     registry.unpack_reverse_all(origin, &send_buff[base + 5..]);
                 }
@@ -630,9 +636,9 @@ pub fn reverse_send_force(
                     msg[base] as u32, atoms.tag[origin],
                     "reverse_send_force: tag mismatch"
                 );
-                atoms.force[origin][0] += msg[base + 2];
-                atoms.force[origin][1] += msg[base + 3];
-                atoms.force[origin][2] += msg[base + 4];
+                atoms.force[origin][0] += msg[base + 2] as Accum;
+                atoms.force[origin][1] += msg[base + 3] as Accum;
+                atoms.force[origin][2] += msg[base + 4] as Accum;
                 if per_atom > 5 {
                     registry.unpack_reverse_all(origin, &msg[base + 5..]);
                 }
@@ -645,9 +651,9 @@ pub fn reverse_send_force(
             for k in 0..recv_count {
                 let base = k * per_atom;
                 let origin = msg[base + 1] as usize;
-                atoms.force[origin][0] += msg[base + 2];
-                atoms.force[origin][1] += msg[base + 3];
-                atoms.force[origin][2] += msg[base + 4];
+                atoms.force[origin][0] += msg[base + 2] as Accum;
+                atoms.force[origin][1] += msg[base + 3] as Accum;
+                atoms.force[origin][2] += msg[base + 4] as Accum;
                 if per_atom > 5 {
                     registry.unpack_reverse_all(origin, &msg[base + 5..]);
                 }
@@ -683,6 +689,12 @@ pub fn exchange(
         let lo_proc = topo.swap_directions[0][dim]; // neighbor in -dim direction
         let hi_proc = topo.swap_directions[1][dim]; // neighbor in +dim direction
 
+        // Single lo/hi swap pass. Every atom is born inside its owner's subdomain
+        // (parallel insertion) and drifts < one sub-domain per step in the steady
+        // state, so a single hop to the *adjacent* rank always suffices — there is
+        // no need to loop. Received atoms are appended to the list and re-scanned
+        // by the next dimension's pass, which handles the diagonal (multi-dim)
+        // migration case.
         atoms_buff[0].clear(); // lo send buffer
         atoms_buff[1].clear(); // hi send buffer
         let mut lo_count = 0.0f64;
@@ -722,10 +734,11 @@ pub fn exchange(
             }
         };
 
-        // Scan local atoms: pack those outside subdomain in this dimension
+        // Scan local atoms: pack those outside subdomain in this dimension.
+        // `pos` is per-atom `Real` (f32 in mixed/single); compute displacement in f64.
         for i in (0..atoms.len()).rev() {
-            let disp_lo = min_image(atoms.pos[i][dim] - domain.sub_domain_low[dim]);
-            let disp_hi = min_image(atoms.pos[i][dim] - domain.sub_domain_high[dim]);
+            let disp_lo = min_image(atoms.pos[i][dim] as f64 - domain.sub_domain_low[dim]);
+            let disp_hi = min_image(atoms.pos[i][dim] as f64 - domain.sub_domain_high[dim]);
             if disp_lo < 0.0 {
                 lo_count += 1.0;
                 atoms.pack_exchange(i, &mut atoms_buff[0]);
@@ -791,6 +804,39 @@ pub fn exchange(
         }
     }
 
+    // Safety check (LAMMPS-style "lost atoms"): after the single-hop pass, if any
+    // local atom is still outside this subdomain, an atom moved more than one
+    // sub-domain in a step (timestep/skin too large, or it was not born in its
+    // owner). We do NOT loop — emit a clear one-time warning so the symptom is
+    // visible without putting a collective on the per-step hot path.
+    static LOST_ATOMS_WARNED: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+    let mut still_outside = 0usize;
+    for i in 0..atoms.len() {
+        for dim in 0..3usize {
+            if decomp[dim] == 1 {
+                continue;
+            }
+            if (atoms.pos[i][dim] as f64) < domain.sub_domain_low[dim]
+                || (atoms.pos[i][dim] as f64) >= domain.sub_domain_high[dim]
+            {
+                still_outside += 1;
+                break;
+            }
+        }
+    }
+    if still_outside > 0
+        && !LOST_ATOMS_WARNED.swap(true, std::sync::atomic::Ordering::Relaxed)
+    {
+        eprintln!(
+            "WARNING: exchange() left {} atom(s) outside their subdomain on rank {} \
+             after a single-hop pass — an atom moved more than one sub-domain in a \
+             step (timestep or neighbor skin too large). Atoms may be lost.",
+            still_outside,
+            comm.rank()
+        );
+    }
+
     buffers.exchange_buffs = atoms_buff;
 
     // ── Single-hop safety check ──────────────────────────────────────────────
@@ -809,8 +855,8 @@ pub fn exchange(
             if decomp[dim] == 1 {
                 continue;
             }
-            if atoms.pos[i][dim] < domain.sub_domain_low[dim]
-                || atoms.pos[i][dim] >= domain.sub_domain_high[dim]
+            if (atoms.pos[i][dim] as f64) < domain.sub_domain_low[dim]
+                || (atoms.pos[i][dim] as f64) >= domain.sub_domain_high[dim]
             {
                 lost += 1;
                 break;

@@ -33,7 +33,7 @@
 //! domain bounds and remapping atoms before the Verlet position update.
 
 use grass_app::prelude::*;
-use soil_core::{Atom, CommResource, Config, Domain, ParticleSimScheduleSet, ScheduleSetupSet, StageOverrides};
+use soil_core::{Atom, CommResource, Config, Domain, ParticleSimScheduleSet, Real, ScheduleSetupSet, StageOverrides};
 use soil_core::Neighbor;
 use grass_scheduler::prelude::*;
 use serde::Deserialize;
@@ -440,9 +440,10 @@ fn apply_deform(
             let old_center = (old_lo + old_hi) * 0.5;
 
             for i in 0..nlocal {
-                // Affine transform: shift to old center, scale, shift to new center
+                // Affine transform: shift to old center, scale, shift to new center.
+                // Geometry is f64; widen pos, transform, store back as Real.
                 atoms.pos[i][dim] =
-                    new_center + (atoms.pos[i][dim] - old_center) * scale;
+                    (new_center + (atoms.pos[i][dim] as f64 - old_center) * scale) as Real;
             }
         }
 

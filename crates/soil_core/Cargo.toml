@@ -10,8 +10,14 @@ keywords = ["dem", "simulation", "mpi", "domain-decomposition"]
 categories = ["simulation", "science"]
 
 [features]
-default = ["mpi_backend"]
+default = ["mpi_backend", "precision-mixed"]
 mpi_backend = ["grass_mpi/mpi_backend"]
+
+# Mutually-exclusive precision configs (see src/precision.rs). Exactly one must
+# be active; the default feature set selects `precision-mixed`.
+precision-double = []
+precision-mixed = []
+precision-single = []
 
 [dependencies]
 grass_scheduler = { git = "https://github.com/SueHeir/grass.git", rev = "ea21ea3629de990a717cc1421747901e5d64a66b" }

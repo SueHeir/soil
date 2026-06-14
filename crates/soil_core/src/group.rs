@@ -117,7 +117,9 @@ fn evaluate_membership(def: &GroupDef, atoms: &Atom, i: usize) -> bool {
         }
     }
     if let Some(ref r) = def.region {
-        if !r.contains(&atoms.pos[i]) {
+        // `pos` is `Real` (f32 in mixed/single); regions are defined in f64.
+        let p = atoms.pos[i];
+        if !r.contains(&[p[0] as f64, p[1] as f64, p[2] as f64]) {
             return false;
         }
     }

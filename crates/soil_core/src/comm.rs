@@ -15,6 +15,7 @@
 //! 4. **Reverse comm**: accumulate forces from ghosts back to their owners
 
 use std::process::exit;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use grass_app::prelude::*;
 use grass_scheduler::prelude::*;
@@ -687,15 +688,51 @@ pub fn exchange(
         let mut lo_count = 0.0f64;
         let mut hi_count = 0.0f64;
 
+        // Periodic-wrap-aware classification (keeps exchange single-hop):
+        //
+        // `pbc` runs before exchange and wraps every atom into the GLOBAL box.
+        // An atom that physically left the low-edge rank's subdomain (pos < 0)
+        // is wrapped to pos ≈ box_high, which is numerically `>= sub_domain_high`
+        // and would naively be sent to the +dim (hi) neighbor — the WRONG
+        // direction. Its true owner is the periodic lo neighbor (the rank at the
+        // far high edge). With ≥3 ranks in a periodic dim those are different
+        // ranks, so the raw comparison mis-routes the atom and a single hop
+        // never reaches the owner (the original ≥3-proc SIGSEGV).
+        //
+        // Fix: classify by the periodic minimum-image displacement from the
+        // subdomain faces. A wrapped atom near box_high then has a small NEGATIVE
+        // min-image displacement from the low face → correctly routed lo; a
+        // genuine forward migrant just past sub_high keeps a small positive
+        // displacement → routed hi. A single lo/hi swap per dim still suffices
+        // because each atom moves at most one subdomain per step.
+        let periodic = domain.periodic_flags()[dim];
+        let box_size = domain.size[dim];
+        let half = 0.5 * box_size;
+        let min_image = |delta: f64| -> f64 {
+            if periodic {
+                if delta > half {
+                    delta - box_size
+                } else if delta < -half {
+                    delta + box_size
+                } else {
+                    delta
+                }
+            } else {
+                delta
+            }
+        };
+
         // Scan local atoms: pack those outside subdomain in this dimension
         for i in (0..atoms.len()).rev() {
-            if atoms.pos[i][dim] < domain.sub_domain_low[dim] {
+            let disp_lo = min_image(atoms.pos[i][dim] - domain.sub_domain_low[dim]);
+            let disp_hi = min_image(atoms.pos[i][dim] - domain.sub_domain_high[dim]);
+            if disp_lo < 0.0 {
                 lo_count += 1.0;
                 atoms.pack_exchange(i, &mut atoms_buff[0]);
                 registry.pack_all(i, &mut atoms_buff[0]);
                 atoms.swap_remove(i);
                 registry.swap_remove_all(i);
-            } else if atoms.pos[i][dim] >= domain.sub_domain_high[dim] {
+            } else if disp_hi >= 0.0 {
                 hi_count += 1.0;
                 atoms.pack_exchange(i, &mut atoms_buff[1]);
                 registry.pack_all(i, &mut atoms_buff[1]);
@@ -755,6 +792,44 @@ pub fn exchange(
     }
 
     buffers.exchange_buffs = atoms_buff;
+
+    // ── Single-hop safety check ──────────────────────────────────────────────
+    // Exchange is intentionally single-hop (one lo/hi swap per dimension): an
+    // atom can migrate at most one subdomain per step. With parallel insertion
+    // every atom is born inside its owner's subdomain, so a single hop always
+    // suffices — provided no atom moves more than one subdomain in a step
+    // (which would mean dt/skin is too large) and no insertion placed an atom
+    // far from its owner. If, after the pass, any local atom is still outside
+    // this subdomain in a decomposed dimension, the single hop did NOT suffice;
+    // warn once so the bug/instability is visible rather than silently
+    // corrupting the bin index on the next neighbor build.
+    let mut lost = 0usize;
+    for i in 0..atoms.len() {
+        for dim in 0..3usize {
+            if decomp[dim] == 1 {
+                continue;
+            }
+            if atoms.pos[i][dim] < domain.sub_domain_low[dim]
+                || atoms.pos[i][dim] >= domain.sub_domain_high[dim]
+            {
+                lost += 1;
+                break;
+            }
+        }
+    }
+    if lost > 0 {
+        static WARNED: AtomicBool = AtomicBool::new(false);
+        if !WARNED.swap(true, Ordering::Relaxed) {
+            eprintln!(
+                "WARNING: single-hop exchange left {} atom(s) outside rank {}'s subdomain. \
+                 An atom moved more than one subdomain in a step (timestep/skin too large) \
+                 or was inserted far from its owner. These atoms will be mis-binned. \
+                 (This warning is emitted once.)",
+                lost,
+                comm.rank()
+            );
+        }
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -853,6 +928,62 @@ mod tests {
         assert_eq!(offset0[1], 0.006);
         // swap=1: ghost below → -0.006
         assert_eq!(offset1[1], -0.006);
+    }
+
+    /// Mirror of the periodic min-image lo/hi classification used in `exchange`.
+    /// Returns -1 for "send lo", +1 for "send hi", 0 for "keep local".
+    fn classify(pos: f64, sub_low: f64, sub_high: f64, box_size: f64, periodic: bool) -> i32 {
+        let half = 0.5 * box_size;
+        let min_image = |delta: f64| -> f64 {
+            if periodic {
+                if delta > half {
+                    delta - box_size
+                } else if delta < -half {
+                    delta + box_size
+                } else {
+                    delta
+                }
+            } else {
+                delta
+            }
+        };
+        let disp_lo = min_image(pos - sub_low);
+        let disp_hi = min_image(pos - sub_high);
+        if disp_lo < 0.0 {
+            -1
+        } else if disp_hi >= 0.0 {
+            1
+        } else {
+            0
+        }
+    }
+
+    #[test]
+    fn exchange_classification_periodic_wrap_4procs() {
+        // Box [0,16), 4 ranks in this periodic dim → subdomain width 4.
+        let box_size = 16.0;
+        // Rank 0: [0,4). An atom that left at x<0 is PBC-wrapped to ≈15.9.
+        // It must be routed LO (to the far-high-edge rank), not HI.
+        assert_eq!(classify(15.9, 0.0, 4.0, box_size, true), -1, "wrapped low→ lo");
+        // A genuine forward migrant just past sub_high stays HI.
+        assert_eq!(classify(4.1, 0.0, 4.0, box_size, true), 1, "forward → hi");
+        // Interior atom stays local.
+        assert_eq!(classify(2.0, 0.0, 4.0, box_size, true), 0, "interior → local");
+
+        // Rank 3 (high edge): [12,16). An atom that left at x≥16 is wrapped to ≈0.1
+        // and must be routed HI (to rank 0), not LO.
+        assert_eq!(classify(0.1, 12.0, 16.0, box_size, true), 1, "wrapped high → hi");
+        // Backward migrant just below sub_low stays LO.
+        assert_eq!(classify(11.9, 12.0, 16.0, box_size, true), -1, "backward → lo");
+    }
+
+    #[test]
+    fn exchange_classification_nonperiodic() {
+        // Non-periodic dim: plain comparison, no wrap.
+        let box_size = 16.0;
+        assert_eq!(classify(4.1, 0.0, 4.0, box_size, false), 1);
+        assert_eq!(classify(-0.1, 0.0, 4.0, box_size, false), -1);
+        assert_eq!(classify(2.0, 0.0, 4.0, box_size, false), 0);
     }
 
     #[test]

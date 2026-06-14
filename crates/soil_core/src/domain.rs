@@ -247,7 +247,7 @@ boundary_z = "periodic"
         Config::load::<DomainConfig>(app, "domain");
 
         app.add_resource(Domain::new())
-            .add_setup_system(domain_read_input, ScheduleSetupSet::Setup)
+            .add_setup_system(domain_read_input.label("domain_read_input"), ScheduleSetupSet::Setup)
             .add_update_system(
                 shrink_wrap.label("shrink_wrap").before("pbc"),
                 ParticleSimScheduleSet::PreExchange,

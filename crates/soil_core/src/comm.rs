@@ -15,6 +15,7 @@
 //! 4. **Reverse comm**: accumulate forces from ghosts back to their owners
 
 use std::process::exit;
+#[cfg(debug_assertions)]
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use grass_app::prelude::*;
@@ -270,11 +271,12 @@ fn pack_border_atoms(
     periodic_offset: f64,
     domain: &Domain,
     send_buff: &mut Vec<f64>,
+    packed_indices: &mut Vec<usize>,
     scan_end: usize,
     ghost_cutoff: f64,
-) -> (i32, Vec<usize>) {
+) -> i32 {
     let mut count = 0i32;
-    let mut packed_indices = Vec::new();
+    packed_indices.clear();
     // Use ghost_cutoff if set (> 0), otherwise fall back to per-atom skin * 4.0 (DEM default)
     for i in 0..scan_end {
         let pos_dim = atoms.pos_component(i, dim);
@@ -293,7 +295,7 @@ fn pack_border_atoms(
             count += 1;
         }
     }
-    (count, packed_indices)
+    count
 }
 
 fn unpack_ghost_atoms(atoms: &mut Atom, registry: &AtomDataRegistry, buf: &[f64], count: usize) {
@@ -312,39 +314,6 @@ fn unpack_ghost_atoms(atoms: &mut Atom, registry: &AtomDataRegistry, buf: &[f64]
 /// Per-atom stride in forward_comm: pos(3) + vel(3) = 6 f64s (base fields only).
 const FORWARD_PACK_SIZE: usize = 6;
 
-/// For self-sends (single-process periodic), compute the periodic offset for
-/// an atom's ghost. Uses the stored swap direction to determine which periodic
-/// image to create.
-///
-/// The stored_offset sign indicates the swap direction:
-///   +size → ghost should be above (atom was near low boundary, swap=0)
-///   -size → ghost should be below (atom was near high boundary, swap=1)
-///
-/// After PBC wrapping, the atom may have moved to the other side of the box.
-/// We use the stored direction sign and the atom's current position to ensure
-/// the ghost always ends up on the opposite side from the atom.
-#[inline]
-fn compute_per_atom_offset(
-    _pos: &[f64; 3],
-    stored_offset: &[f64; 3],
-    _boundaries_low: &[f64; 3],
-    _boundaries_high: &[f64; 3],
-    _size: &[f64; 3],
-) -> [f64; 3] {
-    // The periodic-image offset of a ghost is FIXED at the value established when
-    // the neighbor list was built (`stored_offset`). It must NOT be recomputed or
-    // flipped from the atom's *current* position: between rebuilds an atom can drift
-    // across a periodic boundary, and flipping the offset then jerks the ghost by a
-    // full box length — dropping a real contact and reintroducing it with deep
-    // overlap at the next rebuild, a spurious force that injects energy (this was a
-    // real Haff-cooling energy-conservation bug, previously masked by a forced
-    // rebuild on every boundary crossing). The ghost simply tracks its owner via the
-    // constant shift; this stays correct as long as atoms move less than the
-    // neighbor skin between rebuilds (guaranteed by the rebuild schedule) and pbc
-    // wraps + ghost refresh happen together on a FullRebuild.
-    *stored_offset
-}
-
 fn unpack_forward(msg: &[f64], atoms: &mut Atom, registry: &AtomDataRegistry, recv_start: usize, recv_count: usize, extra_per_atom: usize) {
     let stride = FORWARD_PACK_SIZE + extra_per_atom;
     for k in 0..recv_count {
@@ -362,7 +331,6 @@ fn forward_comm(
     registry: &AtomDataRegistry,
     topo: &CommTopology,
     comm: &dyn CommBackend,
-    domain: &Domain,
     buf: &mut Vec<f64>,
     recv: &mut Vec<f64>,
 ) {
@@ -373,25 +341,17 @@ fn forward_comm(
         buf.clear();
         buf.reserve(swap.send_indices.len() * stride);
 
-        // For self-sends (single-process periodic), recompute the periodic offset
-        // per atom based on current position. After PBC wrapping, an atom originally
-        // near one boundary may now be near the other, so the stored offset is stale.
-        // Recomputing ensures the ghost ends up at the correct periodic image.
-        let is_self_send = swap.to_proc == rank;
+        // The periodic-image offset of a ghost is FIXED at the value established when
+        // the neighbor list was built (`swap.periodic_offset`) — for self-sends and MPI
+        // sends alike. It must NOT be recomputed/flipped from the atom's *current*
+        // position: between rebuilds an atom can drift across a periodic boundary, and
+        // flipping the offset jerks the ghost a full box length — dropping a real
+        // contact and reintroducing it with deep overlap at the next rebuild, a spurious
+        // force that injects energy (a real Haff-cooling energy-conservation bug).
+        let offset = swap.periodic_offset;
 
         // Pack positions and velocities (6 f64s per atom) + registry forward fields
         for &idx in &swap.send_indices {
-            let offset = if is_self_send {
-                compute_per_atom_offset(
-                    &atoms.pos[idx],
-                    &swap.periodic_offset,
-                    &domain.boundaries_low,
-                    &domain.boundaries_high,
-                    &domain.size,
-                )
-            } else {
-                swap.periodic_offset
-            };
             buf.push(atoms.pos[idx][0] + offset[0]);
             buf.push(atoms.pos[idx][1] + offset[1]);
             buf.push(atoms.pos[idx][2] + offset[2]);
@@ -426,20 +386,19 @@ fn forward_comm(
 
 /// Lightweight ghost position update: forward-comm only (no full rebuild).
 ///
-/// Gated by `run_if(in_state(CommState::CommunicateOnly))`.
-/// Recomputes per-atom periodic offsets for self-sends, so ghost
-/// positions stay correct even when atoms cross PBC boundaries between rebuilds.
+/// Gated by `run_if(in_state(CommState::CommunicateOnly))`. Ghost periodic
+/// offsets are the fixed values recorded at the last rebuild (see `forward_comm`),
+/// so positions stay correct even when atoms cross PBC boundaries between rebuilds.
 pub fn forward_comm_borders(
     comm: Res<CommResource>,
     topo: Res<CommTopology>,
     mut atoms: ResMut<Atom>,
-    domain: Res<Domain>,
     registry: Res<AtomDataRegistry>,
     mut buffers: ResMut<CommBuffers>,
 ) {
     let mut send_buff = std::mem::take(&mut buffers.border_send_buff);
     let mut recv_buff = std::mem::take(&mut buffers.recv_buff);
-    forward_comm(&mut atoms, &registry, &topo, &**comm, &domain, &mut send_buff, &mut recv_buff);
+    forward_comm(&mut atoms, &registry, &topo, &**comm, &mut send_buff, &mut recv_buff);
     buffers.border_send_buff = send_buff;
     buffers.recv_buff = recv_buff;
 }
@@ -464,9 +423,10 @@ pub fn borders(
         atoms.nghost = 0;
     }
 
-    let local_count = atoms.len() as f64;
-    let global_count = comm.all_reduce_sum_f64(local_count);
-    atoms.natoms = global_count as u64;
+    // `natoms` (global count) is reporting-only — nothing in the neighbor/force/
+    // exchange/integrator path reads it. It's refreshed by `print_thermo` (which
+    // already runs a collective on its cadence), so we no longer pay an all_reduce
+    // collective here on every ghost rebuild.
     atoms.nlocal = atoms.len() as u32;
     atoms.nghost = 0;
 
@@ -490,8 +450,11 @@ pub fn borders(
         }
     }
 
-    // Clear sendlists for fresh recording
-    topo.swap_data.clear();
+    // Refill sendlists in place across rebuilds: walk existing SwapData entries
+    // (reusing their `send_indices` allocations) instead of clear() + push, which
+    // would free and re-grow ~6 Vecs every rebuild. The number of swaps is stable
+    // after the first rebuild (maxneed is constant), so this is allocation-free.
+    let mut swap_idx = 0usize;
 
     let rank = comm.rank();
     let mut scan_end = atoms.nlocal as usize;
@@ -509,7 +472,21 @@ pub fn borders(
                 let mut pbc_shift = [0.0; 3];
                 pbc_shift[dim] = periodic_offset * domain.size[dim];
 
-                let (count, packed_indices) = pack_border_atoms(
+                // Get-or-create this swap's persistent entry, and borrow its
+                // send_indices buffer (capacity retained across rebuilds).
+                if swap_idx == topo.swap_data.len() {
+                    topo.swap_data.push(SwapData {
+                        send_indices: Vec::new(),
+                        recv_start: 0,
+                        recv_count: 0,
+                        to_proc: -1,
+                        from_proc: -1,
+                        periodic_offset: [0.0; 3],
+                    });
+                }
+                let mut packed_indices = std::mem::take(&mut topo.swap_data[swap_idx].send_indices);
+
+                let count = pack_border_atoms(
                     &mut atoms,
                     &registry,
                     dim,
@@ -517,6 +494,7 @@ pub fn borders(
                     periodic_offset,
                     &domain,
                     &mut send_buff,
+                    &mut packed_indices,
                     dim_scan_end,
                     domain.ghost_cutoff,
                 );
@@ -555,18 +533,21 @@ pub fn borders(
                     swap_recv_count = 0;
                 }
 
-                topo.swap_data.push(SwapData {
-                    send_indices: packed_indices,
-                    recv_start: swap_recv_start,
-                    recv_count: swap_recv_count,
-                    to_proc,
-                    from_proc,
-                    periodic_offset: pbc_shift,
-                });
+                let entry = &mut topo.swap_data[swap_idx];
+                entry.send_indices = packed_indices; // give the buffer back (capacity kept)
+                entry.recv_start = swap_recv_start;
+                entry.recv_count = swap_recv_count;
+                entry.to_proc = to_proc;
+                entry.from_proc = from_proc;
+                entry.periodic_offset = pbc_shift;
+                swap_idx += 1;
             }
             scan_end = atoms.nlocal as usize + atoms.nghost as usize;
         }
     }
+    // Drop any stale entries from a prior rebuild that produced more swaps
+    // (only possible if maxneed shrank, which it cannot after the first rebuild).
+    topo.swap_data.truncate(swap_idx);
     buffers.border_send_buff = send_buff;
 }
 
@@ -801,7 +782,7 @@ pub fn exchange(
 
     buffers.exchange_buffs = atoms_buff;
 
-    // ── Single-hop safety check ──────────────────────────────────────────────
+    // ── Single-hop safety check (debug builds only) ──────────────────────────
     // Exchange is intentionally single-hop (one lo/hi swap per dimension): an
     // atom can migrate at most one subdomain per step. With parallel insertion
     // every atom is born inside its owner's subdomain, so a single hop always
@@ -809,33 +790,37 @@ pub fn exchange(
     // (which would mean dt/skin is too large) and no insertion placed an atom
     // far from its owner. If, after the pass, any local atom is still outside
     // this subdomain in a decomposed dimension, the single hop did NOT suffice;
-    // warn once so the bug/instability is visible rather than silently
-    // corrupting the bin index on the next neighbor build.
-    let mut lost = 0usize;
-    for i in 0..atoms.len() {
-        for dim in 0..3usize {
-            if decomp[dim] == 1 {
-                continue;
-            }
-            if atoms.pos[i][dim] < domain.sub_domain_low[dim]
-                || atoms.pos[i][dim] >= domain.sub_domain_high[dim]
-            {
-                lost += 1;
-                break;
+    // warn once so the bug/instability is visible. This is an O(N) post-condition
+    // scan, so it's gated out of release builds (it's a developer assertion, not
+    // production work).
+    #[cfg(debug_assertions)]
+    {
+        let mut lost = 0usize;
+        for i in 0..atoms.len() {
+            for dim in 0..3usize {
+                if decomp[dim] == 1 {
+                    continue;
+                }
+                if atoms.pos[i][dim] < domain.sub_domain_low[dim]
+                    || atoms.pos[i][dim] >= domain.sub_domain_high[dim]
+                {
+                    lost += 1;
+                    break;
+                }
             }
         }
-    }
-    if lost > 0 {
-        static WARNED: AtomicBool = AtomicBool::new(false);
-        if !WARNED.swap(true, Ordering::Relaxed) {
-            eprintln!(
-                "WARNING: single-hop exchange left {} atom(s) outside rank {}'s subdomain. \
-                 An atom moved more than one subdomain in a step (timestep/skin too large) \
-                 or was inserted far from its owner. These atoms will be mis-binned. \
-                 (This warning is emitted once.)",
-                lost,
-                comm.rank()
-            );
+        if lost > 0 {
+            static WARNED: AtomicBool = AtomicBool::new(false);
+            if !WARNED.swap(true, Ordering::Relaxed) {
+                eprintln!(
+                    "WARNING: single-hop exchange left {} atom(s) outside rank {}'s subdomain. \
+                     An atom moved more than one subdomain in a step (timestep/skin too large) \
+                     or was inserted far from its owner. These atoms will be mis-binned. \
+                     (This warning is emitted once.)",
+                    lost,
+                    comm.rank()
+                );
+            }
         }
     }
 }
@@ -863,79 +848,6 @@ mod tests {
         assert_eq!(pos_to_rank([0, 1, 0], decomp), 2);
         assert_eq!(pos_to_rank([1, 0, 0], decomp), 4);
         assert_eq!(pos_to_rank([1, 1, 1], decomp), 7);
-    }
-
-    #[test]
-    fn compute_per_atom_offset_follows_stored_direction() {
-        let boundaries_low = [0.0, 0.0, 0.0];
-        let boundaries_high = [10.0, 10.0, 10.0];
-        let size = [10.0, 10.0, 10.0];
-
-        // stored > 0 means swap=0 (low boundary ghost, shift +size)
-        // stored < 0 means swap=1 (high boundary ghost, shift -size)
-        let stored = [10.0, 0.0, -10.0];
-
-        // Atom in lower half: stored direction produces ghost outside box
-        let pos = [2.0, 5.0, 3.0];
-        let offset = compute_per_atom_offset(&pos, &stored, &boundaries_low, &boundaries_high, &size);
-        assert_eq!(offset[0], 10.0);   // stored +, ghost at 12 (outside) → keep +size
-        assert_eq!(offset[1], 0.0);    // no periodic
-        assert_eq!(offset[2], -10.0);  // stored -, ghost at -7 (outside) → keep -size
-
-        // Atom in upper half
-        let pos = [8.0, 5.0, 8.0];
-        let offset = compute_per_atom_offset(&pos, &stored, &boundaries_low, &boundaries_high, &size);
-        assert_eq!(offset[0], 10.0);   // stored +, ghost at 18 (outside) → keep +size
-        assert_eq!(offset[1], 0.0);
-        assert_eq!(offset[2], -10.0);  // stored -, ghost at -2 (outside) → keep -size
-    }
-
-    #[test]
-    fn compute_per_atom_offset_pbc_wrapped_atom() {
-        let boundaries_low = [0.0, 0.0, 0.0];
-        let boundaries_high = [10.0, 10.0, 10.0];
-        let size = [10.0, 10.0, 10.0];
-
-        // Atom was originally near high boundary (z=9), stored=-10 (swap=1).
-        // After PBC wrapping, atom is now at z=1. The ghost should flip to +size.
-        let stored = [0.0, 0.0, -10.0];
-        let pos = [5.0, 5.0, 1.0];
-        let offset = compute_per_atom_offset(&pos, &stored, &boundaries_low, &boundaries_high, &size);
-        // ghost at 1-10=-9 → outside → keep -size
-        assert_eq!(offset[2], -10.0);
-
-        // Atom was originally near low boundary (x=1), stored=+10 (swap=0).
-        // After PBC wrapping, atom is now at x=9. Ghost at 9+10=19 → outside → keep +size
-        let stored = [10.0, 0.0, 0.0];
-        let pos = [9.0, 5.0, 5.0];
-        let offset = compute_per_atom_offset(&pos, &stored, &boundaries_low, &boundaries_high, &size);
-        assert_eq!(offset[0], 10.0);
-    }
-
-    #[test]
-    fn compute_per_atom_offset_overlap_zone() {
-        // Critical test: atom in the overlap zone (near midpoint) with
-        // different stored directions must produce DIFFERENT ghost positions.
-        let boundaries_low = [0.0, 0.0, 0.0];
-        let boundaries_high = [0.006, 0.006, 0.1];
-        let size = [0.006, 0.006, 0.1];
-
-        let pos = [0.003, 0.003, 0.05]; // at midpoint of y
-
-        // swap=0 direction: stored_offset positive
-        let stored_swap0 = [0.0, 0.006, 0.0];
-        let offset0 = compute_per_atom_offset(&pos, &stored_swap0, &boundaries_low, &boundaries_high, &size);
-
-        // swap=1 direction: stored_offset negative
-        let stored_swap1 = [0.0, -0.006, 0.0];
-        let offset1 = compute_per_atom_offset(&pos, &stored_swap1, &boundaries_low, &boundaries_high, &size);
-
-        // The two ghosts MUST be at different positions
-        assert_ne!(offset0[1], offset1[1], "Ghosts from different swaps must have different offsets");
-        // swap=0: ghost above → +0.006
-        assert_eq!(offset0[1], 0.006);
-        // swap=1: ghost below → -0.006
-        assert_eq!(offset1[1], -0.006);
     }
 
     /// Mirror of the periodic min-image lo/hi classification used in `exchange`.

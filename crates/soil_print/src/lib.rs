@@ -794,7 +794,7 @@ pub fn setup_thermo(
 /// but only rank 0 prints the formatted output line.
 #[allow(clippy::too_many_arguments)]
 pub fn print_thermo(
-    atoms: Res<Atom>,
+    mut atoms: ResMut<Atom>,
     run_state: Res<RunState>,
     comm: Res<CommResource>,
     neighbor: Res<Neighbor>,
@@ -810,7 +810,10 @@ pub fn print_thermo(
     // We compute these eagerly so all ranks call allreduce together.
     let local_ke_all = compute_ke(&atoms, None);
     let global_ke_all = comm.all_reduce_sum_f64(local_ke_all);
-    let global_atoms_all = atoms.natoms as f64;
+    // Refresh the global atom count here (reporting-only; the ghost-rebuild path no
+    // longer maintains it). Piggybacks on this thermo collective — no new barrier.
+    let global_atoms_all = comm.all_reduce_sum_f64(atoms.nlocal as f64);
+    atoms.natoms = global_atoms_all as u64;
     let local_neighbors = neighbor.neighbor_indices.len() as f64;
     let global_neighbors = comm.all_reduce_sum_f64(local_neighbors);
 

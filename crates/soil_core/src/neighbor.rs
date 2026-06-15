@@ -147,6 +147,13 @@ pub struct Neighbor {
     pub bin_atom_sorted_idx: Vec<u32>,
     /// Positions reordered by bin for cache-friendly inner loop access.
     pub bin_sorted_pos: Vec<[f64; 3]>,
+    /// Scratch for the O(N) counting sort in `sort_atoms_by_bin`, reused across
+    /// rebuilds. Dedicated (not shared with the `bin_*` build buffers) so the
+    /// spatial sort stays decoupled from the neighbor build.
+    pub sort_cell: Vec<u32>,
+    pub sort_counts: Vec<u32>,
+    pub sort_perm: Vec<usize>,
+    pub sort_pos_scratch: Vec<[f64; 3]>,
     /// When all atoms share the same cutoff radius, cache `(2 * r * skin_fraction)²`
     /// to skip per-pair cutoff computation. `None` for polydisperse systems.
     pub cached_uniform_cutoff_sq: Option<f64>,
@@ -260,6 +267,10 @@ impl Neighbor {
             bin_sorted_atoms: Vec::new(),
             bin_atom_sorted_idx: Vec::new(),
             bin_sorted_pos: Vec::new(),
+            sort_cell: Vec::new(),
+            sort_counts: Vec::new(),
+            sort_perm: Vec::new(),
+            sort_pos_scratch: Vec::new(),
             cached_uniform_cutoff_sq: None,
             cached_max_cutoff: 0.0,
             newton: true,
@@ -577,10 +588,38 @@ fn displacement_exceeded(atoms: &Atom, neighbor: &Neighbor) -> bool {
     // so ghost positions stay correct after PBC wrapping.
     let [bx, by, bz] = neighbor.pbc_box;
     let [px, py, pz] = neighbor.pbc_flags;
+    let n = neighbor.last_build_pos.len();
+
+    if px && py && pz {
+        // Fully-periodic fast path (the common case): branchless nearest-image
+        // `d - box * round(d/box)` with an FMA reduction. No per-axis `if`, so the
+        // straight-line body auto-vectorizes; `round` lowers to a single rounding
+        // instruction. Equivalent to the per-axis branch form for any physical
+        // per-step displacement (which is << half a box).
+        let ibx = 1.0 / bx;
+        let iby = 1.0 / by;
+        let ibz = 1.0 / bz;
+        for idx in 0..n {
+            let p = unsafe { *atoms.pos.get_unchecked(idx) };
+            let q = unsafe { *neighbor.last_build_pos.get_unchecked(idx) };
+            let mut dx = p[0] - q[0];
+            let mut dy = p[1] - q[1];
+            let mut dz = p[2] - q[2];
+            dx -= bx * (dx * ibx).round();
+            dy -= by * (dy * iby).round();
+            dz -= bz * (dz * ibz).round();
+            if dx.mul_add(dx, dy.mul_add(dy, dz * dz)) > threshold_sq {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // General path: mixed / non-periodic axes, per-axis single-image correction.
     let hbx = bx * 0.5;
     let hby = by * 0.5;
     let hbz = bz * 0.5;
-    for idx in 0..neighbor.last_build_pos.len() {
+    for idx in 0..n {
         let mut dx = atoms.pos[idx][0] - neighbor.last_build_pos[idx][0];
         let mut dy = atoms.pos[idx][1] - neighbor.last_build_pos[idx][1];
         let mut dz = atoms.pos[idx][2] - neighbor.last_build_pos[idx][2];
@@ -726,25 +765,49 @@ pub fn sort_atoms_by_bin(mut atoms: ResMut<Atom>, mut neighbor: ResMut<Neighbor>
     let inv_bsx = 1.0 / neighbor.bin_size[0];
     let inv_bsy = 1.0 / neighbor.bin_size[1];
     let inv_bsz = 1.0 / neighbor.bin_size[2];
+    let nx = neighbor.bin_count[0];
     let ny = neighbor.bin_count[1];
     let nz = neighbor.bin_count[2];
-    let nx = neighbor.bin_count[0];
+    let total_cells = (nx * ny * nz) as usize;
+    let [ox, oy, oz] = neighbor.bin_origin;
 
-    let mut indices: Vec<(u32, usize)> = (0..nlocal)
-        .map(|i| {
-            let cx = ((atoms.pos[i][0] - neighbor.bin_origin[0]) * inv_bsx).floor() as i32;
-            let cy = ((atoms.pos[i][1] - neighbor.bin_origin[1]) * inv_bsy).floor() as i32;
-            let cz = ((atoms.pos[i][2] - neighbor.bin_origin[2]) * inv_bsz).floor() as i32;
-            let cx = cx.clamp(0, nx - 1);
-            let cy = cy.clamp(0, ny - 1);
-            let cz = cz.clamp(0, nz - 1);
-            ((cx * ny * nz + cy * nz + cz) as u32, i)
-        })
-        .collect();
+    // O(N) stable counting sort by bin cell (replaces an O(N log N) comparison sort
+    // + per-rebuild allocations). Within a bin, atoms keep ascending original index.
+    // Note the *neighbor build* re-sorts independently with its own stable counting
+    // sort, so this spatial sort only affects cache locality, never the pair set.
+    // Scratch buffers are reused across rebuilds.
+    let mut cell = std::mem::take(&mut neighbor.sort_cell);
+    let mut counts = std::mem::take(&mut neighbor.sort_counts);
+    let mut perm = std::mem::take(&mut neighbor.sort_perm);
+    let mut pos_scratch = std::mem::take(&mut neighbor.sort_pos_scratch);
+    cell.clear();
+    cell.resize(nlocal, 0u32);
+    counts.clear();
+    counts.resize(total_cells + 1, 0u32);
+    perm.clear();
+    perm.resize(nlocal, 0usize);
 
-    indices.sort_unstable_by_key(|&(bin, _)| bin);
-
-    let perm: Vec<usize> = indices.iter().map(|&(_, i)| i).collect();
+    // 1. assign each atom to a cell and histogram (counts[c+1] = #atoms in cell c)
+    for i in 0..nlocal {
+        let p = atoms.pos[i];
+        let cx = (((p[0] - ox) * inv_bsx).floor() as i32).clamp(0, nx - 1);
+        let cy = (((p[1] - oy) * inv_bsy).floor() as i32).clamp(0, ny - 1);
+        let cz = (((p[2] - oz) * inv_bsz).floor() as i32).clamp(0, nz - 1);
+        let c = (cx * ny * nz + cy * nz + cz) as u32;
+        cell[i] = c;
+        counts[c as usize + 1] += 1;
+    }
+    // 2. prefix sum: counts[c] becomes the start cursor of cell c
+    for c in 0..total_cells {
+        counts[c + 1] += counts[c];
+    }
+    // 3. stable scatter: perm[cursor]=i in ascending i, advancing the per-cell cursor
+    for i in 0..nlocal {
+        let c = cell[i] as usize;
+        let slot = counts[c];
+        perm[slot as usize] = i;
+        counts[c] = slot + 1;
+    }
 
     // Skip permutation if atoms are already in order
     let already_sorted = perm.iter().enumerate().all(|(i, &p)| p == i);
@@ -756,9 +819,10 @@ pub fn sort_atoms_by_bin(mut atoms: ResMut<Atom>, mut neighbor: ResMut<Neighbor>
         // Apply the same permutation to last_build_pos so displacement checks
         // compare the correct atom's current position against its saved position.
         if neighbor.last_build_pos.len() >= nlocal {
-            let old = neighbor.last_build_pos.clone();
+            pos_scratch.clear();
+            pos_scratch.extend_from_slice(&neighbor.last_build_pos[..nlocal]);
             for (new_i, &old_i) in perm.iter().enumerate() {
-                neighbor.last_build_pos[new_i] = old[old_i];
+                neighbor.last_build_pos[new_i] = pos_scratch[old_i];
             }
         }
 
@@ -770,6 +834,12 @@ pub fn sort_atoms_by_bin(mut atoms: ResMut<Atom>, mut neighbor: ResMut<Neighbor>
         // `origin_index` refers to a *local index on the owning rank*, which has no
         // relation to this rank's local permutation.)
     }
+
+    // Return scratch buffers for reuse next rebuild.
+    neighbor.sort_cell = cell;
+    neighbor.sort_counts = counts;
+    neighbor.sort_perm = perm;
+    neighbor.sort_pos_scratch = pos_scratch;
 
     // After permutation, swap_data.send_indices are stale (they reference pre-sort
     // local indices). Force a full borders rebuild so new swap_data is generated.
@@ -906,17 +976,25 @@ pub fn bin_neighbor_list(
     indices.reserve(indices_cap);
     let mut nidx: usize = 0;
 
-    // Macro to grow indices if needed, then write unchecked
+    // Cache the buffer pointer + capacity so the hot inner loop's push does no
+    // per-element field reads. They're refreshed only on the (rare) grow path;
+    // `indices` is never read/written through its Vec API inside the loops, so the
+    // cached `iptr` stays valid until the next reserve (which re-derives it).
+    let mut cap = indices.capacity();
+    let mut iptr = indices.as_mut_ptr();
+
+    // Macro: bounds-check against cached capacity, write unchecked via cached ptr.
     macro_rules! push_index {
         ($val:expr) => {
-            if nidx >= indices.capacity() {
+            if nidx >= cap {
                 // SAFETY: nidx == current logical length
                 unsafe { indices.set_len(nidx) };
                 indices.reserve(nidx / 2 + 256);
-                // indices_ptr is stale after realloc — but we shadow it below
+                cap = indices.capacity();
+                iptr = indices.as_mut_ptr();
             }
-            // SAFETY: nidx < capacity after potential growth
-            unsafe { *indices.as_mut_ptr().add(nidx) = $val };
+            // SAFETY: nidx < cap after potential growth
+            unsafe { *iptr.add(nidx) = $val };
             nidx += 1;
         };
     }

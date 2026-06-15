@@ -92,6 +92,14 @@ pub trait AtomData: Any {
 /// Dynamic registry of [`AtomData`] extensions, keyed by `TypeId`.
 pub struct AtomDataRegistry {
     stores: Vec<(TypeId, RefCell<Box<dyn AtomData>>)>,
+    /// Indices into `stores` of extensions that actually carry forward-comm data
+    /// (`forward_comm_size() > 0`). The per-step ghost forward comm iterates only
+    /// these, so no-op stores (e.g. tangential history) cost neither a `RefCell`
+    /// borrow nor a virtual `pack_forward`/`unpack_forward` dispatch per atom.
+    /// Rebuilt on every [`register`](Self::register); stores never change after setup.
+    forward_stores: Vec<usize>,
+    /// Indices into `stores` with reverse-comm data (`reverse_comm_size() > 0`).
+    reverse_stores: Vec<usize>,
 }
 
 impl Default for AtomDataRegistry {
@@ -104,6 +112,8 @@ impl AtomDataRegistry {
     pub fn new() -> Self {
         AtomDataRegistry {
             stores: Vec::new(),
+            forward_stores: Vec::new(),
+            reverse_stores: Vec::new(),
         }
     }
 
@@ -116,6 +126,19 @@ impl AtomDataRegistry {
             }
         }
         self.stores.push((id, RefCell::new(Box::new(data))));
+        self.rebuild_comm_caches();
+    }
+
+    /// Recompute which stores carry forward / reverse comm data. Called at
+    /// registration time (rare); the result is consumed by the per-atom comm
+    /// hot path to skip no-op stores.
+    fn rebuild_comm_caches(&mut self) {
+        self.forward_stores = (0..self.stores.len())
+            .filter(|&i| self.stores[i].1.borrow().forward_comm_size() > 0)
+            .collect();
+        self.reverse_stores = (0..self.stores.len())
+            .filter(|&i| self.stores[i].1.borrow().reverse_comm_size() > 0)
+            .collect();
     }
 
     /// Borrow a registered [`AtomData`] extension immutably, or `None` if not registered.
@@ -201,36 +224,39 @@ impl AtomDataRegistry {
         }
     }
 
-    /// Pack forward-comm fields for atom `i` across all extensions.
+    /// Pack forward-comm fields for atom `i`. Iterates only stores with
+    /// forward-comm data (no-op stores contribute zero bytes anyway, so skipping
+    /// them is byte-identical — it just drops the wasted borrow + dispatch).
     pub fn pack_forward_all(&self, i: usize, buf: &mut Vec<f64>) {
-        for (_, cell) in &self.stores {
-            cell.borrow().pack_forward(i, buf);
+        for &si in &self.forward_stores {
+            self.stores[si].1.borrow().pack_forward(i, buf);
         }
     }
 
-    /// Unpack forward-comm fields for atom `i` across all extensions.
-    /// Returns total `f64`s consumed.
+    /// Unpack forward-comm fields for atom `i`. Returns total `f64`s consumed.
+    /// Mirrors [`pack_forward_all`](Self::pack_forward_all) (same store set, same order).
     pub fn unpack_forward_all(&self, i: usize, buf: &[f64]) -> usize {
         let mut pos = 0;
-        for (_, cell) in &self.stores {
-            pos += cell.borrow_mut().unpack_forward(i, &buf[pos..]);
+        for &si in &self.forward_stores {
+            pos += self.stores[si].1.borrow_mut().unpack_forward(i, &buf[pos..]);
         }
         pos
     }
 
-    /// Pack reverse-comm fields (e.g. torque) for atom `i` across all extensions.
+    /// Pack reverse-comm fields (e.g. torque) for atom `i`. Iterates only stores
+    /// with reverse-comm data.
     pub fn pack_reverse_all(&self, i: usize, buf: &mut Vec<f64>) {
-        for (_, cell) in &self.stores {
-            cell.borrow().pack_reverse(i, buf);
+        for &si in &self.reverse_stores {
+            self.stores[si].1.borrow().pack_reverse(i, buf);
         }
     }
 
-    /// Unpack reverse-comm fields for atom `i` across all extensions.
-    /// Returns total `f64`s consumed.
+    /// Unpack reverse-comm fields for atom `i`. Returns total `f64`s consumed.
+    /// Mirrors [`pack_reverse_all`](Self::pack_reverse_all) (same store set, same order).
     pub fn unpack_reverse_all(&self, i: usize, buf: &[f64]) -> usize {
         let mut pos = 0;
-        for (_, cell) in &self.stores {
-            pos += cell.borrow_mut().unpack_reverse(i, &buf[pos..]);
+        for &si in &self.reverse_stores {
+            pos += self.stores[si].1.borrow_mut().unpack_reverse(i, &buf[pos..]);
         }
         pos
     }

@@ -253,17 +253,7 @@ boundary_z = "periodic"
                 ParticleSimScheduleSet::PreExchange,
             )
             .add_update_system(
-                // `pbc` runs EVERY step (both CommunicateOnly and FullRebuild),
-                // not only on full rebuilds. This is the cheap O(N) coordinate
-                // wrap that keeps local atoms inside the global box. Decoupling it
-                // from the (expensive) full neighbor-list rebuild is what stops
-                // binning from firing every step in a dense periodic box.
-                // `forward_comm_borders` (CommunicateOnly) keeps ghost positions
-                // correct for atoms that wrap between rebuilds via per-atom
-                // periodic-image recomputation; `exchange` (FullRebuild) migrates
-                // wrapped atoms to their owner rank on the next scheduled rebuild,
-                // and its min-image classification is wrap-agnostic.
-                pbc.label("pbc"),
+                pbc.label("pbc").run_if(in_state(CommState::FullRebuild)),
                 ParticleSimScheduleSet::PreExchange,
             );
     }

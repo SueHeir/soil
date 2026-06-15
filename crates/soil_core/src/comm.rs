@@ -66,6 +66,12 @@ pub struct CommBuffers {
     pub border_send_buff: Vec<f64>,
     /// Per-rank exchange buffers, reused across exchange() calls.
     pub exchange_buffs: Vec<Vec<f64>>,
+    /// Persistent receive buffer for the per-step ghost forward/reverse comm.
+    /// Reused across timesteps so the hot path never heap-allocates a recv Vec.
+    pub recv_buff: Vec<f64>,
+    /// Persistent send buffer for reverse_send_force (mirrors border_send_buff,
+    /// which is owned by the forward path). Avoids a fresh Vec::new() per step.
+    pub reverse_send_buff: Vec<f64>,
 }
 
 impl Default for CommBuffers {
@@ -73,6 +79,8 @@ impl Default for CommBuffers {
         CommBuffers {
             border_send_buff: Vec::new(),
             exchange_buffs: Vec::new(),
+            recv_buff: Vec::new(),
+            reverse_send_buff: Vec::new(),
         }
     }
 }
@@ -317,40 +325,24 @@ const FORWARD_PACK_SIZE: usize = 6;
 /// the ghost always ends up on the opposite side from the atom.
 #[inline]
 fn compute_per_atom_offset(
-    pos: &[f64; 3],
+    _pos: &[f64; 3],
     stored_offset: &[f64; 3],
-    boundaries_low: &[f64; 3],
-    boundaries_high: &[f64; 3],
-    size: &[f64; 3],
+    _boundaries_low: &[f64; 3],
+    _boundaries_high: &[f64; 3],
+    _size: &[f64; 3],
 ) -> [f64; 3] {
-    let mut offset = [0.0; 3];
-    for dim in 0..3 {
-        if stored_offset[dim] != 0.0 {
-            // Use the stored direction from the original swap.
-            // The swap direction tells us which periodic image to create:
-            //   swap=0 (stored > 0): ghost should be at pos + size
-            //   swap=1 (stored < 0): ghost should be at pos - size
-            //
-            // After PBC wrapping, the atom may now be on the opposite side.
-            // If the atom crossed the boundary, the stored direction may now
-            // point the ghost to the same side as the atom. Detect this by
-            // checking if the resulting ghost would land inside the domain
-            // (meaning the atom moved and we need to flip the sign).
-            let sign = stored_offset[dim].signum();
-            let ghost_pos = pos[dim] + sign * size[dim];
-
-            // If the ghost would be well inside the domain, the atom has PBC-wrapped
-            // and the original direction is stale — flip it.
-            let lo = boundaries_low[dim];
-            let hi = boundaries_high[dim];
-            if ghost_pos > lo && ghost_pos < hi {
-                offset[dim] = -sign * size[dim];
-            } else {
-                offset[dim] = sign * size[dim];
-            }
-        }
-    }
-    offset
+    // The periodic-image offset of a ghost is FIXED at the value established when
+    // the neighbor list was built (`stored_offset`). It must NOT be recomputed or
+    // flipped from the atom's *current* position: between rebuilds an atom can drift
+    // across a periodic boundary, and flipping the offset then jerks the ghost by a
+    // full box length — dropping a real contact and reintroducing it with deep
+    // overlap at the next rebuild, a spurious force that injects energy (this was a
+    // real Haff-cooling energy-conservation bug, previously masked by a forced
+    // rebuild on every boundary crossing). The ghost simply tracks its owner via the
+    // constant shift; this stays correct as long as atoms move less than the
+    // neighbor skin between rebuilds (guaranteed by the rebuild schedule) and pbc
+    // wraps + ghost refresh happen together on a FullRebuild.
+    *stored_offset
 }
 
 fn unpack_forward(msg: &[f64], atoms: &mut Atom, registry: &AtomDataRegistry, recv_start: usize, recv_count: usize, extra_per_atom: usize) {
@@ -372,11 +364,14 @@ fn forward_comm(
     comm: &dyn CommBackend,
     domain: &Domain,
     buf: &mut Vec<f64>,
+    recv: &mut Vec<f64>,
 ) {
     let rank = comm.rank();
     let extra = registry.forward_comm_size();
+    let stride = FORWARD_PACK_SIZE + extra;
     for swap in &topo.swap_data {
         buf.clear();
+        buf.reserve(swap.send_indices.len() * stride);
 
         // For self-sends (single-process periodic), recompute the periodic offset
         // per atom based on current position. After PBC wrapping, an atom originally
@@ -412,8 +407,11 @@ fn forward_comm(
         } else {
             // MPI: sendrecv is deadlock-free regardless of symmetric/asymmetric
             if swap.to_proc != -1 && swap.from_proc != -1 {
-                let msg = comm.sendrecv_f64(swap.to_proc, buf, swap.from_proc);
-                unpack_forward(&msg, atoms, registry, swap.recv_start, swap.recv_count, extra);
+                // Common periodic path: recv size is known (recv_count * stride), so
+                // use the probe-free, allocation-free into-variant with a persistent buffer.
+                recv.resize(swap.recv_count * stride, 0.0);
+                comm.sendrecv_f64_into(swap.to_proc, buf, swap.from_proc, recv);
+                unpack_forward(recv, atoms, registry, swap.recv_start, swap.recv_count, extra);
             } else if swap.to_proc != -1 {
                 comm.send_f64(swap.to_proc, buf);
             } else if swap.from_proc != -1 {
@@ -440,8 +438,10 @@ pub fn forward_comm_borders(
     mut buffers: ResMut<CommBuffers>,
 ) {
     let mut send_buff = std::mem::take(&mut buffers.border_send_buff);
-    forward_comm(&mut atoms, &registry, &topo, &**comm, &domain, &mut send_buff);
+    let mut recv_buff = std::mem::take(&mut buffers.recv_buff);
+    forward_comm(&mut atoms, &registry, &topo, &**comm, &domain, &mut send_buff, &mut recv_buff);
     buffers.border_send_buff = send_buff;
+    buffers.recv_buff = recv_buff;
 }
 
 /// Build ghost atoms by scanning near-boundary locals and sending them to neighbors.
@@ -582,22 +582,30 @@ pub fn reverse_send_force(
     topo: Res<CommTopology>,
     mut atoms: ResMut<Atom>,
     registry: Res<AtomDataRegistry>,
+    mut buffers: ResMut<CommBuffers>,
 ) {
     let rank = comm.rank();
-    let mut send_buff: Vec<f64> = Vec::new();
+    // Reuse persistent send/recv buffers instead of allocating fresh Vecs each step.
+    let mut send_buff = std::mem::take(&mut buffers.reverse_send_buff);
+    let mut recv_buff = std::mem::take(&mut buffers.recv_buff);
 
-    // Compute per-atom stride once: 5 base (tag + origin_index + force×3) + registry reverse fields
-    let per_atom = 5 + registry.reverse_comm_size();
+    // Per-atom stride: force×3 + registry reverse fields. The owner of each
+    // returned force is *not* transmitted: ghosts were built from `swap.send_indices`
+    // in order (see `borders`), and that mapping is stable across the
+    // CommunicateOnly steps between rebuilds (the same invariant `forward_comm`
+    // relies on every step). So the k-th returned force belongs to
+    // `swap.send_indices[k]` — verified empirically to always equal the formerly
+    // transmitted `origin_index`. Dropping `tag`+`origin_index` saves 2 f64/atom.
+    let per_atom = 3 + registry.reverse_comm_size();
 
     // Iterate swaps in reverse order (mirrors borders() forward order)
     for swap in topo.swap_data.iter().rev() {
         send_buff.clear();
+        send_buff.reserve(swap.recv_count * per_atom);
 
-        // Pack force + origin_index + tag (+ registry reverse fields) per ghost atom
+        // Pack force (+ registry reverse fields) per ghost atom, in ghost-index order.
         for i in swap.recv_start..(swap.recv_start + swap.recv_count) {
             debug_assert!(atoms.is_ghost[i], "reverse_send_force: atom {} is not ghost", i);
-            send_buff.push(atoms.tag[i] as f64);
-            send_buff.push(atoms.origin_index[i] as f64);
             send_buff.push(atoms.force[i][0]);
             send_buff.push(atoms.force[i][1]);
             send_buff.push(atoms.force[i][2]);
@@ -605,36 +613,32 @@ pub fn reverse_send_force(
         }
 
         if swap.from_proc == rank {
-            // Self-send: apply forces locally
+            // Self-send: apply forces locally. recv_count == send_indices.len() here.
             for k in 0..swap.recv_count {
                 let base = k * per_atom;
-                let origin = send_buff[base + 1] as usize;
-                debug_assert_eq!(
-                    send_buff[base] as u32, atoms.tag[origin],
-                    "reverse_send_force: tag mismatch"
-                );
-                atoms.force[origin][0] += send_buff[base + 2];
-                atoms.force[origin][1] += send_buff[base + 3];
-                atoms.force[origin][2] += send_buff[base + 4];
-                if per_atom > 5 {
-                    registry.unpack_reverse_all(origin, &send_buff[base + 5..]);
+                let origin = swap.send_indices[k];
+                atoms.force[origin][0] += send_buff[base];
+                atoms.force[origin][1] += send_buff[base + 1];
+                atoms.force[origin][2] += send_buff[base + 2];
+                if per_atom > 3 {
+                    registry.unpack_reverse_all(origin, &send_buff[base + 3..]);
                 }
             }
         } else if swap.from_proc != -1 && swap.to_proc != -1 {
-            let msg = comm.sendrecv_f64(swap.from_proc, &send_buff, swap.to_proc);
-            let recv_count = msg.len() / per_atom;
+            // Common periodic path: we receive forces for exactly the atoms we
+            // originally sent to to_proc (swap.send_indices), in order. Size is
+            // known, so use the probe-free into-variant with the persistent buffer.
+            let recv_count = swap.send_indices.len();
+            recv_buff.resize(recv_count * per_atom, 0.0);
+            comm.sendrecv_f64_into(swap.from_proc, &send_buff, swap.to_proc, &mut recv_buff);
             for k in 0..recv_count {
                 let base = k * per_atom;
-                let origin = msg[base + 1] as usize;
-                debug_assert_eq!(
-                    msg[base] as u32, atoms.tag[origin],
-                    "reverse_send_force: tag mismatch"
-                );
-                atoms.force[origin][0] += msg[base + 2];
-                atoms.force[origin][1] += msg[base + 3];
-                atoms.force[origin][2] += msg[base + 4];
-                if per_atom > 5 {
-                    registry.unpack_reverse_all(origin, &msg[base + 5..]);
+                let origin = swap.send_indices[k];
+                atoms.force[origin][0] += recv_buff[base];
+                atoms.force[origin][1] += recv_buff[base + 1];
+                atoms.force[origin][2] += recv_buff[base + 2];
+                if per_atom > 3 {
+                    registry.unpack_reverse_all(origin, &recv_buff[base + 3..]);
                 }
             }
         } else if swap.from_proc != -1 {
@@ -644,16 +648,20 @@ pub fn reverse_send_force(
             let recv_count = msg.len() / per_atom;
             for k in 0..recv_count {
                 let base = k * per_atom;
-                let origin = msg[base + 1] as usize;
-                atoms.force[origin][0] += msg[base + 2];
-                atoms.force[origin][1] += msg[base + 3];
-                atoms.force[origin][2] += msg[base + 4];
-                if per_atom > 5 {
-                    registry.unpack_reverse_all(origin, &msg[base + 5..]);
+                let origin = swap.send_indices[k];
+                atoms.force[origin][0] += msg[base];
+                atoms.force[origin][1] += msg[base + 1];
+                atoms.force[origin][2] += msg[base + 2];
+                if per_atom > 3 {
+                    registry.unpack_reverse_all(origin, &msg[base + 3..]);
                 }
             }
         }
     }
+
+    // Return persistent buffers for reuse next step.
+    buffers.reverse_send_buff = send_buff;
+    buffers.recv_buff = recv_buff;
 }
 
 // ── Exchange (MPI only) ──────────────────────────────────────────────────────

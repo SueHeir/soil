@@ -640,30 +640,21 @@ pub fn decide_rebuild(
     atoms: Res<Atom>,
     mut neighbor: ResMut<Neighbor>,
     comm: Res<CommResource>,
-    domain: Res<Domain>,
     mut comm_state: ResMut<CurrentState<CommState>>,
 ) {
-    let mut local_needs = if needs_rebuild(&atoms, &neighbor, &comm_state) { 1.0 } else { 0.0 };
-    // Detect atoms about to cross a periodic boundary. After initial_integration
-    // moved atoms but before pbc() wraps them, atoms outside the global box are
-    // exactly the ones that will wrap. PBC wrap requires full rebuild so exchange
-    // can migrate them to the correct sub-domain.
-    if local_needs == 0.0 {
-        let low = domain.boundaries_low;
-        let high = domain.boundaries_high;
-        let periodic = domain.periodic_flags();
-        for i in 0..atoms.nlocal as usize {
-            for d in 0..3 {
-                if periodic[d] && (atoms.pos[i][d] < low[d] || atoms.pos[i][d] >= high[d]) {
-                    local_needs = 1.0;
-                    break;
-                }
-            }
-            if local_needs > 0.0 {
-                break;
-            }
-        }
-    }
+    let local_needs = if needs_rebuild(&atoms, &neighbor, &comm_state) { 1.0 } else { 0.0 };
+    // NOTE: we intentionally do NOT force a full rebuild just because an atom
+    // drifted outside the global box (about to wrap a periodic boundary) or
+    // outside its subdomain (about to migrate). The neighbor skin exists exactly
+    // so atoms can drift a little out of bounds between rebuilds. Coordinate
+    // wrapping is now done cheaply every step by `pbc` (runs in both
+    // CommunicateOnly and FullRebuild), and ghost positions for such drifted /
+    // wrapped atoms are kept correct by `forward_comm_borders`
+    // (`compute_per_atom_offset` recomputes the periodic image per atom). MPI
+    // migration (`exchange`) still only happens on a scheduled FullRebuild; a
+    // wrapped-but-not-yet-migrated atom stays within skin of the boundary and is
+    // served by the ghost mechanism until then — standard DEM. Forcing a rebuild
+    // here made binning fire every step in a dense periodic box (the perf bug).
     // Any rank needing rebuild forces all ranks to rebuild
     let global_needs = comm.all_reduce_sum_f64(local_needs);
     if global_needs > 0.0 {

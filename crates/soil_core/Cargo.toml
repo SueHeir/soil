@@ -14,11 +14,11 @@ default = ["mpi_backend"]
 mpi_backend = ["grass_mpi/mpi_backend"]
 
 [dependencies]
-grass_scheduler = { git = "https://github.com/SueHeir/grass.git", rev = "ea21ea3629de990a717cc1421747901e5d64a66b" }
-grass_app = { git = "https://github.com/SueHeir/grass.git", rev = "ea21ea3629de990a717cc1421747901e5d64a66b" }
-grass_mpi = { git = "https://github.com/SueHeir/grass.git", rev = "ea21ea3629de990a717cc1421747901e5d64a66b", default-features = false }
-grass_derive = { git = "https://github.com/SueHeir/grass.git", rev = "ea21ea3629de990a717cc1421747901e5d64a66b" }
-grass_io = { git = "https://github.com/SueHeir/grass.git", rev = "ea21ea3629de990a717cc1421747901e5d64a66b" }
+grass_scheduler = { git = "https://github.com/SueHeir/grass.git", branch = "main" }
+grass_app = { git = "https://github.com/SueHeir/grass.git", branch = "main" }
+grass_mpi = { git = "https://github.com/SueHeir/grass.git", branch = "main", default-features = false }
+grass_derive = { git = "https://github.com/SueHeir/grass.git", branch = "main" }
+grass_io = { git = "https://github.com/SueHeir/grass.git", branch = "main" }
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 rand = "0.9"

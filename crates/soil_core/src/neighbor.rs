@@ -154,6 +154,14 @@ pub struct Neighbor {
     pub sort_counts: Vec<u32>,
     pub sort_perm: Vec<usize>,
     pub sort_pos_scratch: Vec<[f64; 3]>,
+    /// N2: post-permute local cell indices written by `sort_atoms_by_bin`, so the
+    /// neighbor build doesn't recompute the cell for every local atom (it already
+    /// did, identically, when sorting). Only the boundary ghosts are binned in the
+    /// build. `local_cells_valid` gates reuse: it's set true only when the sort ran
+    /// and populated this for the current `nlocal`, and cleared once the build
+    /// consumes it (so a build with no preceding sort falls back to computing all).
+    pub sorted_local_cell: Vec<u32>,
+    pub local_cells_valid: bool,
     /// When all atoms share the same cutoff radius, cache `(2 * r * skin_fraction)²`
     /// to skip per-pair cutoff computation. `None` for polydisperse systems.
     pub cached_uniform_cutoff_sq: Option<f64>,
@@ -271,6 +279,8 @@ impl Neighbor {
             sort_counts: Vec::new(),
             sort_perm: Vec::new(),
             sort_pos_scratch: Vec::new(),
+            sorted_local_cell: Vec::new(),
+            local_cells_valid: false,
             cached_uniform_cutoff_sq: None,
             cached_max_cutoff: 0.0,
             newton: true,
@@ -730,6 +740,9 @@ pub fn sort_atoms_by_bin(mut atoms: ResMut<Atom>, mut neighbor: ResMut<Neighbor>
     }
 
     let nlocal = atoms.nlocal as usize;
+    // N2: invalidate the cached local cells by default; only the full sort below
+    // republishes them. Any early return here leaves the build to bin all atoms.
+    neighbor.local_cells_valid = false;
     if nlocal == 0 || neighbor.bin_total_cells == 0 || nlocal > atoms.pos.len() {
         // Even with nothing to sort locally, must participate in the all_reduce
         // when periodic_sort triggers so all MPI ranks stay synchronized.
@@ -780,6 +793,7 @@ pub fn sort_atoms_by_bin(mut atoms: ResMut<Atom>, mut neighbor: ResMut<Neighbor>
     let mut counts = std::mem::take(&mut neighbor.sort_counts);
     let mut perm = std::mem::take(&mut neighbor.sort_perm);
     let mut pos_scratch = std::mem::take(&mut neighbor.sort_pos_scratch);
+    let mut sorted_local_cell = std::mem::take(&mut neighbor.sorted_local_cell);
     cell.clear();
     cell.resize(nlocal, 0u32);
     counts.clear();
@@ -812,6 +826,17 @@ pub fn sort_atoms_by_bin(mut atoms: ResMut<Atom>, mut neighbor: ResMut<Neighbor>
     // Skip permutation if atoms are already in order
     let already_sorted = perm.iter().enumerate().all(|(i, &p)| p == i);
 
+    // N2: publish the POST-permute local cell indices for the neighbor build to
+    // reuse (the new atom at index k is the old atom perm[k], whose cell is
+    // cell[perm[k]]). Identical formula to the build, so the resulting cell array
+    // — hence the neighbor list — is bit-for-bit the same as computing it there.
+    sorted_local_cell.clear();
+    sorted_local_cell.resize(nlocal, 0u32);
+    for k in 0..nlocal {
+        sorted_local_cell[k] = cell[perm[k]];
+    }
+    neighbor.local_cells_valid = true;
+
     if !already_sorted {
         atoms.apply_permutation(&perm, nlocal);
         registry.apply_permutation_all(&perm, nlocal);
@@ -840,6 +865,7 @@ pub fn sort_atoms_by_bin(mut atoms: ResMut<Atom>, mut neighbor: ResMut<Neighbor>
     neighbor.sort_counts = counts;
     neighbor.sort_perm = perm;
     neighbor.sort_pos_scratch = pos_scratch;
+    neighbor.sorted_local_cell = sorted_local_cell;
 
     // After permutation, swap_data.send_indices are stale (they reference pre-sort
     // local indices). Force a full borders rebuild so new swap_data is generated.
@@ -903,8 +929,26 @@ pub fn bin_neighbor_list(
     bin_count_arr.clear();
     bin_count_arr.resize(total_cells, 0u32);
 
+    // N2: if `sort_atoms_by_bin` already computed the local atoms' cells this step
+    // (same grid, same formula), reuse them and bin only the boundary ghosts;
+    // otherwise bin every atom. Either way `bin_count_arr` ends up identical.
+    let reuse_local = neighbor.local_cells_valid && neighbor.sorted_local_cell.len() == nlocal;
+    let sorted_local_cell = std::mem::take(&mut neighbor.sorted_local_cell);
+    let ghost_start = if reuse_local {
+        // SAFETY: nlocal <= total; each cached cell is < total_cells (clamped at sort time).
+        for i in 0..nlocal {
+            let c = unsafe { *sorted_local_cell.get_unchecked(i) };
+            unsafe {
+                *atom_cell.get_unchecked_mut(i) = c;
+                *bin_count_arr.get_unchecked_mut(c as usize) += 1;
+            }
+        }
+        nlocal
+    } else {
+        0
+    };
     // SAFETY: i < total = atoms.len(), cell is clamped to 0..total_cells by clamp on cx/cy/cz.
-    for i in 0..total {
+    for i in ghost_start..total {
         let pi = unsafe { atoms.pos.get_unchecked(i) };
         let cx = ((pi[0] - bin_ox) * inv_bsx).floor() as i32;
         let cy = ((pi[1] - bin_oy) * inv_bsy).floor() as i32;
@@ -918,6 +962,8 @@ pub fn bin_neighbor_list(
             *bin_count_arr.get_unchecked_mut(cell as usize) += 1;
         }
     }
+    neighbor.sorted_local_cell = sorted_local_cell;
+    neighbor.local_cells_valid = false;
 
     // Step 2: Build CSR bin offsets (reuse persistent array)
     let mut bin_start = std::mem::take(&mut neighbor.bin_start);

@@ -23,7 +23,7 @@ use grass_scheduler::prelude::*;
 use serde::{Deserialize, Serialize};
 
 // Re-export comm abstractions from grass_mpi so downstream users see no change.
-pub use grass_mpi::{CommBackend, CommResource, SingleProcessComm, finalize_mpi};
+pub use grass_mpi::{CommBackend, CommResource, SendRecvOp, SingleProcessComm, finalize_mpi};
 #[cfg(feature = "mpi_backend")]
 pub use grass_mpi::{MpiCommBackend, get_mpi_world};
 
@@ -62,6 +62,16 @@ impl Default for CommConfig {
 
 // ── CommBuffers ──────────────────────────────────────────────────────────────
 
+/// Per-swap send/recv scratch for the overlapped, round-based ghost comm.
+/// One pair of buffers per swap so the two swaps of a `(dim, need)` round can be
+/// in flight simultaneously (their sends/recvs must not share a buffer). Reused
+/// across timesteps so the hot path never reallocates.
+#[derive(Default)]
+pub struct SwapScratch {
+    pub send: Vec<f64>,
+    pub recv: Vec<f64>,
+}
+
 /// Persistent communication buffers, reused across timesteps to avoid re-allocation.
 pub struct CommBuffers {
     pub border_send_buff: Vec<f64>,
@@ -73,6 +83,10 @@ pub struct CommBuffers {
     /// Persistent send buffer for reverse_send_force (mirrors border_send_buff,
     /// which is owned by the forward path). Avoids a fresh Vec::new() per step.
     pub reverse_send_buff: Vec<f64>,
+    /// Per-swap scratch for the overlapped forward ghost-position comm.
+    pub forward_scratch: Vec<SwapScratch>,
+    /// Per-swap scratch for the overlapped reverse force comm.
+    pub reverse_scratch: Vec<SwapScratch>,
 }
 
 impl Default for CommBuffers {
@@ -82,6 +96,8 @@ impl Default for CommBuffers {
             exchange_buffs: Vec::new(),
             recv_buff: Vec::new(),
             reverse_send_buff: Vec::new(),
+            forward_scratch: Vec::new(),
+            reverse_scratch: Vec::new(),
         }
     }
 }
@@ -326,59 +342,121 @@ fn unpack_forward(msg: &[f64], atoms: &mut Atom, registry: &AtomDataRegistry, re
     }
 }
 
+/// Pack one swap's outgoing ghost data into `scratch.send`. If the swap is a
+/// self-send (single-process / periodic-to-self), unpack it locally and return
+/// `None`. Otherwise size `scratch.recv` and return a [`SendRecvOp`] for the
+/// batch comm to complete. The returned op borrows `scratch`, so the caller must
+/// finish the batch (and any unpack) before reusing it.
+fn forward_prepare_swap<'s>(
+    swap: &SwapData,
+    scratch: &'s mut SwapScratch,
+    atoms: &mut Atom,
+    registry: &AtomDataRegistry,
+    rank: i32,
+    stride: usize,
+    extra: usize,
+) -> Option<SendRecvOp<'s>> {
+    // The periodic-image offset of a ghost is FIXED at the value established when
+    // the neighbor list was built (`swap.periodic_offset`) — for self-sends and MPI
+    // sends alike. It must NOT be recomputed/flipped from the atom's *current*
+    // position: between rebuilds an atom can drift across a periodic boundary, and
+    // flipping the offset jerks the ghost a full box length — dropping a real
+    // contact and reintroducing it with deep overlap at the next rebuild, a spurious
+    // force that injects energy (a real Haff-cooling energy-conservation bug).
+    let offset = swap.periodic_offset;
+
+    // Pack positions and velocities (6 f64s per atom) + registry forward fields
+    let buf = &mut scratch.send;
+    buf.clear();
+    buf.reserve(swap.send_indices.len() * stride);
+    for &idx in &swap.send_indices {
+        buf.push(atoms.pos[idx][0] + offset[0]);
+        buf.push(atoms.pos[idx][1] + offset[1]);
+        buf.push(atoms.pos[idx][2] + offset[2]);
+        buf.push(atoms.vel[idx][0]);
+        buf.push(atoms.vel[idx][1]);
+        buf.push(atoms.vel[idx][2]);
+        registry.pack_forward_all(idx, buf);
+    }
+
+    if swap.to_proc == rank {
+        // Self-send: copy directly into ghost data, no MPI.
+        unpack_forward(&scratch.send, atoms, registry, swap.recv_start, swap.recv_count, extra);
+        return None;
+    }
+
+    // MPI op. `-1` on either side disables that half (non-periodic boundary).
+    let source = swap.from_proc;
+    let recv_len = if source != -1 { swap.recv_count * stride } else { 0 };
+    scratch.recv.resize(recv_len, 0.0);
+    Some(SendRecvOp {
+        dest: swap.to_proc,
+        send_buf: &scratch.send,
+        source,
+        recv_buf: &mut scratch.recv,
+    })
+}
+
+/// Forward ghost position/velocity update, overlapping the two swaps of each
+/// `(dim, need)` round via a single batched non-blocking sendrecv.
+///
+/// Swaps are processed in rounds of two (the lo/hi pair recorded consecutively
+/// by `borders`). The two swaps in a round are independent — disjoint receive
+/// regions, send-lists fixed at the last rebuild — so their messages are posted
+/// together and their latencies overlap. Rounds stay ordered: a later round can
+/// forward corner ghosts that an earlier round's receive just filled (multi-hop),
+/// so each round's batch completes before the next begins.
 fn forward_comm(
     atoms: &mut Atom,
     registry: &AtomDataRegistry,
     topo: &CommTopology,
     comm: &dyn CommBackend,
-    buf: &mut Vec<f64>,
-    recv: &mut Vec<f64>,
+    pool: &mut Vec<SwapScratch>,
 ) {
     let rank = comm.rank();
     let extra = registry.forward_comm_size();
     let stride = FORWARD_PACK_SIZE + extra;
-    for swap in &topo.swap_data {
-        buf.clear();
-        buf.reserve(swap.send_indices.len() * stride);
+    let swaps = &topo.swap_data;
+    if pool.len() < swaps.len() {
+        pool.resize_with(swaps.len(), SwapScratch::default);
+    }
 
-        // The periodic-image offset of a ghost is FIXED at the value established when
-        // the neighbor list was built (`swap.periodic_offset`) — for self-sends and MPI
-        // sends alike. It must NOT be recomputed/flipped from the atom's *current*
-        // position: between rebuilds an atom can drift across a periodic boundary, and
-        // flipping the offset jerks the ghost a full box length — dropping a real
-        // contact and reintroducing it with deep overlap at the next rebuild, a spurious
-        // force that injects energy (a real Haff-cooling energy-conservation bug).
-        let offset = swap.periodic_offset;
+    let mut r = 0;
+    while r < swaps.len() {
+        let end = (r + 2).min(swaps.len());
+        // `jobs` records which swaps in this round did an MPI receive that still
+        // needs unpacking after the batch completes (self-sends already unpacked).
+        let mut jobs: [usize; 2] = [0, 0];
+        let mut njobs = 0;
+        {
+            let round = &mut pool[r..end];
+            let (first, rest) = round.split_first_mut().unwrap();
+            let mut ops: Vec<SendRecvOp> = Vec::with_capacity(2);
+            if let Some(op) = forward_prepare_swap(&swaps[r], first, atoms, registry, rank, stride, extra) {
+                ops.push(op);
+                jobs[njobs] = r;
+                njobs += 1;
+            }
+            if end > r + 1 {
+                if let Some(op) = forward_prepare_swap(&swaps[r + 1], &mut rest[0], atoms, registry, rank, stride, extra) {
+                    ops.push(op);
+                    jobs[njobs] = r + 1;
+                    njobs += 1;
+                }
+            }
+            if !ops.is_empty() {
+                comm.sendrecv_batch_f64_into(&mut ops);
+            }
+        } // `ops` dropped: pool borrows released, recv data now resident in pool.
 
-        // Pack positions and velocities (6 f64s per atom) + registry forward fields
-        for &idx in &swap.send_indices {
-            buf.push(atoms.pos[idx][0] + offset[0]);
-            buf.push(atoms.pos[idx][1] + offset[1]);
-            buf.push(atoms.pos[idx][2] + offset[2]);
-            buf.push(atoms.vel[idx][0]);
-            buf.push(atoms.vel[idx][1]);
-            buf.push(atoms.vel[idx][2]);
-            registry.pack_forward_all(idx, buf);
-        }
-
-        if swap.to_proc == rank {
-            // Self-send: copy directly into ghost data
-            unpack_forward(buf, atoms, registry, swap.recv_start, swap.recv_count, extra);
-        } else {
-            // MPI: sendrecv is deadlock-free regardless of symmetric/asymmetric
-            if swap.to_proc != -1 && swap.from_proc != -1 {
-                // Common periodic path: recv size is known (recv_count * stride), so
-                // use the probe-free, allocation-free into-variant with a persistent buffer.
-                recv.resize(swap.recv_count * stride, 0.0);
-                comm.sendrecv_f64_into(swap.to_proc, buf, swap.from_proc, recv);
-                unpack_forward(recv, atoms, registry, swap.recv_start, swap.recv_count, extra);
-            } else if swap.to_proc != -1 {
-                comm.send_f64(swap.to_proc, buf);
-            } else if swap.from_proc != -1 {
-                let msg = comm.recv_f64(swap.from_proc);
-                unpack_forward(&msg, atoms, registry, swap.recv_start, swap.recv_count, extra);
+        // Unpack the receives (send-only swaps have from_proc == -1, nothing to do).
+        for &j in &jobs[..njobs] {
+            let swap = &swaps[j];
+            if swap.from_proc != -1 {
+                unpack_forward(&pool[j].recv, atoms, registry, swap.recv_start, swap.recv_count, extra);
             }
         }
+        r = end;
     }
 }
 
@@ -396,11 +474,9 @@ pub fn forward_comm_borders(
     registry: Res<AtomDataRegistry>,
     mut buffers: ResMut<CommBuffers>,
 ) {
-    let mut send_buff = std::mem::take(&mut buffers.border_send_buff);
-    let mut recv_buff = std::mem::take(&mut buffers.recv_buff);
-    forward_comm(&mut atoms, &registry, &topo, &**comm, &mut send_buff, &mut recv_buff);
-    buffers.border_send_buff = send_buff;
-    buffers.recv_buff = recv_buff;
+    let mut pool = std::mem::take(&mut buffers.forward_scratch);
+    forward_comm(&mut atoms, &registry, &topo, &**comm, &mut pool);
+    buffers.forward_scratch = pool;
 }
 
 /// Build ghost atoms by scanning near-boundary locals and sending them to neighbors.
@@ -553,11 +629,74 @@ pub fn borders(
 
 // ── Unified reverse send force ────────────────────────────────────────────────
 
+/// Accumulate ghost forces from owner atoms received back into local force, for
+/// one swap's MPI receive. The k-th returned force belongs to `swap.send_indices[k]`
+/// (the same stable ghost→origin mapping `forward_comm` relies on).
+fn reverse_accumulate(swap: &SwapData, recv: &[f64], atoms: &mut Atom, registry: &AtomDataRegistry, per_atom: usize) {
+    for k in 0..swap.send_indices.len() {
+        let base = k * per_atom;
+        let origin = swap.send_indices[k];
+        atoms.force[origin][0] += recv[base];
+        atoms.force[origin][1] += recv[base + 1];
+        atoms.force[origin][2] += recv[base + 2];
+        if per_atom > 3 {
+            registry.unpack_reverse_all(origin, &recv[base + 3..]);
+        }
+    }
+}
+
+/// Pack one swap's ghost forces into `scratch.send`. If the swap is a self-send,
+/// accumulate locally and return `None`. Otherwise size `scratch.recv` and return
+/// a [`SendRecvOp`] (note: send/recv directions are *reversed* vs forward comm —
+/// forces flow back from `from_proc` toward `to_proc`).
+fn reverse_prepare_swap<'s>(
+    swap: &SwapData,
+    scratch: &'s mut SwapScratch,
+    atoms: &mut Atom,
+    registry: &AtomDataRegistry,
+    rank: i32,
+    per_atom: usize,
+) -> Option<SendRecvOp<'s>> {
+    // Pack force (+ registry reverse fields) per ghost atom, in ghost-index order.
+    let buf = &mut scratch.send;
+    buf.clear();
+    buf.reserve(swap.recv_count * per_atom);
+    for i in swap.recv_start..(swap.recv_start + swap.recv_count) {
+        debug_assert!(atoms.is_ghost[i], "reverse_send_force: atom {} is not ghost", i);
+        buf.push(atoms.force[i][0]);
+        buf.push(atoms.force[i][1]);
+        buf.push(atoms.force[i][2]);
+        registry.pack_reverse_all(i, buf);
+    }
+
+    if swap.from_proc == rank {
+        // Self-send: apply forces locally. recv_count == send_indices.len() here.
+        let send = std::mem::take(&mut scratch.send);
+        reverse_accumulate(swap, &send, atoms, registry, per_atom);
+        scratch.send = send;
+        return None;
+    }
+
+    // MPI: we receive forces for exactly the atoms we sent to `to_proc`
+    // (swap.send_indices), in order. `-1` disables the corresponding half.
+    let source = swap.to_proc;
+    let recv_len = if source != -1 { swap.send_indices.len() * per_atom } else { 0 };
+    scratch.recv.resize(recv_len, 0.0);
+    Some(SendRecvOp {
+        dest: swap.from_proc,
+        send_buf: &scratch.send,
+        source,
+        recv_buf: &mut scratch.recv,
+    })
+}
+
 /// Accumulate ghost forces back onto their owner atoms.
 ///
-/// Iterates swap data in reverse order (mirroring `borders`), packing
-/// force + registry reverse fields from each ghost and sending them to the
-/// rank that owns the original atom.
+/// Mirror of `forward_comm`: swaps are processed in `(dim, need)` rounds of two,
+/// overlapping the two swaps' messages via one batched non-blocking sendrecv.
+/// Rounds are visited in **reverse** order (last dimension first) so an
+/// intermediate rank accumulates a multi-hop ghost's force before forwarding it
+/// further back. The two swaps within a round are independent.
 pub fn reverse_send_force(
     comm: Res<CommResource>,
     topo: Res<CommTopology>,
@@ -566,9 +705,7 @@ pub fn reverse_send_force(
     mut buffers: ResMut<CommBuffers>,
 ) {
     let rank = comm.rank();
-    // Reuse persistent send/recv buffers instead of allocating fresh Vecs each step.
-    let mut send_buff = std::mem::take(&mut buffers.reverse_send_buff);
-    let mut recv_buff = std::mem::take(&mut buffers.recv_buff);
+    let mut pool = std::mem::take(&mut buffers.reverse_scratch);
 
     // Per-atom stride: force×3 + registry reverse fields. The owner of each
     // returned force is *not* transmitted: ghosts were built from `swap.send_indices`
@@ -579,70 +716,49 @@ pub fn reverse_send_force(
     // transmitted `origin_index`. Dropping `tag`+`origin_index` saves 2 f64/atom.
     let per_atom = 3 + registry.reverse_comm_size();
 
-    // Iterate swaps in reverse order (mirrors borders() forward order)
-    for swap in topo.swap_data.iter().rev() {
-        send_buff.clear();
-        send_buff.reserve(swap.recv_count * per_atom);
-
-        // Pack force (+ registry reverse fields) per ghost atom, in ghost-index order.
-        for i in swap.recv_start..(swap.recv_start + swap.recv_count) {
-            debug_assert!(atoms.is_ghost[i], "reverse_send_force: atom {} is not ghost", i);
-            send_buff.push(atoms.force[i][0]);
-            send_buff.push(atoms.force[i][1]);
-            send_buff.push(atoms.force[i][2]);
-            registry.pack_reverse_all(i, &mut send_buff);
-        }
-
-        if swap.from_proc == rank {
-            // Self-send: apply forces locally. recv_count == send_indices.len() here.
-            for k in 0..swap.recv_count {
-                let base = k * per_atom;
-                let origin = swap.send_indices[k];
-                atoms.force[origin][0] += send_buff[base];
-                atoms.force[origin][1] += send_buff[base + 1];
-                atoms.force[origin][2] += send_buff[base + 2];
-                if per_atom > 3 {
-                    registry.unpack_reverse_all(origin, &send_buff[base + 3..]);
-                }
-            }
-        } else if swap.from_proc != -1 && swap.to_proc != -1 {
-            // Common periodic path: we receive forces for exactly the atoms we
-            // originally sent to to_proc (swap.send_indices), in order. Size is
-            // known, so use the probe-free into-variant with the persistent buffer.
-            let recv_count = swap.send_indices.len();
-            recv_buff.resize(recv_count * per_atom, 0.0);
-            comm.sendrecv_f64_into(swap.from_proc, &send_buff, swap.to_proc, &mut recv_buff);
-            for k in 0..recv_count {
-                let base = k * per_atom;
-                let origin = swap.send_indices[k];
-                atoms.force[origin][0] += recv_buff[base];
-                atoms.force[origin][1] += recv_buff[base + 1];
-                atoms.force[origin][2] += recv_buff[base + 2];
-                if per_atom > 3 {
-                    registry.unpack_reverse_all(origin, &recv_buff[base + 3..]);
-                }
-            }
-        } else if swap.from_proc != -1 {
-            comm.send_f64(swap.from_proc, &send_buff);
-        } else if swap.to_proc != -1 {
-            let msg = comm.recv_f64(swap.to_proc);
-            let recv_count = msg.len() / per_atom;
-            for k in 0..recv_count {
-                let base = k * per_atom;
-                let origin = swap.send_indices[k];
-                atoms.force[origin][0] += msg[base];
-                atoms.force[origin][1] += msg[base + 1];
-                atoms.force[origin][2] += msg[base + 2];
-                if per_atom > 3 {
-                    registry.unpack_reverse_all(origin, &msg[base + 3..]);
-                }
-            }
-        }
+    let swaps = &topo.swap_data;
+    if pool.len() < swaps.len() {
+        pool.resize_with(swaps.len(), SwapScratch::default);
     }
 
-    // Return persistent buffers for reuse next step.
-    buffers.reverse_send_buff = send_buff;
-    buffers.recv_buff = recv_buff;
+    // Iterate rounds from the last back to the first (mirrors borders() in reverse).
+    let mut end = swaps.len();
+    while end > 0 {
+        let start = end.saturating_sub(2);
+        let mut jobs: [usize; 2] = [0, 0];
+        let mut njobs = 0;
+        {
+            let round = &mut pool[start..end];
+            let (first, rest) = round.split_first_mut().unwrap();
+            let mut ops: Vec<SendRecvOp> = Vec::with_capacity(2);
+            if let Some(op) = reverse_prepare_swap(&swaps[start], first, &mut atoms, &registry, rank, per_atom) {
+                ops.push(op);
+                jobs[njobs] = start;
+                njobs += 1;
+            }
+            if end > start + 1 {
+                if let Some(op) = reverse_prepare_swap(&swaps[start + 1], &mut rest[0], &mut atoms, &registry, rank, per_atom) {
+                    ops.push(op);
+                    jobs[njobs] = start + 1;
+                    njobs += 1;
+                }
+            }
+            if !ops.is_empty() {
+                comm.sendrecv_batch_f64_into(&mut ops);
+            }
+        } // `ops` dropped: pool borrows released, recv data now resident in pool.
+
+        // Accumulate received forces (send-only swaps have to_proc == -1, nothing to do).
+        for &j in &jobs[..njobs] {
+            let swap = &swaps[j];
+            if swap.to_proc != -1 {
+                reverse_accumulate(swap, &pool[j].recv, &mut atoms, &registry, per_atom);
+            }
+        }
+        end = start;
+    }
+
+    buffers.reverse_scratch = pool;
 }
 
 // ── Exchange (MPI only) ──────────────────────────────────────────────────────

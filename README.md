@@ -30,8 +30,8 @@ mechanism (`#[forward]` / `#[reverse]` / `#[zero]`). It is documented in
 | [`soil_derive`](crates/soil_derive/README.md) | `#[derive(AtomData)]` proc macro |
 | [`soil_verlet`](crates/soil_verlet/README.md) | velocity-Verlet translational integration |
 | [`soil_print`](crates/soil_print/README.md) | thermo output, dump files (CSV/binary/VTP), restart |
-| [`soil_deform`](crates/soil_deform/README.md) | box deformation (engineering strain rate, velocity, target size) |
-| [`soil_fixes`](crates/soil_fixes/README.md) | method-agnostic kinematic constraints (freeze, pin, prescribed motion, velocity damping) on base `Atom` state |
+| [`soil_deform`](crates/soil_deform/README.md) | box deformation (strain rate, velocity, target size) + Lees–Edwards `xy` shear |
+| [`soil_fixes`](crates/soil_fixes/README.md) | method-agnostic position constraint `pin` on base `Atom` state (DEM fixes such as `freeze` / velocity damping live in [dirt_fixes](https://github.com/SueHeir/dirt)) |
 
 Built on [grass](https://github.com/SueHeir/grass). Consumed by
 [dirt](https://github.com/SueHeir/dirt) (DEM) and intended for other

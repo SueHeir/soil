@@ -20,6 +20,39 @@
 //! This "kick-drift-kick" decomposition is symplectic, time-reversible, and
 //! second-order accurate in Δt. It exactly integrates constant-force motion
 //! and conserves energy to O(Δt²) per step for Hamiltonian systems.
+//!
+//! See `examples/free_fall.rs` for a runnable single-particle parabola check.
+//!
+//! # Where this runs
+//!
+//! The two systems hook the integration phases of
+//! [`soil_core::ParticleSimScheduleSet`]:
+//!
+//! - [`initial_integration`] runs at `InitialIntegration`, **before** the force
+//!   phase. It uses **last step's** forces for the half-kick, then does the
+//!   position **drift**.
+//! - [`final_integration`] runs at `FinalIntegration`, **after** the force
+//!   phase, completing the kick with **this step's** freshly computed forces.
+//!
+//! This crate does **not** zero the force arrays — that happens in `soil_core`
+//! at `PostInitialIntegration` (between the drift and the force phase), so the
+//! forces `initial_integration` reads are genuinely the previous step's.
+//!
+//! Both systems iterate **local atoms only** (`0..nlocal`); ghosts are read-only
+//! halo copies and are never integrated.
+//!
+//! ## What this is NOT
+//!
+//! - Not the neighbor list — that is `soil_core::neighbor`.
+//! - Not the run loop or schedule definition — that is `soil_core::schedule`.
+//!
+//! # Pinned particles
+//!
+//! Both systems scale the force by `inv_mass`. A particle with `inv_mass = 0`
+//! (i.e. infinite mass) therefore never accelerates and never drifts — the
+//! idiomatic way to hold a particle fixed under the integrator without a
+//! separate constraint. (For a hard positional constraint that also corrects
+//! stray drift, see `soil_fixes`'s `[[pin]]`.)
 
 use grass_app::prelude::*;
 use grass_scheduler::prelude::*;
@@ -30,7 +63,8 @@ use soil_core::{Accum, Atom, ParticleSimScheduleSet, Real};
 ///
 /// When `stage` is `None` (the default), systems run every stage.
 /// Use [`VelocityVerletPlugin::for_stage`] to restrict to a single `[[run]]` stage,
-/// e.g. when pairing with [`FireMinPlugin::for_stage`] in a multi-stage workflow.
+/// e.g. to run dynamics in one stage while a different integrator (such as a
+/// minimizer in a downstream tier) owns another.
 ///
 /// # Examples
 ///

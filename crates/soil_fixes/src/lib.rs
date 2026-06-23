@@ -16,6 +16,55 @@
 //!
 //! - [`SoilFixesPlugin`] — registers the `[[pin]]` constraint.
 //!
+//! [`SoilFixesPlugin`] is **not** part of any default plugin group (it is not in
+//! `dirt_core`'s `CorePlugins`, nor in `dirt_granular`'s
+//! `GranularDefaultPlugins`). Add it explicitly:
+//!
+//! ```no_run
+//! use grass_app::prelude::*;
+//! use soil_fixes::SoilFixesPlugin;
+//!
+//! # // `CorePlugins` actually lives downstream in `dirt_core`; stubbed here so
+//! # // the doctest compiles against soil alone.
+//! # struct CorePlugins;
+//! # impl Plugin for CorePlugins { fn build(&self, _: &mut App) {} }
+//! let mut app = App::new();
+//! app.add_plugins(CorePlugins)        // input, comm, domain, neighbor, groups, run loop
+//!    .add_plugins(SoilFixesPlugin);   // ← enables [[pin]]
+//! ```
+//!
+//! with a `[[pin]]` block in the TOML config naming an atom group:
+//!
+//! ```toml
+//! [[group]]
+//! name = "anchor"
+//! region = "base"     # some region defined elsewhere
+//!
+//! [[pin]]
+//! group = "anchor"
+//! ```
+//!
+//! # Scheduling
+//!
+//! `pin` is the minimal "how to write a fix" template: a fix is just a plugin
+//! that registers systems into the per-step Verlet loop. The loop's phases (from
+//! [`soil_core::ParticleSimScheduleSet`]) run in order:
+//!
+//! ```text
+//! PreInitialIntegration → InitialIntegration → … → Force → PostForce → … → FinalIntegration
+//! ```
+//!
+//! `pin` hooks **two** of them:
+//!
+//! - **`PreInitialIntegration`** — restore position/zero velocity *before* the
+//!   Verlet drift, so the integrator cannot move a pinned atom this step.
+//! - **`PostForce`** — re-enforce *after* forces are computed (and lazily capture
+//!   the initial position on the first step the group mask is populated), so the
+//!   final half-kick sees `f = 0` and the next step starts from `v = 0`.
+//!
+//! Hooking both the pre-drift and post-force passes is why a pinned atom is
+//! bit-for-bit fixed whenever forces are evaluated — see [`PinDef`].
+//!
 //! # `pin` vs `freeze`
 //!
 //! `pin` is a *positional* constraint: it captures each atom's setup-time

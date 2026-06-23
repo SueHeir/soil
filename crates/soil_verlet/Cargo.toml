@@ -23,3 +23,7 @@ grass_app = { git = "https://github.com/SueHeir/grass.git", branch = "main" }
 grass_scheduler = { git = "https://github.com/SueHeir/grass.git", branch = "main" }
 
 [dev-dependencies]
+
+[[example]]
+name = "free_fall"
+required-features = ["precision-double"]

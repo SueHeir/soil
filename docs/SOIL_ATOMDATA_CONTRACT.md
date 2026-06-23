@@ -58,10 +58,17 @@ pub struct DemAtom {
 }
 ```
 
-It is registered once, in the plugin's `build()`:
+It is registered once, in the plugin's `build()`. The `#[derive(AtomData)]`
+macro generates **no constructor** — it emits only the trait `impl`, not a
+`new()` or `Default` — so register an explicit struct literal (or hand-write
+your own `new()` and call that):
 
 ```rust
-register_atom_data!(app, DemAtom::new());
+register_atom_data!(app, DemAtom {
+    omega: Vec::new(),
+    torque: Vec::new(),
+    radius: Vec::new(),
+});
 ```
 
 After registration the substrate carries those columns through **every**
@@ -89,9 +96,18 @@ semantic contract — honor it or parallel runs diverge silently.
 | `pack_reverse` / `unpack_reverse` | `#[reverse]` | **ghost** → owner | **additive (`+=`)** | after force computation |
 | `zero` | `#[zero]` | local | resize to `n`, fill `0.0` | start of each timestep |
 
-Plus `pack_all_for_restart` / `unpack_all_from_restart` (all fields, for
-checkpointing) and `apply_permutation` / `truncate` / `swap_remove` (keep every
-column in lockstep when the substrate reorders or culls atoms).
+Plus `apply_permutation` / `truncate` / `swap_remove` (keep every column in
+lockstep when the substrate reorders or culls atoms) — these the derive *does*
+generate.
+
+Restart checkpointing reuses the migration `pack` / `unpack` rather than adding
+new per-extension methods. The derive does **not** emit `pack_all_for_restart`
+or `unpack_all_from_restart`. Those are methods on the **registry**
+(`AtomDataRegistry::pack_all_for_restart` / `unpack_all_from_restart`,
+`soil_core::atom`), driven by `soil_print`'s restart path: they walk every
+registered extension and call its derived `pack` / `unpack` per atom. So
+restart correctness rides entirely on `pack` / `unpack` — and therefore on the
+same field-declaration-order wire layout as migration.
 
 ### The canonical per-step ordering
 

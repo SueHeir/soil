@@ -46,15 +46,21 @@
 //!
 //! # Extending Dump / VTP Output
 //!
-//! Plugins can register additional per-atom columns via [`DumpRegistry`]:
+//! Plugins register additional per-atom columns via [`DumpRegistry`]. The
+//! registry uses interior mutability, so a plugin takes a shared ref from its
+//! `build()`:
 //!
 //! ```rust,ignore
-//! let dump_reg = app.get_resource_mut::<DumpRegistry>().unwrap();
+//! let dump_reg = app.get_resource_ref::<DumpRegistry>().unwrap();
 //! dump_reg.register_scalar("pressure", |atoms, registry| {
 //!     // Return Vec<f64> of length atoms.nlocal
 //!     vec![0.0; atoms.nlocal as usize]
 //! });
 //! ```
+//!
+//! See `examples/output_wiring.rs` for a runnable end-to-end demonstration that
+//! registers a scalar column, a vector column, a custom dump format, and a
+//! thermo value.
 
 use std::{
     cell::RefCell,
@@ -402,13 +408,15 @@ impl RestartData {
 /// # Example
 ///
 /// ```rust,ignore
-/// // In a plugin's build():
-/// let dump_reg = app.get_resource_mut::<DumpRegistry>().unwrap();
+/// // In a plugin's build() — `register_scalar` takes `&self`, so a shared ref:
+/// let dump_reg = app.get_resource_ref::<DumpRegistry>().unwrap();
 /// dump_reg.register_scalar("pressure", |atoms, registry| {
 ///     let dem = registry.expect::<DemAtom>("pressure");
 ///     (0..atoms.nlocal as usize).map(|i| /* ... */ 0.0).collect()
 /// });
 /// ```
+///
+/// See `soil_print`'s `examples/output_wiring.rs` for a compiling end-to-end use.
 pub struct DumpRegistry {
     scalar_fns: RefCell<Vec<(String, Box<dyn Fn(&Atom, &AtomDataRegistry) -> Vec<f64>>)>>,
     vector_fns: RefCell<Vec<(String, Box<dyn Fn(&Atom, &AtomDataRegistry) -> Vec<[f64; 3]>>)>>,

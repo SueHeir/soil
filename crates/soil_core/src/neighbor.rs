@@ -316,6 +316,11 @@ fn compute_bin_grid(neighbor: &mut Neighbor, domain: &Domain, comm_size: i32) {
     let required_bin = if comm_size > 1 { max_cutoff * 0.5 } else { max_cutoff };
     let min_bin = neighbor.bin_min_size.max(required_bin);
 
+    if domain.triclinic {
+        compute_bin_grid_triclinic(neighbor, domain, max_cutoff, min_bin);
+        return;
+    }
+
     // Compute number of interior bins per axis (at least 1), then actual bin sizes.
     let xi = (domain.sub_length[0] / min_bin).floor().max(1.0) as i32;
     let yi = (domain.sub_length[1] / min_bin).floor().max(1.0) as i32;
@@ -389,6 +394,104 @@ fn compute_bin_grid(neighbor: &mut Neighbor, domain: &Domain, comm_size: i32) {
         domain.boundaries_high[1] - domain.boundaries_low[1],
         domain.boundaries_high[2] - domain.boundaries_low[2],
     ];
+}
+
+/// Triclinic bin grid: bins live in fractional (lamda) coordinates where the
+/// tilted box is the unit cube, so `bin_origin`/`bin_size` are lamda quantities and
+/// the binning code must map positions through [`Domain::x2lamda`] before flooring.
+///
+/// The grid (origin/size/count) is **tilt-independent** — only the stencil depends
+/// on the tilt, because a step in λ₁ (the gradient) shifts real x by `xy·Δλ₁`, so
+/// y-neighbours appear x-displaced. The stencil is rebuilt for the *current* tilt
+/// each rebuild (the deform forces a rebuild every step anyway). The min-distance
+/// test is deliberately **conservative** (it lets the x term be cancelled and the
+/// y/z separations reach their per-cell minimum independently) so no real-space
+/// neighbour within `max_cutoff` is ever excluded; the real-space distance filter
+/// in `bin_neighbor_list` removes the resulting false positives.
+fn compute_bin_grid_triclinic(neighbor: &mut Neighbor, domain: &Domain, max_cutoff: f64, min_bin: f64) {
+    let l = domain.size; // real edge lengths [Lx, Ly, Lz]
+    let xy = domain.tilt[0];
+    // Lamda sub-domain lengths (uniform fractions = 1/nproc per dim).
+    let sub_l = [
+        domain.sub_lamda_high[0] - domain.sub_lamda_low[0],
+        domain.sub_lamda_high[1] - domain.sub_lamda_low[1],
+        domain.sub_lamda_high[2] - domain.sub_lamda_low[2],
+    ];
+
+    // Interior bins per dim, sized so each bin's real extent >= min_bin.
+    let ni = [
+        (sub_l[0] * l[0] / min_bin).floor().max(1.0) as i32,
+        (sub_l[1] * l[1] / min_bin).floor().max(1.0) as i32,
+        (sub_l[2] * l[2] / min_bin).floor().max(1.0) as i32,
+    ];
+    // Lamda bin sizes and their approximate real extents along each lamda axis.
+    let bl = [sub_l[0] / ni[0] as f64, sub_l[1] / ni[1] as f64, sub_l[2] / ni[2] as f64];
+    let real_bin = [bl[0] * l[0], bl[1] * l[1], bl[2] * l[2]];
+
+    let ghost_cut = if domain.ghost_cutoff > max_cutoff { domain.ghost_cutoff } else { max_cutoff };
+    let stencil_range = [
+        (max_cutoff / real_bin[0]).ceil() as i32,
+        (max_cutoff / real_bin[1]).ceil() as i32,
+        (max_cutoff / real_bin[2]).ceil() as i32,
+    ];
+    // Box-flip bounds |xy| <= 0.5*Lx, so the x stencil/ghost reach must cover that
+    // tilt skew in addition to the cutoff (a y-neighbour is shifted up to xy in x).
+    let skew_x_bins = (xy.abs() / real_bin[0]).ceil() as i32;
+    let sx = (ghost_cut / real_bin[0]).ceil() as i32 + stencil_range[0] + skew_x_bins;
+    let sy = (ghost_cut / real_bin[1]).ceil() as i32 + stencil_range[1];
+    let sz = (ghost_cut / real_bin[2]).ceil() as i32 + stencil_range[2];
+
+    let nx = ni[0] + 2 * sx;
+    let ny = ni[1] + 2 * sy;
+    let nz = ni[2] + 2 * sz;
+    neighbor.bin_count = [nx, ny, nz];
+    neighbor.bin_size = bl;
+    neighbor.bin_total_cells = (nx * ny * nz) as usize;
+    neighbor.bin_origin = [
+        domain.sub_lamda_low[0] - bl[0] * sx as f64,
+        domain.sub_lamda_low[1] - bl[1] * sy as f64,
+        domain.sub_lamda_low[2] - bl[2] * sz as f64,
+    ];
+
+    // Stencil: conservative triclinic min-distance test (see fn doc).
+    let cutoff_sq = max_cutoff * max_cutoff;
+    neighbor.bin_stencil.clear();
+    neighbor.bin_stencil_forward.clear();
+    neighbor.bin_stencil_self = false;
+    for dx in -sx..=sx {
+        for dy in -sy..=sy {
+            for dz in -sz..=sz {
+                // y/z contribution at their per-cell minimum separation.
+                let m1 = (dy.unsigned_abs().saturating_sub(1)) as f64 * bl[1];
+                let m2 = (dz.unsigned_abs().saturating_sub(1)) as f64 * bl[2];
+                let dyz_sq = (l[1] * m1) * (l[1] * m1) + (l[2] * m2) * (l[2] * m2);
+                if dyz_sq >= cutoff_sq {
+                    continue;
+                }
+                let budget = (cutoff_sq - dyz_sq).sqrt();
+                // Achievable real-x displacement interval, letting Δλ0 and Δλ1 each
+                // range over their full per-cell boxes (generous → never misses).
+                let a_lo = l[0] * (dx as f64 - 1.0) * bl[0];
+                let a_hi = l[0] * (dx as f64 + 1.0) * bl[0];
+                let b1 = xy * (dy as f64 - 1.0) * bl[1];
+                let b2 = xy * (dy as f64 + 1.0) * bl[1];
+                let (b_lo, b_hi) = if b1 <= b2 { (b1, b2) } else { (b2, b1) };
+                let lo = a_lo + b_lo;
+                let hi = a_hi + b_hi;
+                if hi >= -budget && lo <= budget {
+                    let offset = dx * ny * nz + dy * nz + dz;
+                    neighbor.bin_stencil.push(offset);
+                    if offset > 0 {
+                        neighbor.bin_stencil_forward.push(offset);
+                    } else if offset == 0 {
+                        neighbor.bin_stencil_self = true;
+                    }
+                }
+            }
+        }
+    }
+
+    neighbor.pbc_box = [l[0], l[1], l[2]];
 }
 
 /// Recompute bin grid parameters after domain bounds change (e.g., shrink-wrap).
@@ -806,12 +909,16 @@ pub fn sort_atoms_by_bin(mut atoms: ResMut<Atom>, mut neighbor: ResMut<Neighbor>
     perm.clear();
     perm.resize(nlocal, 0usize);
 
-    // 1. assign each atom to a cell and histogram (counts[c+1] = #atoms in cell c)
+    // 1. assign each atom to a cell and histogram (counts[c+1] = #atoms in cell c).
+    // Triclinic: bin in fractional (lamda) coords where the box is the unit cube.
+    let triclinic = domain.triclinic;
     for i in 0..nlocal {
-        let p = atoms.pos[i];
-        let cx = (((p[0] as f64 - ox) * inv_bsx).floor() as i32).clamp(0, nx - 1);
-        let cy = (((p[1] as f64 - oy) * inv_bsy).floor() as i32).clamp(0, ny - 1);
-        let cz = (((p[2] as f64 - oz) * inv_bsz).floor() as i32).clamp(0, nz - 1);
+        let pr = atoms.pos[i];
+        let pf = [pr[0] as f64, pr[1] as f64, pr[2] as f64];
+        let p = if triclinic { domain.x2lamda(pf) } else { pf };
+        let cx = (((p[0] - ox) * inv_bsx).floor() as i32).clamp(0, nx - 1);
+        let cy = (((p[1] - oy) * inv_bsy).floor() as i32).clamp(0, ny - 1);
+        let cz = (((p[2] - oz) * inv_bsz).floor() as i32).clamp(0, nz - 1);
         let c = (cx * ny * nz + cy * nz + cz) as u32;
         cell[i] = c;
         counts[c as usize + 1] += 1;
@@ -907,9 +1014,11 @@ pub fn bin_neighbor_list(
     atoms: Res<Atom>,
     mut neighbor: ResMut<Neighbor>,
     mut comm_state: ResMut<CurrentState<CommState>>,
+    domain: Res<Domain>,
 ) {
     let nlocal = atoms.nlocal as usize;
     let total = atoms.len();
+    let triclinic = domain.triclinic;
 
     comm_state.0 = CommState::CommunicateOnly;
     save_build_positions(&atoms, &mut neighbor);
@@ -954,10 +1063,13 @@ pub fn bin_neighbor_list(
     };
     // SAFETY: i < total = atoms.len(), cell is clamped to 0..total_cells by clamp on cx/cy/cz.
     for i in ghost_start..total {
-        let pi = unsafe { atoms.pos.get_unchecked(i) };
-        let cx = ((pi[0] as f64 - bin_ox) * inv_bsx).floor() as i32;
-        let cy = ((pi[1] as f64 - bin_oy) * inv_bsy).floor() as i32;
-        let cz = ((pi[2] as f64 - bin_oz) * inv_bsz).floor() as i32;
+        let pi_real = unsafe { *atoms.pos.get_unchecked(i) };
+        // Triclinic: bin in fractional (lamda) coords (matches sort_atoms_by_bin).
+        let pi_f = [pi_real[0] as f64, pi_real[1] as f64, pi_real[2] as f64];
+        let pi = if triclinic { domain.x2lamda(pi_f) } else { pi_f };
+        let cx = ((pi[0] - bin_ox) * inv_bsx).floor() as i32;
+        let cy = ((pi[1] - bin_oy) * inv_bsy).floor() as i32;
+        let cz = ((pi[2] - bin_oz) * inv_bsz).floor() as i32;
         let cx = cx.clamp(0, nx - 1);
         let cy = cy.clamp(0, ny - 1);
         let cz = cz.clamp(0, nz - 1);
@@ -1387,6 +1499,90 @@ mod tests {
             assert!(
                 bin_pairs.contains(pair),
                 "Bin neighbor list missed pair {:?} found by reference",
+                pair
+            );
+        }
+    }
+
+    #[test]
+    fn triclinic_bin_neighbor_list_matches_reference() {
+        // Same cross-check as above but with a TILTED (triclinic) box. Atoms are
+        // kept in the interior so no periodic/ghost pairs are needed — this isolates
+        // the lamda binning + triclinic stencil: it must still find every real-space
+        // pair within cutoff (no misses from a too-narrow sheared stencil).
+        let n = 40;
+        let skin_fraction = 1.0;
+        let radius = 0.3;
+        let xy = 1.0; // box tilt (0.25*Lx, within the box-flip bound)
+
+        let mut positions = Vec::new();
+        for i in 0..n {
+            // Spread through the interior [0.6, 3.4]^3 so no wrap is required.
+            let x = (i as f64 * 0.31).sin() * 1.4 + 2.0;
+            let y = (i as f64 * 0.67).cos() * 1.4 + 2.0;
+            let z = (i as f64 * 0.97).sin() * 1.4 + 2.0;
+            positions.push([x, y, z]);
+        }
+
+        let cutoffs: Vec<f64> = vec![radius; n];
+        let ref_pairs = reference_all_pairs(&positions, &cutoffs, skin_fraction, n);
+
+        let mut app = App::new();
+        let mut atom = Atom::new();
+        for i in 0..n {
+            push_atom(&mut atom, i as u32, positions[i], radius);
+        }
+        atom.nlocal = n as u32;
+        atom.natoms = n as u64;
+
+        let mut domain = crate::Domain::new();
+        domain.boundaries_low = [0.0, 0.0, 0.0];
+        domain.boundaries_high = [4.0, 4.0, 4.0];
+        domain.sub_domain_low = [0.0, 0.0, 0.0];
+        domain.sub_domain_high = [4.0, 4.0, 4.0];
+        domain.size = [4.0, 4.0, 4.0];
+        domain.sub_length = [4.0, 4.0, 4.0];
+        domain.sub_lamda_low = [0.0, 0.0, 0.0];
+        domain.sub_lamda_high = [1.0, 1.0, 1.0];
+        domain.triclinic = true;
+        domain.tilt = [xy, 0.0, 0.0];
+
+        let mut neighbor = Neighbor::new();
+        neighbor.skin_fraction = skin_fraction;
+        neighbor.bin_min_size = 0.5;
+
+        app.add_resource(atom);
+        app.add_resource(neighbor);
+        app.add_resource(domain);
+        app.add_resource(NeighborConfig::default());
+        app.add_resource(CurrentState(CommState::FullRebuild));
+        app.add_resource(crate::CommResource(Box::new(crate::SingleProcessComm::new())));
+        app.add_setup_system(neighbor_setup, ScheduleSetupSet::PostSetup);
+        app.add_update_system(bin_neighbor_list, ParticleSimScheduleSet::Neighbor);
+        app.organize_systems();
+        app.setup();
+        app.run();
+
+        let neigh = app.get_resource_ref::<Neighbor>().unwrap();
+        let mut bin_pairs = Vec::new();
+        for i in 0..n {
+            if i + 1 >= neigh.neighbor_offsets.len() {
+                break;
+            }
+            let start = neigh.neighbor_offsets[i] as usize;
+            let end = neigh.neighbor_offsets[i + 1] as usize;
+            for k in start..end {
+                let j = neigh.neighbor_indices[k] as usize;
+                bin_pairs.push(if i < j { (i, j) } else { (j, i) });
+            }
+        }
+        bin_pairs.sort();
+        bin_pairs.dedup();
+
+        for pair in &ref_pairs {
+            assert!(
+                bin_pairs.contains(pair),
+                "Triclinic bin neighbor list missed pair {:?} found by reference",
                 pair
             );
         }

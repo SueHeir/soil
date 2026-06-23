@@ -1,14 +1,24 @@
 //! Box deformation fix for SOIL.
 //!
 //! Continuously modifies simulation box boundaries during a run, analogous to
-//! LAMMPS `fix deform`. Supports per-axis independent control with three styles:
+//! LAMMPS `fix deform`. Supports per-axis independent control with three styles,
+//! plus Lees–Edwards `xy` simple shear:
 //!
 //! - **erate** — engineering strain rate: `L(t) = L0 * (1 + rate * dt * step)`
 //! - **vel** — constant velocity on box faces: `L(t) = L0 + velocity * dt * step`
 //! - **final** — linear ramp to a target value over the run
+//! - **xy** — Lees–Edwards simple shear (see below)
 //!
 //! Atom positions are remapped proportionally (affine transformation) when the
 //! box changes, ensuring particles stay inside the domain.
+//!
+//! ## Center-symmetric, not one-sided
+//!
+//! For `erate` and `vel`, the box is resized **symmetrically about its center**:
+//! *both* faces move so the box center stays put. There is no single-platen mode
+//! here — `vel = v` moves each face by `v/2·dt·step`, not one face by `v·dt·step`.
+//! Use a `[[pin]]` group plus a velocity-driven wall in a physics tier if you
+//! need a genuinely one-sided platen.
 //!
 //! # Configuration
 //!
@@ -23,14 +33,50 @@
 //! # Ramp y-axis to target bounds over the run
 //! # y = { style = "final", lo = 0.0, hi = 0.02 }
 //!
+//! # Lees–Edwards simple shear: tilt x (flow) as a function of y (gradient)
+//! # xy = { style = "erate", rate = 0.5 }   # shear-strain rate γ̇ (units 1/s)
+//!
 //! # Remap atom positions (default: true)
 //! remap = true
 //! ```
 //!
+//! # Lees–Edwards `xy` simple shear
+//!
+//! `xy = { style = "erate", rate = γ̇ }` drives the box into a **triclinic**
+//! (tilted) state to impose simple shear in the x (flow) direction as a function
+//! of y (gradient). Key facts:
+//!
+//! - `rate` is a **shear-strain rate** γ̇ (units 1/s), *not* a length rate. The
+//!   tilt grows as `xy(t) = γ̇·L_y·t` and the gradient-direction edge moves at
+//!   `Δv = γ̇·L_y`. Ghost copies wrapping the sheared y-face pick up that
+//!   streaming-velocity jump.
+//! - It **requires periodic x and y boundaries** — `setup_deform` panics
+//!   otherwise.
+//! - Only `style = "erate"` is supported for `xy` (other styles panic).
+//! - On the first shear step a linear streaming profile `v_x = γ̇·(y − y_center)`
+//!   is imposed once so the system starts near steady simple shear.
+//! - The tilt is box-flip-wrapped into `[−Lx/2, Lx/2]` so the ghost/stencil reach
+//!   stays bounded.
+//!
 //! # Scheduling
 //!
 //! The deform system runs at [`ParticleSimScheduleSet::PreInitialIntegration`], updating
-//! domain bounds and remapping atoms before the Verlet position update.
+//! domain bounds and remapping atoms before the Verlet position update. Every box
+//! change sets `domain.bounds_changed` and clears the neighbor list's last-build
+//! positions, forcing a neighbor rebuild on the next step.
+//!
+//! # Multi-stage / time-origin semantics
+//!
+//! The `[deform]` config is **re-read at the start of every `[[run]]` stage**
+//! (the setup system runs at [`ScheduleSetupSet::PostSetup`]), so per-stage
+//! overrides take effect. At each stage boundary:
+//!
+//! - the current domain bounds are snapshotted as `lo_0`/`hi_0` (the deformation
+//!   origin), so strain is measured from the *start of the stage*, not the start
+//!   of the run;
+//! - the elapsed-step counter `step` is reset to 0;
+//! - a stage with **no** `[deform]` section clears all axes and the xy shear, so
+//!   deformation does not silently persist from a previous stage.
 
 use grass_app::prelude::*;
 use soil_core::{Atom, CommResource, Config, Domain, ParticleSimScheduleSet, Real, ScheduleSetupSet, StageOverrides};
@@ -105,6 +151,13 @@ pub struct DeformConfig {
     /// Z-axis deformation definition (omit to leave z unchanged).
     #[serde(default)]
     pub z: Option<AxisDeformDef>,
+    /// xy-shear (Lees–Edwards simple shear) definition: tilts the box in the x
+    /// (flow) direction as a function of y (gradient). `xy = { style = "erate",
+    /// rate = γ̇ }` drives the tilt at engineering shear-strain rate γ̇ (units 1/s),
+    /// i.e. `xy(t) = γ̇·L_y·t`, with the streaming-velocity remap applied on
+    /// y-crossings. Requires periodic x and y. Omit for no shear.
+    #[serde(default)]
+    pub xy: Option<AxisDeformDef>,
     /// Whether to remap atom positions proportionally when the box changes.
     /// Default: `true`.
     #[serde(default = "default_true")]
@@ -142,6 +195,13 @@ pub struct AxisDeform {
 pub struct DeformState {
     /// Per-axis deform (`None` = axis not deforming). Indices: 0=x, 1=y, 2=z.
     pub axes: [Option<AxisDeform>; 3],
+    /// xy Lees–Edwards shear-strain rate γ̇ (`None` = no shear). When set, the box
+    /// is driven triclinic: `xy(t) = γ̇·L_y·t` (box-flip-wrapped to `[-Lx/2, Lx/2]`)
+    /// and the gradient-direction edge moves at `Δv = γ̇·L_y`.
+    pub shear_xy_rate: Option<f64>,
+    /// Whether the initial linear streaming profile `v_x = γ̇·(y − y_center)` has
+    /// been imposed on the local atoms (done once at the first shear step).
+    pub shear_initialized: bool,
     /// Whether to remap atom positions affinely when the box changes.
     pub remap: bool,
     /// Number of timesteps elapsed since the current stage's deformation started.
@@ -151,9 +211,9 @@ pub struct DeformState {
 }
 
 impl DeformState {
-    /// Returns `true` if at least one axis has an active deformation definition.
+    /// Returns `true` if at least one axis or the xy shear has an active definition.
     pub fn has_any(&self) -> bool {
-        self.axes.iter().any(|a| a.is_some())
+        self.axes.iter().any(|a| a.is_some()) || self.shear_xy_rate.is_some()
     }
 }
 
@@ -193,6 +253,8 @@ impl Plugin for DeformPlugin {
 
         let state = DeformState {
             axes: [None, None, None],
+            shear_xy_rate: None,
+            shear_initialized: false,
             remap: true,
             step: 0,
             initialized: false,
@@ -258,6 +320,21 @@ fn parse_axis_def(def: &Option<AxisDeformDef>, axis_name: &str) -> Option<AxisDe
     })
 }
 
+/// Parse the `[deform] xy = { style = "erate", rate = γ̇ }` shear definition into a
+/// shear-strain rate. Returns `None` if no shear is configured.
+///
+/// # Panics
+/// - If `style` is not `"erate"`, or `rate` is missing.
+fn parse_shear_rate(def: &Option<AxisDeformDef>) -> Option<f64> {
+    let def = def.as_ref()?;
+    match def.style.as_str() {
+        "erate" => Some(def.rate.unwrap_or_else(|| {
+            panic!("[deform] xy: style 'erate' requires 'rate' field (shear-strain rate γ̇)");
+        })),
+        other => panic!("[deform] xy: unsupported style '{other}'. Lees–Edwards shear uses 'erate'."),
+    }
+}
+
 // ── Setup system ────────────────────────────────────────────────────────────
 
 /// Re-read deformation config from stage overrides and initialize state.
@@ -281,7 +358,17 @@ fn setup_deform(
         parse_axis_def(&config.y, "y"),
         parse_axis_def(&config.z, "z"),
     ];
+    state.shear_xy_rate = parse_shear_rate(&config.xy);
+    state.shear_initialized = false;
     state.remap = config.remap;
+
+    // Lees–Edwards shear requires periodic flow (x) and gradient (y) axes.
+    if state.shear_xy_rate.is_some() && (!domain.is_periodic(0) || !domain.is_periodic(1)) {
+        panic!(
+            "[deform] xy shear requires periodic x and y boundaries (got x={:?}, y={:?})",
+            domain.boundary_type[0], domain.boundary_type[1]
+        );
+    }
 
     // Set initial bounds from current domain and reset step counter.
     for (dim, axis) in state.axes.iter_mut().enumerate() {
@@ -321,6 +408,13 @@ fn setup_deform(
                     }
                 }
             }
+        }
+        if let Some(rate) = state.shear_xy_rate {
+            let ly = domain.boundaries_high[1] - domain.boundaries_low[1];
+            println!(
+                "Deform xy: Lees-Edwards shear erate={:.6e} (γ̇), Δv=γ̇·Ly={:.6e}",
+                rate, rate * ly
+            );
         }
     }
 }
@@ -462,9 +556,47 @@ fn apply_deform(
         box_changed = true;
     }
 
+    // ── Lees–Edwards xy shear (triclinic) ────────────────────────────────────
+    if let Some(rate) = state.shear_xy_rate {
+        let lx = domain.size[0];
+        let ly = domain.size[1];
+        // Streaming-velocity jump across the moving gradient (y) box edge.
+        let dv = rate * ly;
+
+        // One-time linear streaming profile v_x = γ̇·(y − y_center), so the system
+        // starts near steady simple shear (centered → ~zero net x-momentum).
+        if !state.shear_initialized {
+            let yc = 0.5 * (domain.boundaries_low[1] + domain.boundaries_high[1]);
+            for i in 0..nlocal {
+                atoms.vel[i][0] += (rate * (atoms.pos[i][1] as f64 - yc)) as Real;
+            }
+            state.shear_initialized = true;
+        }
+
+        // Engineering tilt xy(t) = γ̇·Ly·t, box-flip-wrapped into [−Lx/2, Lx/2].
+        // The wrap is an exact relabeling to an equivalent periodic image (b → b−a),
+        // which keeps the ghost/stencil reach bounded; atoms re-image in `pbc`.
+        let raw = rate * dt * step as f64 * ly;
+        let xy = raw - lx * (raw / lx).round();
+        domain.tilt[0] = xy;
+        domain.boundary_vel[0] = dv;
+        domain.triclinic = true;
+        // Tilt grows each step → rebuild the tilt-dependent neighbor stencil.
+        domain.bounds_changed = true;
+        box_changed = true;
+    }
+
     if box_changed {
         // Update volume
         domain.volume = domain.size[0] * domain.size[1] * domain.size[2];
+
+        // Recompute the neighbor bin grid for the new box extents. Without this,
+        // a deforming box keeps a stale grid: on expansion atoms spread past the
+        // grid, clamp into edge cells, and a stencil offset from an edge cell can
+        // run past `bin_total_cells` → out-of-bounds in the (unchecked) neighbor
+        // build (a SIGSEGV seen on dilute box expansion). `sort_atoms_by_bin`
+        // calls `recompute_bins` when this flag is set.
+        domain.bounds_changed = true;
 
         // Force neighbor rebuild by clearing last build positions
         neighbor.last_build_pos.clear();
@@ -493,19 +625,15 @@ mod tests {
 
     fn make_domain(lo: [f64; 3], hi: [f64; 3]) -> Domain {
         let size = [hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]];
-        Domain {
-            boundaries_low: lo,
-            boundaries_high: hi,
-            sub_domain_low: lo,
-            sub_domain_high: hi,
-            sub_length: size,
-            size,
-            volume: size[0] * size[1] * size[2],
-            boundary_type: Default::default(),
-            shrink_wrap_padding: 0.0,
-            bounds_changed: false,
-            ghost_cutoff: 0.0,
-        }
+        let mut d = Domain::new();
+        d.boundaries_low = lo;
+        d.boundaries_high = hi;
+        d.sub_domain_low = lo;
+        d.sub_domain_high = hi;
+        d.sub_length = size;
+        d.size = size;
+        d.volume = size[0] * size[1] * size[2];
+        d
     }
 
     fn make_neighbor() -> Neighbor {
@@ -538,6 +666,8 @@ mod tests {
                 }),
             ],
             remap: true,
+            shear_xy_rate: None,
+            shear_initialized: false,
             step: 0,
             initialized: true,
         };
@@ -584,6 +714,8 @@ mod tests {
                 None,
             ],
             remap: true,
+            shear_xy_rate: None,
+            shear_initialized: false,
             step: 0,
             initialized: true,
         };
@@ -627,6 +759,8 @@ mod tests {
                 None,
             ],
             remap: true,
+            shear_xy_rate: None,
+            shear_initialized: false,
             step: 0,
             initialized: true,
         };
@@ -679,6 +813,8 @@ mod tests {
                 }),
             ],
             remap: true,
+            shear_xy_rate: None,
+            shear_initialized: false,
             step: 0,
             initialized: true,
         };
@@ -733,6 +869,8 @@ mod tests {
                 }),
             ],
             remap: false,
+            shear_xy_rate: None,
+            shear_initialized: false,
             step: 0,
             initialized: true,
         };
@@ -775,6 +913,8 @@ mod tests {
                 }),
             ],
             remap: true,
+            shear_xy_rate: None,
+            shear_initialized: false,
             step: 0,
             initialized: true,
         };
@@ -820,6 +960,8 @@ mod tests {
                 }),
             ],
             remap: true,
+            shear_xy_rate: None,
+            shear_initialized: false,
             step: 0,
             initialized: true,
         };

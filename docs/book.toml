@@ -1,0 +1,19 @@
+[book]
+title = "SOIL — Substrate for Off-lattice Interacting Lagrangians"
+description = "Guide to the SOIL particle substrate and writing your own particle-physics tier"
+authors = ["Elizabeth Suehr"]
+language = "en"
+src = "src"
+
+[build]
+build-dir = "book"
+create-missing = false
+
+[output.html]
+default-theme = "rust"
+git-repository-url = "https://github.com/SueHeir/soil"
+edit-url-template = "https://github.com/SueHeir/soil/edit/master/docs/{path}"
+
+[output.html.fold]
+enable = true
+level = 1

@@ -68,6 +68,32 @@ impl GpuContext {
             force_fallback_adapter: false,
         }))
         .ok()?;
+        Self::from_adapter(adapter)
+    }
+
+    /// One-GPU-per-rank binding for MPI scale-out (step 3): rank `local_rank` binds
+    /// adapter `local_rank % num_adapters`. On a single-GPU machine every rank gets
+    /// the one device (a no-op, so this is safe everywhere); on a multi-GPU node it
+    /// spreads ranks across devices. Falls back to the default adapter if adapter
+    /// enumeration yields none.
+    pub fn new_for_rank(local_rank: usize) -> Option<Self> {
+        let instance = wgpu::Instance::default();
+        let adapters = pollster::block_on(instance.enumerate_adapters(wgpu::Backends::all()));
+        let adapter = if adapters.is_empty() {
+            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::HighPerformance,
+                compatible_surface: None,
+                force_fallback_adapter: false,
+            }))
+            .ok()?
+        } else {
+            let idx = local_rank % adapters.len();
+            adapters.into_iter().nth(idx)?
+        };
+        Self::from_adapter(adapter)
+    }
+
+    fn from_adapter(adapter: wgpu::Adapter) -> Option<Self> {
         let info = adapter.get_info();
         let adapter_info = format!("{} ({:?})", info.name, info.backend);
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {

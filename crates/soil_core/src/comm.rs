@@ -591,6 +591,91 @@ pub fn forward_comm_borders(
     buffers.forward_scratch = pool;
 }
 
+/// Forward ghost comm that runs `overlap(atoms)` *while the first round's swaps are
+/// in flight* — roadmap step 4's interior/boundary overlap. The caller passes a
+/// closure computing interior forces (pairs that need no ghosts); it executes
+/// during the MPI latency of the first ghost exchange, after which the remaining
+/// rounds complete and the caller runs the boundary pass on the freshly-landed
+/// ghosts. The result is bit-identical to `forward_comm` + a single-pass force
+/// (the interior/boundary split is exact — see `dirt_granular`'s
+/// `interior_boundary_split_matches_single_pass`).
+///
+/// Unlike [`forward_comm`] this never takes the aggregated single-`sendrecv`
+/// shortcut: every round uses the overlap-capable batch primitive so the closure
+/// truly overlaps. If there are no MPI swaps (single process, or all self-sends)
+/// the closure still runs — interior == all when there are no ghosts.
+pub fn forward_comm_overlap(
+    atoms: &mut Atom,
+    registry: &AtomDataRegistry,
+    topo: &CommTopology,
+    comm: &dyn CommBackend,
+    pool: &mut Vec<SwapScratch>,
+    overlap: &mut dyn FnMut(&mut Atom),
+) {
+    let rank = comm.rank();
+    let extra = registry.forward_comm_size();
+    let stride = FORWARD_PACK_SIZE + extra;
+    let swaps = &topo.swap_data;
+    if pool.len() < swaps.len() {
+        pool.resize_with(swaps.len(), SwapScratch::default);
+    }
+
+    let mut overlap_done = false;
+    let mut r = 0;
+    while r < swaps.len() {
+        let end = (r + 2).min(swaps.len());
+        let mut jobs: [usize; 2] = [0, 0];
+        let mut njobs = 0;
+        {
+            let round = &mut pool[r..end];
+            let (first, rest) = round.split_first_mut().unwrap();
+            let mut ops: Vec<SendRecvOp> = Vec::with_capacity(2);
+            if let Some(op) =
+                forward_prepare_swap(&swaps[r], first, atoms, registry, rank, stride, extra)
+            {
+                ops.push(op);
+                jobs[njobs] = r;
+                njobs += 1;
+            }
+            if end > r + 1 {
+                if let Some(op) =
+                    forward_prepare_swap(&swaps[r + 1], &mut rest[0], atoms, registry, rank, stride, extra)
+                {
+                    ops.push(op);
+                    jobs[njobs] = r + 1;
+                    njobs += 1;
+                }
+            }
+            if !ops.is_empty() {
+                if overlap_done {
+                    comm.sendrecv_batch_f64_into(&mut ops);
+                } else {
+                    // `ops` borrow `pool` scratch; `overlap` reborrows `atoms`
+                    // (the pack already copied positions into the send buffers, so
+                    // `atoms` is free here). Disjoint — the closure mutates forces
+                    // while the swaps fly.
+                    let mut wrapped = || overlap(atoms);
+                    comm.sendrecv_batch_overlap_f64_into(&mut ops, &mut wrapped);
+                    overlap_done = true;
+                }
+            }
+        }
+        for &j in &jobs[..njobs] {
+            let swap = &swaps[j];
+            if swap.from_proc != -1 {
+                unpack_forward(&pool[j].recv, atoms, registry, swap.recv_start, swap.recv_count, extra);
+            }
+        }
+        r = end;
+    }
+
+    // Single-process or all-self-send: no batch ran, so the interior work — which
+    // is the entire force when there are no ghosts — still has to execute.
+    if !overlap_done {
+        overlap(atoms);
+    }
+}
+
 /// Build ghost atoms by scanning near-boundary locals and sending them to neighbors.
 ///
 /// Gated by `run_if(in_state(CommState::FullRebuild))`.

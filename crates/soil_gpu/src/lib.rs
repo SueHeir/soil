@@ -42,6 +42,9 @@ pub use neighbor_slots::{NeighborSlots, SLOTS_WGSL};
 pub mod boundary;
 pub use boundary::{Boundary, Plane, BOUNDARY_WGSL};
 
+pub mod gpu_state;
+pub use gpu_state::{GpuForce, GpuState};
+
 /// A wgpu device + queue. Created once and shared by GPU kernels.
 ///
 /// `Clone` is cheap — wgpu `Device`/`Queue` are reference-counted handles — which
@@ -70,7 +73,10 @@ impl GpuContext {
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("soil_gpu device"),
             required_features: wgpu::Features::empty(),
-            required_limits: wgpu::Limits::default(),
+            // Request the adapter's full limits — the resident substrate binds many
+            // storage buffers (cell list + state + per-neighbor slots), above the
+            // conservative default of 8.
+            required_limits: adapter.limits(),
             ..Default::default()
         }))
         .ok()?;

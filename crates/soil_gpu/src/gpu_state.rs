@@ -247,6 +247,21 @@ impl GpuState {
     pub fn set_aux_state(&self, i: usize, state: &[[f32; 3]]) {
         self.ctx.queue.write_buffer(&self.aux_dofs[i].state, 0, bytemuck::cast_slice(&flat3(state)));
     }
+
+    // ── Partial slice writes (GPU-resident MPI halos) ────────────────────────
+    // Overwrite a contiguous atom range starting at `start` without touching the
+    // rest of the buffer. The resident-MPI path uses these to refresh the ghost
+    // slice (`start = nlocal`) each step while the local bulk stays on-device.
+    const STRIDE3: u64 = 3 * 4; // [f32; 3] = 12 bytes per atom
+    pub fn write_pos_slice(&self, start: usize, pos: &[[f32; 3]]) {
+        self.ctx.queue.write_buffer(self.cell_list.pos_buffer(), start as u64 * Self::STRIDE3, bytemuck::cast_slice(&flat3(pos)));
+    }
+    pub fn write_vel_slice(&self, start: usize, vel: &[[f32; 3]]) {
+        self.ctx.queue.write_buffer(&self.vel, start as u64 * Self::STRIDE3, bytemuck::cast_slice(&flat3(vel)));
+    }
+    pub fn write_aux_slice(&self, i: usize, start: usize, state: &[[f32; 3]]) {
+        self.ctx.queue.write_buffer(&self.aux_dofs[i].state, start as u64 * Self::STRIDE3, bytemuck::cast_slice(&flat3(state)));
+    }
     pub fn set_aux_inv_coeff(&self, i: usize, inv_coeff: &[f32]) {
         self.ctx.queue.write_buffer(&self.aux_dofs[i].inv_coeff, 0, bytemuck::cast_slice(inv_coeff));
     }

@@ -10,6 +10,38 @@
 //! are `Vec<f64>` or `Vec<[f64; N]>`. Each field becomes a per-atom data column
 //! that the framework can pack, unpack, permute, and communicate.
 //!
+//! **The `AtomData` trait itself lives in `soil_core` (`soil_core::atom`), not
+//! here.** This crate only generates the `impl`. A derived type is wired into a
+//! running simulation with `soil_core`'s `register_atom_data!` macro from a
+//! plugin's `build()` — the derive does *not* generate a `new()` or `Default`,
+//! so register an explicit value (`register_atom_data!(app, MyAtom { col: Vec::new() })`,
+//! or add your own `Default`/`new`). The full lifecycle contract is in
+//! `soil_core::atom`'s module docs and the SOIL book's "AtomData Contract".
+//!
+//! # Attributes as physics (who needs the value, and which way it travels)
+//!
+//! - **`#[forward]` = read-only state a neighbor needs** (radius, omega,
+//!   temperature). The owner's value is *overwritten* onto each ghost every
+//!   exchange — a replica, never an accumulator.
+//! - **`#[reverse]` = a contribution computed on a ghost that must reach the
+//!   owner** (torque, heat flux). `unpack_reverse` *accumulates* (`+=`) into the
+//!   owner, so it almost always pairs with `#[zero]` to reset the accumulator
+//!   each step.
+//! - **`#[zero]` = a per-step accumulator** reset to 0 at the start of each step.
+//! - **no attribute = state that just follows the atom** (bond family, plastic
+//!   history): migrated and permuted with the atom, never ghosted.
+//!
+//! Get the direction wrong and parallel runs diverge silently — this is the one
+//! classification that must be right.
+//!
+//! # Field order is the wire layout
+//!
+//! The generated `pack`/`unpack` serialize fields **in declaration order** into a
+//! flat `f64` buffer, and that same order is the migration *and* restart-file
+//! layout. **Reordering, inserting, or removing a field is a format break**: old
+//! restart files and in-flight migration buffers will deserialize into the wrong
+//! columns. Treat the field list as a versioned wire format.
+//!
 //! ## Field attributes
 //!
 //! | Attribute     | Effect on generated code |

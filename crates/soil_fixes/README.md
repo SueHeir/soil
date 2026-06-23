@@ -30,4 +30,26 @@ group = "anchor"
 ## Plugin
 
 `SoilFixesPlugin` registers the `[[pin]]` constraint (only when at least one is
-configured).
+configured). It is **not** in any default plugin group (`dirt_core`'s
+`CorePlugins` or `dirt_granular`'s `GranularDefaultPlugins`) — add it explicitly:
+
+```rust,ignore
+app.add_plugins(CorePlugins)
+   .add_plugins(SoilFixesPlugin);
+```
+
+## Scheduling
+
+`pin` is the minimal "how to write a fix" template — a fix is a plugin that
+registers systems into the per-step Verlet loop
+(`soil_core::ParticleSimScheduleSet`):
+
+```text
+PreInitialIntegration → InitialIntegration → … → Force → PostForce → … → FinalIntegration
+```
+
+`pin` hooks two passes: **`PreInitialIntegration`** (restore position / zero
+velocity before the Verlet drift, so the integrator can't move a pinned atom)
+and **`PostForce`** (re-enforce after forces, and lazily capture the initial
+position on the first step the group mask is populated). Hooking both is why a
+pinned atom is bit-for-bit fixed whenever forces are evaluated.

@@ -1318,10 +1318,40 @@ pub fn bin_neighbor_list(
     neighbor.bin_sorted_pos = sorted_pos;
 }
 
+/// Classify each LOCAL atom as **boundary** (has at least one ghost neighbour,
+/// index >= `nlocal`) or **interior** (all neighbours local). Building block for
+/// interior/boundary overlap (roadmap step 4): interior forces need no fresh
+/// ghosts, so they can be computed while the halo exchange is in flight; boundary
+/// forces are finished once the ghosts land. Returns a `nlocal`-length mask
+/// (`true` = boundary).
+pub fn classify_boundary_atoms(neighbor: &Neighbor, nlocal: usize) -> Vec<bool> {
+    let off = &neighbor.neighbor_offsets;
+    let idx = &neighbor.neighbor_indices;
+    (0..nlocal)
+        .map(|i| {
+            let (s, e) = (off[i] as usize, off[i + 1] as usize);
+            idx[s..e].iter().any(|&j| j as usize >= nlocal)
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::Atom;
+
+    #[test]
+    fn classify_boundary_atoms_flags_ghost_neighbours() {
+        // 3 local atoms (0,1,2) + 1 ghost (3). CSR neighbour lists:
+        //   atom 0 -> {1}        interior
+        //   atom 1 -> {0, 3}     boundary (3 is a ghost)
+        //   atom 2 -> {}         interior (no neighbours)
+        let mut nb = Neighbor::new();
+        nb.neighbor_offsets = vec![0, 1, 3, 3];
+        nb.neighbor_indices = vec![1, 0, 3];
+        let mask = classify_boundary_atoms(&nb, 3);
+        assert_eq!(mask, vec![false, true, false]);
+    }
     
     fn push_atom(atom: &mut Atom, tag: u32, pos: [f64; 3], radius: f64) {
         atom.push_test_atom(tag, pos, radius, 1.0);

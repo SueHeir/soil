@@ -295,6 +295,71 @@ pub fn decompose_domain(config: &DomainConfig, comm: &dyn CommBackend) -> Domain
     }
 }
 
+// ── Dynamic load balancing (roadmap step 5) ──────────────────────────────────
+
+/// Equal-count split planes along one axis from a global particle histogram.
+/// Returns `px + 1` planes spanning `[lo, hi]`: plane `r` is rank `r`'s low edge
+/// and plane `r+1` its high edge, chosen so each rank owns ~`total/px` particles
+/// (linear interpolation within the boundary bin). Pure — no MPI; the comm-driven
+/// [`rebalance_x`] builds the global histogram and calls this. Degenerate inputs
+/// (no particles, `px < 2`) fall back to an even geometric split.
+pub fn balanced_planes(hist: &[f64], lo: f64, hi: f64, px: usize) -> Vec<f64> {
+    let nbins = hist.len();
+    let w = (hi - lo) / nbins.max(1) as f64;
+    let total: f64 = hist.iter().sum();
+    let mut planes = vec![lo; px + 1];
+    planes[px] = hi;
+    if total <= 0.0 || px < 2 || nbins == 0 {
+        for (r, p) in planes.iter_mut().enumerate() {
+            *p = lo + (hi - lo) * r as f64 / px as f64;
+        }
+        return planes;
+    }
+    let mut cum = 0.0;
+    let mut b = 0usize;
+    for r in 1..px {
+        let target = total * r as f64 / px as f64;
+        while b < nbins && cum + hist[b] < target {
+            cum += hist[b];
+            b += 1;
+        }
+        let frac = if b < nbins && hist[b] > 0.0 { (target - cum) / hist[b] } else { 0.0 };
+        planes[r] = (lo + (b as f64 + frac) * w).clamp(lo, hi);
+    }
+    planes
+}
+
+/// Rebalance the decomposed x-axis so each rank owns ~equal particle counts, then
+/// flag `bounds_changed` to trigger atom re-exchange + neighbour rebuild. Physics
+/// is decomposition-invariant, so a periodically-rebalanced run must reproduce a
+/// static one. Uses only `all_reduce_sum` (one reduction per bin), so it works for
+/// any rank count without an all-gather.
+pub fn rebalance_x(atoms: &Atom, domain: &mut Domain, comm: &dyn CommBackend, nbins: usize) {
+    let px = comm.processor_decomposition()[0] as usize;
+    if px < 2 {
+        return;
+    }
+    let lo = domain.boundaries_low[0];
+    let hi = domain.boundaries_high[0];
+    let w = (hi - lo) / nbins.max(1) as f64;
+    let mut hist = vec![0.0f64; nbins];
+    for i in 0..atoms.nlocal as usize {
+        let b = (((atoms.pos[i][0] as f64 - lo) / w).floor() as usize).min(nbins - 1);
+        hist[b] += 1.0;
+    }
+    for h in hist.iter_mut() {
+        *h = comm.all_reduce_sum_f64(*h);
+    }
+    let planes = balanced_planes(&hist, lo, hi, px);
+    let r = comm.processor_position()[0] as usize;
+    domain.sub_domain_low[0] = planes[r];
+    domain.sub_domain_high[0] = planes[r + 1];
+    domain.sub_length[0] = planes[r + 1] - planes[r];
+    domain.sub_lamda_low[0] = (planes[r] - lo) / domain.size[0];
+    domain.sub_lamda_high[0] = (planes[r + 1] - lo) / domain.size[0];
+    domain.bounds_changed = true;
+}
+
 // ── Plugin ───────────────────────────────────────────────────────────────────
 
 /// Registers [`Domain`] resource and periodic boundary condition systems.
@@ -629,6 +694,37 @@ mod tests {
         let mut c = SingleProcessComm::new();
         c.set_processor_grid(decomp, pos);
         c
+    }
+
+    #[test]
+    fn balanced_planes_equalizes_a_skewed_distribution() {
+        // 10 bins over [0,10]; all mass piled in the left 3 bins (30,30,40 = 100).
+        // Equal-volume split would put the plane at x=5 (0 particles right!);
+        // the load-balanced plane must put ~50 particles each side.
+        let mut hist = vec![0.0; 10];
+        hist[0] = 30.0;
+        hist[1] = 30.0;
+        hist[2] = 40.0;
+        let planes = balanced_planes(&hist, 0.0, 10.0, 2);
+        assert_eq!(planes.len(), 3);
+        assert_eq!(planes[0], 0.0);
+        assert_eq!(planes[2], 10.0);
+        // cum hits 50 inside bin 1: 30 + 20/30 of bin 1 -> x = 1 + 0.6667.
+        assert!((planes[1] - 1.6667).abs() < 0.01, "plane = {}", planes[1]);
+        // particle count left of the plane must be ~half the total.
+        let left: f64 = (0..10)
+            .map(|b| {
+                let (bl, bh) = (b as f64, b as f64 + 1.0);
+                if bh <= planes[1] {
+                    hist[b]
+                } else if bl >= planes[1] {
+                    0.0
+                } else {
+                    hist[b] * (planes[1] - bl)
+                }
+            })
+            .sum();
+        assert!((left - 50.0).abs() < 1e-6, "left = {left}");
     }
 
     #[test]

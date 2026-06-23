@@ -360,6 +360,49 @@ pub fn rebalance_x(atoms: &Atom, domain: &mut Domain, comm: &dyn CommBackend, nb
     domain.bounds_changed = true;
 }
 
+/// Cadence + resolution for periodic dynamic load balancing.
+pub struct LoadBalanceConfig {
+    /// Rebalance every `every`-th invocation (0 disables).
+    pub every: usize,
+    /// Histogram bins along the balanced axis.
+    pub nbins: usize,
+}
+
+#[derive(Default)]
+struct LoadBalanceCounter(usize);
+
+/// Rebalance the x-decomposition by particle count every `every`-th step, at
+/// `PreExchange`, so the following `Exchange` migrates atoms to their new owners.
+fn load_balance_system(
+    atoms: Res<Atom>,
+    mut domain: ResMut<Domain>,
+    comm: Res<CommResource>,
+    cfg: Res<LoadBalanceConfig>,
+    mut counter: ResMut<LoadBalanceCounter>,
+) {
+    counter.0 += 1;
+    if cfg.every == 0 || counter.0 % cfg.every != 0 {
+        return;
+    }
+    rebalance_x(&atoms, &mut domain, &**comm, cfg.nbins);
+}
+
+/// Periodic dynamic 1D load balancing (roadmap step 5). Add to the app to rebalance
+/// the x-decomposition by particle count every `every` steps. Physics is
+/// decomposition-invariant, so a rebalanced run reproduces a static one.
+pub struct LoadBalancePlugin {
+    pub every: usize,
+    pub nbins: usize,
+}
+
+impl Plugin for LoadBalancePlugin {
+    fn build(&self, app: &mut App) {
+        app.add_resource(LoadBalanceConfig { every: self.every, nbins: self.nbins });
+        app.add_resource(LoadBalanceCounter(0));
+        app.add_update_system(load_balance_system, ParticleSimScheduleSet::PreExchange);
+    }
+}
+
 // ── Plugin ───────────────────────────────────────────────────────────────────
 
 /// Registers [`Domain`] resource and periodic boundary condition systems.

@@ -86,6 +86,7 @@ pub struct CellList {
     p_assign: wgpu::ComputePipeline,
     p_prefix: wgpu::ComputePipeline,
     p_scatter: wgpu::ComputePipeline,
+    p_sort: wgpu::ComputePipeline,
 }
 
 const WG: u32 = 64;
@@ -166,6 +167,7 @@ impl CellList {
             p_assign: mk_pipe("assign_cells"),
             p_prefix: mk_pipe("prefix_sum"),
             p_scatter: mk_pipe("scatter"),
+            p_sort: mk_pipe("sort_cells"),
             ctx, n, total_cells, pos, atom_cell, cell_count, cell_start, cursor,
             sorted_atoms, params, staging_u32, bind_group,
         }
@@ -217,6 +219,11 @@ impl CellList {
         pass.dispatch_workgroups(1, 1, 1);
         pass.set_pipeline(&self.p_scatter);
         pass.dispatch_workgroups(atoms, 1, 1);
+        // Deterministic within-cell ordering (one thread per cell) so the neighbour
+        // traversal is reproducible — removes the atomic-scatter race that made
+        // windowed/per-step runs diverge from a single window.
+        pass.set_pipeline(&self.p_sort);
+        pass.dispatch_workgroups(cells, 1, 1);
     }
 
     /// Convenience: upload, build (one submit), block. For one-shot / testing.

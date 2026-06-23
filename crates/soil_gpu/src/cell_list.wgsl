@@ -115,3 +115,33 @@ fn scatter(@builtin(global_invocation_id) gid: vec3<u32>) {
     let slot = atomicAdd(&cursor[c], 1u);
     sorted_atoms[slot] = i;
 }
+
+// Make the within-cell order DETERMINISTIC. The atomic scatter above fills each
+// cell's slice of `sorted_atoms` in non-deterministic (race) order; a chaotic
+// granular trajectory amplifies the resulting f32 summation-order noise. One
+// thread per cell insertion-sorts its slice by ascending atom index, so the
+// neighbour traversal — and thus the whole simulation — is reproducible and
+// window-boundary independent (the residency / MPI-halo correctness gate). Cells
+// hold only a handful of atoms at the contact-cutoff grid spacing, so this is cheap.
+@compute @workgroup_size(64)
+fn sort_cells(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let c = gid.x;
+    if (c >= params.total_cells) { return; }
+    let lo = cell_start[c];
+    let hi = cell_start[c + 1u];
+    var a = lo + 1u;
+    loop {
+        if (a >= hi) { break; }
+        let key = sorted_atoms[a];
+        var b = a;
+        loop {
+            if (b == lo) { break; }
+            let prev = sorted_atoms[b - 1u];
+            if (prev <= key) { break; }
+            sorted_atoms[b] = prev;
+            b = b - 1u;
+        }
+        sorted_atoms[b] = key;
+        a = a + 1u;
+    }
+}

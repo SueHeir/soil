@@ -33,6 +33,14 @@ struct Params {
 /// buffers (pos/vel/force, and later cell-list outputs) plus its own.
 pub trait GpuForce {
     fn record(&self, pass: &mut wgpu::ComputePass);
+    /// History-neutral force evaluation for the entry prime of `run_steps`:
+    /// compute F(x₀) from the *current* contact history WITHOUT advancing it (and
+    /// without storing an advanced history), so re-priming at window boundaries
+    /// (the residency / MPI-halo model) doesn't double-advance the Mindlin spring.
+    /// Default: identical to `record` — correct for stateless hooks.
+    fn record_prime(&self, pass: &mut wgpu::ComputePass) {
+        self.record(pass);
+    }
 }
 
 /// An auxiliary integrated degree of freedom: a velocity-like `state` driven by
@@ -286,31 +294,61 @@ impl GpuState {
             pass.set_bind_group(0, &self.bind_group, &[]);
             pass.set_pipeline(&self.p_seed);
             pass.dispatch_workgroups(g, 1, 1);
+            // History-neutral prime: evaluate F(x₀) without advancing contact
+            // history, so chopping a run into windows (residency / MPI halos)
+            // doesn't double-advance the Mindlin spring at each boundary.
             for hook in &self.hooks {
-                hook.record(&mut pass);
+                hook.record_prime(&mut pass);
             }
-            for _ in 0..steps {
-                pass.set_bind_group(0, &self.bind_group, &[]);
-                pass.set_pipeline(&self.p_init);
-                pass.dispatch_workgroups(g, 1, 1); // kick+drift AND re-seed force=m*g
-                // First aux half-kick (uses the previous step's rate), mirroring
-                // the velocity half-kick in integrate_initial.
-                self.aux_kick(&mut pass, g);
-                // Rebin at the drifted positions so hooks see current neighbors.
-                self.cell_list.record(&mut pass);
-                // Force hooks accumulate the constitutive force onto the m*g seed
-                // that integrate_initial just wrote.
-                for hook in &self.hooks {
-                    hook.record(&mut pass);
-                }
-                pass.set_bind_group(0, &self.bind_group, &[]);
-                pass.set_pipeline(&self.p_final);
-                pass.dispatch_workgroups(g, 1, 1);
-                // Second aux half-kick (uses the freshly computed rate).
-                self.aux_kick(&mut pass, g);
-            }
+            self.record_step_loop(&mut pass, g, steps);
         }
         self.ctx.queue.submit(Some(enc.finish()));
+    }
+
+    /// Continue a resident run for `steps` more steps WITHOUT re-priming the
+    /// force at entry — it trusts the resident `force` buffer left valid by the
+    /// previous window's last step. This is the correct way to stitch residency
+    /// windows (the sync points for neighbor rebuild / MPI halo exchange / I-O):
+    /// re-priming (as `run_steps` does at entry) would re-evaluate the
+    /// velocity-dependent contact damping at the *full* end-of-step velocity
+    /// instead of the *mid-step* (half-kick) velocity the integrator actually
+    /// used, deterministically diverging the trajectory at every boundary. Call
+    /// `run_steps` once to establish F(x₀), then `run_steps_continue` thereafter;
+    /// stitched windows then reproduce one uninterrupted `run_steps` bit-for-bit.
+    /// (Positions/velocities/history must be unchanged on the host between calls;
+    /// if the host mutated them, prime again with `run_steps`.)
+    pub fn run_steps_continue(&self, steps: usize) {
+        let mut enc = self.ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("gs steps cont") });
+        {
+            let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("gs steps cont"), timestamp_writes: None });
+            let g = (self.n as u32).div_ceil(WG).max(1);
+            self.record_step_loop(&mut pass, g, steps);
+        }
+        self.ctx.queue.submit(Some(enc.finish()));
+    }
+
+    /// The K-step velocity-Verlet loop body shared by `run_steps` and
+    /// `run_steps_continue`. Assumes the force buffer already holds F at the
+    /// current positions (set by the caller's prime, or the previous window).
+    fn record_step_loop(&self, pass: &mut wgpu::ComputePass, g: u32, steps: usize) {
+        for _ in 0..steps {
+            pass.set_bind_group(0, &self.bind_group, &[]);
+            pass.set_pipeline(&self.p_init);
+            pass.dispatch_workgroups(g, 1, 1); // kick+drift AND re-seed force=m*g
+            // First aux half-kick (uses the previous step's rate).
+            self.aux_kick(pass, g);
+            // Rebin at the drifted positions so hooks see current neighbors.
+            self.cell_list.record(pass);
+            // Force hooks accumulate the constitutive force onto the m*g seed.
+            for hook in &self.hooks {
+                hook.record(pass);
+            }
+            pass.set_bind_group(0, &self.bind_group, &[]);
+            pass.set_pipeline(&self.p_final);
+            pass.dispatch_workgroups(g, 1, 1);
+            // Second aux half-kick (uses the freshly computed rate).
+            self.aux_kick(pass, g);
+        }
     }
 
     /// Evaluate the force once at the current positions WITHOUT integrating:

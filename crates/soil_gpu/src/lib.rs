@@ -30,6 +30,18 @@ use soil_core::Atom;
 pub mod plugin;
 pub use plugin::{GpuVerlet, VelocityVerletGpuPlugin};
 
+pub mod cell_list;
+pub use cell_list::{CellList, Grid};
+
+pub mod coherence;
+pub use coherence::DualBuffer;
+
+pub mod neighbor_slots;
+pub use neighbor_slots::{NeighborSlots, SLOTS_WGSL};
+
+pub mod boundary;
+pub use boundary::{Boundary, Plane, BOUNDARY_WGSL};
+
 /// A wgpu device + queue. Created once and shared by GPU kernels.
 ///
 /// `Clone` is cheap — wgpu `Device`/`Queue` are reference-counted handles — which

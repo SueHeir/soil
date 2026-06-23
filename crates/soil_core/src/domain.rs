@@ -10,7 +10,7 @@ use grass_app::prelude::*;
 use grass_scheduler::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use crate::{Atom, AtomDataRegistry, CommBackend, CommResource, CommState, Config, ParticleSimScheduleSet, ScheduleSetupSet};
+use crate::{Atom, AtomDataRegistry, CommBackend, CommResource, CommState, Config, ParticleSimScheduleSet, Real, ScheduleSetupSet};
 use grass_scheduler::prelude::CurrentState;
 
 fn default_one_f64() -> f64 {
@@ -387,7 +387,14 @@ pub fn shrink_wrap(
     atoms: Res<Atom>,
     mut domain: ResMut<Domain>,
 ) {
-    shrink_wrap_update(&mut domain, &atoms.pos, atoms.nlocal as usize);
+    // shrink_wrap_update works in f64; convert the local `Real` positions at the
+    // boundary (shrink-wrap is single-process and rare, so the copy is cheap).
+    let nlocal = atoms.nlocal as usize;
+    let positions_f64: Vec<[f64; 3]> = atoms.pos[..nlocal]
+        .iter()
+        .map(|p| [p[0] as f64, p[1] as f64, p[2] as f64])
+        .collect();
+    shrink_wrap_update(&mut domain, &positions_f64, nlocal);
 }
 
 /// Wrap a position into [low, low+size) with periodic boundaries.
@@ -425,8 +432,9 @@ pub fn pbc(
         // Fast path: fully periodic, no removals possible (local atoms only, ghosts live outside box)
         for i in 0..atoms.nlocal as usize {
             for d in 0..3 {
-                let (new_pos, delta) = wrap_periodic(atoms.pos[i][d], low[d], size[d]);
-                atoms.pos[i][d] = new_pos;
+                // `pos` is `Real` (f32 in mixed/single); wrap in f64 then store back.
+                let (new_pos, delta) = wrap_periodic(atoms.pos[i][d] as f64, low[d], size[d]);
+                atoms.pos[i][d] = new_pos as Real;
                 atoms.image[i][d] += delta;
             }
         }
@@ -439,10 +447,10 @@ pub fn pbc(
         'outer: for i in (0..atoms.nlocal as usize).rev() {
             for d in 0..3 {
                 if periodic[d] {
-                    let (new_pos, delta) = wrap_periodic(atoms.pos[i][d], low[d], size[d]);
-                    atoms.pos[i][d] = new_pos;
+                    let (new_pos, delta) = wrap_periodic(atoms.pos[i][d] as f64, low[d], size[d]);
+                    atoms.pos[i][d] = new_pos as Real;
                     atoms.image[i][d] += delta;
-                } else if atoms.pos[i][d] < low[d] || atoms.pos[i][d] >= high[d] {
+                } else if (atoms.pos[i][d] as f64) < low[d] || (atoms.pos[i][d] as f64) >= high[d] {
                     atoms.swap_remove(i);
                     registry.swap_remove_all(i);
                     removed += 1;

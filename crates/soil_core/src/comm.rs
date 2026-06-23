@@ -27,7 +27,7 @@ pub use grass_mpi::{CommBackend, CommResource, SendRecvOp, SingleProcessComm, fi
 #[cfg(feature = "mpi_backend")]
 pub use grass_mpi::{MpiCommBackend, get_mpi_world};
 
-use crate::{Atom, AtomDataRegistry, CommState, Config, Domain, Neighbor, ParticleSimScheduleSet, ScheduleSetupSet};
+use crate::{Accum, Atom, AtomDataRegistry, CommState, Config, Domain, Neighbor, ParticleSimScheduleSet, Real, ScheduleSetupSet};
 
 // ── CommConfig ──────────────────────────────────────────────────────────────
 
@@ -316,7 +316,7 @@ fn pack_border_atoms(
             if swap == 0 { pos_dim < fixed_thresh } else { pos_dim >= fixed_thresh }
         } else {
             // Polydisperse fallback: per-atom skin * 4.0 (DEM default).
-            let cut = atoms.cutoff_radius[i] * 4.0;
+            let cut = atoms.cutoff_radius[i] as f64 * 4.0;
             if swap == 0 { pos_dim < lo_face + cut } else { pos_dim >= hi_face - cut }
         };
         if in_skin {
@@ -373,8 +373,8 @@ fn unpack_forward(msg: &[f64], atoms: &mut Atom, registry: &AtomDataRegistry, re
     let stride = FORWARD_PACK_SIZE + extra_per_atom;
     for k in 0..recv_count {
         let base = k * stride;
-        atoms.pos[recv_start + k] = [msg[base], msg[base + 1], msg[base + 2]];
-        atoms.vel[recv_start + k] = [msg[base + 3], msg[base + 4], msg[base + 5]];
+        atoms.pos[recv_start + k] = [msg[base] as Real, msg[base + 1] as Real, msg[base + 2] as Real];
+        atoms.vel[recv_start + k] = [msg[base + 3] as Real, msg[base + 4] as Real, msg[base + 5] as Real];
         if extra_per_atom > 0 {
             registry.unpack_forward_all(recv_start + k, &msg[base + FORWARD_PACK_SIZE..]);
         }
@@ -392,12 +392,12 @@ fn unpack_forward(msg: &[f64], atoms: &mut Atom, registry: &AtomDataRegistry, re
 fn pack_forward_into(swap: &SwapData, buf: &mut Vec<f64>, atoms: &Atom, registry: &AtomDataRegistry) {
     let offset = swap.periodic_offset;
     for &idx in &swap.send_indices {
-        buf.push(atoms.pos[idx][0] + offset[0]);
-        buf.push(atoms.pos[idx][1] + offset[1]);
-        buf.push(atoms.pos[idx][2] + offset[2]);
-        buf.push(atoms.vel[idx][0]);
-        buf.push(atoms.vel[idx][1]);
-        buf.push(atoms.vel[idx][2]);
+        buf.push(atoms.pos[idx][0] as f64 + offset[0]);
+        buf.push(atoms.pos[idx][1] as f64 + offset[1]);
+        buf.push(atoms.pos[idx][2] as f64 + offset[2]);
+        buf.push(atoms.vel[idx][0] as f64);
+        buf.push(atoms.vel[idx][1] as f64);
+        buf.push(atoms.vel[idx][2] as f64);
         registry.pack_forward_all(idx, buf);
     }
 }
@@ -737,9 +737,9 @@ fn reverse_accumulate(swap: &SwapData, recv: &[f64], atoms: &mut Atom, registry:
     for k in 0..swap.send_indices.len() {
         let base = k * per_atom;
         let origin = swap.send_indices[k];
-        atoms.force[origin][0] += recv[base];
-        atoms.force[origin][1] += recv[base + 1];
-        atoms.force[origin][2] += recv[base + 2];
+        atoms.force[origin][0] += recv[base] as Accum;
+        atoms.force[origin][1] += recv[base + 1] as Accum;
+        atoms.force[origin][2] += recv[base + 2] as Accum;
         if per_atom > 3 {
             registry.unpack_reverse_all(origin, &recv[base + 3..]);
         }
@@ -755,9 +755,9 @@ fn reverse_accumulate(swap: &SwapData, recv: &[f64], atoms: &mut Atom, registry:
 fn pack_reverse_into(swap: &SwapData, buf: &mut Vec<f64>, atoms: &Atom, registry: &AtomDataRegistry) {
     for i in swap.recv_start..(swap.recv_start + swap.recv_count) {
         debug_assert!(atoms.is_ghost[i], "reverse_send_force: atom {} is not ghost", i);
-        buf.push(atoms.force[i][0]);
-        buf.push(atoms.force[i][1]);
-        buf.push(atoms.force[i][2]);
+        buf.push(atoms.force[i][0] as f64);
+        buf.push(atoms.force[i][1] as f64);
+        buf.push(atoms.force[i][2] as f64);
         registry.pack_reverse_all(i, buf);
     }
 }
@@ -963,8 +963,8 @@ pub fn exchange(
 
         // Scan local atoms: pack those outside subdomain in this dimension
         for i in (0..atoms.len()).rev() {
-            let disp_lo = min_image(atoms.pos[i][dim] - domain.sub_domain_low[dim]);
-            let disp_hi = min_image(atoms.pos[i][dim] - domain.sub_domain_high[dim]);
+            let disp_lo = min_image(atoms.pos[i][dim] as f64 - domain.sub_domain_low[dim]);
+            let disp_hi = min_image(atoms.pos[i][dim] as f64 - domain.sub_domain_high[dim]);
             if disp_lo < 0.0 {
                 lo_count += 1.0;
                 atoms.pack_exchange(i, &mut atoms_buff[0]);
@@ -1046,8 +1046,8 @@ pub fn exchange(
                 if decomp[dim] == 1 {
                     continue;
                 }
-                if atoms.pos[i][dim] < domain.sub_domain_low[dim]
-                    || atoms.pos[i][dim] >= domain.sub_domain_high[dim]
+                if (atoms.pos[i][dim] as f64) < domain.sub_domain_low[dim]
+                    || atoms.pos[i][dim] as f64 >= domain.sub_domain_high[dim]
                 {
                     lost += 1;
                     break;

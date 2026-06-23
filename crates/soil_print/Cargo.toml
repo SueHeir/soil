@@ -9,6 +9,13 @@ description = "Output systems for SOIL: thermo, VTP visualization, dump files, r
 keywords = ["output", "vtk", "dem", "simulation"]
 categories = ["simulation", "science"]
 
+[features]
+# Forward the precision config to soil_core. Exactly one must be active.
+default = ["precision-mixed"]
+precision-double = ["soil_core/precision-double"]
+precision-mixed = ["soil_core/precision-mixed"]
+precision-single = ["soil_core/precision-single"]
+
 [dependencies]
 soil_core = { path = "../soil_core", version = "0.1.3", default-features = false }
 grass_app = { git = "https://github.com/SueHeir/grass.git", branch = "main" }

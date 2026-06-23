@@ -13,6 +13,7 @@ pub mod input;
 pub mod region;
 pub mod schedule;
 pub mod neighbor;
+pub mod precision;
 pub mod virial;
 
 /// Internal state controlling the communication/rebuild path each timestep.
@@ -46,6 +47,7 @@ pub use grass_io::deep_merge;
 
 pub use schedule::*;
 pub use neighbor::*;
+pub use precision::{Accum, Real};
 pub use virial::*;
 
 // Re-export toml so downstream users can build Config tables programmatically.

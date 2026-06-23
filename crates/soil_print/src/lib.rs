@@ -68,7 +68,7 @@ use grass_app::prelude::*;
 use grass_scheduler::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use soil_core::{compute_ke, Atom, AtomDataRegistry, CommResource, Config, Domain, GroupRegistry, Input, RunConfig, RunState, ParticleSimScheduleSet, ScheduleSetupSet, VirialStress};
+use soil_core::{compute_ke, Accum, Atom, AtomDataRegistry, CommResource, Config, Domain, GroupRegistry, Input, Real, RunConfig, RunState, ParticleSimScheduleSet, ScheduleSetupSet, VirialStress};
 use soil_core::Neighbor;
 
 // ── Thermo config ───────────────────────────────────────────────────────────
@@ -362,17 +362,19 @@ impl RestartData {
             dt: atoms.dt,
             tag: atoms.tag[..nlocal].to_vec(),
             atom_type: atoms.atom_type[..nlocal].to_vec(),
-            pos_x: atoms.pos[..nlocal].iter().map(|p| p[0]).collect(),
-            pos_y: atoms.pos[..nlocal].iter().map(|p| p[1]).collect(),
-            pos_z: atoms.pos[..nlocal].iter().map(|p| p[2]).collect(),
-            vel_x: atoms.vel[..nlocal].iter().map(|v| v[0]).collect(),
-            vel_y: atoms.vel[..nlocal].iter().map(|v| v[1]).collect(),
-            vel_z: atoms.vel[..nlocal].iter().map(|v| v[2]).collect(),
-            force_x: atoms.force[..nlocal].iter().map(|v| v[0]).collect(),
-            force_y: atoms.force[..nlocal].iter().map(|v| v[1]).collect(),
-            force_z: atoms.force[..nlocal].iter().map(|v| v[2]).collect(),
-            mass: atoms.mass[..nlocal].to_vec(),
-            cutoff_radius: atoms.cutoff_radius[..nlocal].to_vec(),
+            // Restart files keep an f64 wire format regardless of build precision,
+            // so an f32 run can round-trip / restart from an f64 checkpoint losslessly.
+            pos_x: atoms.pos[..nlocal].iter().map(|p| p[0] as f64).collect(),
+            pos_y: atoms.pos[..nlocal].iter().map(|p| p[1] as f64).collect(),
+            pos_z: atoms.pos[..nlocal].iter().map(|p| p[2] as f64).collect(),
+            vel_x: atoms.vel[..nlocal].iter().map(|v| v[0] as f64).collect(),
+            vel_y: atoms.vel[..nlocal].iter().map(|v| v[1] as f64).collect(),
+            vel_z: atoms.vel[..nlocal].iter().map(|v| v[2] as f64).collect(),
+            force_x: atoms.force[..nlocal].iter().map(|v| v[0] as f64).collect(),
+            force_y: atoms.force[..nlocal].iter().map(|v| v[1] as f64).collect(),
+            force_z: atoms.force[..nlocal].iter().map(|v| v[2] as f64).collect(),
+            mass: atoms.mass[..nlocal].iter().map(|&m| m as f64).collect(),
+            cutoff_radius: atoms.cutoff_radius[..nlocal].iter().map(|&r| r as f64).collect(),
             atom_data_buffers: registry.pack_all_for_restart(nlocal),
             // Legacy fields left empty — rotational data now in atom_data_buffers via DemAtom
             omega_x: Vec::new(),
@@ -1168,10 +1170,11 @@ pub(crate) fn dump_atoms_inner(
     for i in 0..count {
         frame.tag.push(atoms.tag[i] as u64);
         frame.atom_type.push(atoms.atom_type[i] as u64);
-        frame.pos.push(atoms.pos[i]);
-        frame.vel.push(atoms.vel[i]);
-        frame.force.push(atoms.force[i]);
-        frame.radius.push(atoms.cutoff_radius[i]);
+        // DumpFrame keeps an f64 output format independent of build precision.
+        frame.pos.push([atoms.pos[i][0] as f64, atoms.pos[i][1] as f64, atoms.pos[i][2] as f64]);
+        frame.vel.push([atoms.vel[i][0] as f64, atoms.vel[i][1] as f64, atoms.vel[i][2] as f64]);
+        frame.force.push([atoms.force[i][0] as f64, atoms.force[i][1] as f64, atoms.force[i][2] as f64]);
+        frame.radius.push(atoms.cutoff_radius[i] as f64);
         if let Some(g) = &mut frame.is_ghost {
             g.push(i >= nlocal);
         }
@@ -1594,15 +1597,16 @@ pub fn read_restart(
     atoms.atom_type = data.atom_type;
     atoms.origin_index = vec![0; n];
     atoms.is_ghost = vec![false; n];
+    // Restart wire format is f64; convert back to the build's storage precision.
     atoms.pos = data.pos_x.iter().zip(data.pos_y.iter()).zip(data.pos_z.iter())
-        .map(|((&x, &y), &z)| [x, y, z]).collect();
+        .map(|((&x, &y), &z)| [x as Real, y as Real, z as Real]).collect();
     atoms.vel = data.vel_x.iter().zip(data.vel_y.iter()).zip(data.vel_z.iter())
-        .map(|((&x, &y), &z)| [x, y, z]).collect();
+        .map(|((&x, &y), &z)| [x as Real, y as Real, z as Real]).collect();
     atoms.force = data.force_x.iter().zip(data.force_y.iter()).zip(data.force_z.iter())
-        .map(|((&x, &y), &z)| [x, y, z]).collect();
-    atoms.mass = data.mass;
+        .map(|((&x, &y), &z)| [x as Accum, y as Accum, z as Accum]).collect();
+    atoms.mass = data.mass.iter().map(|&m| m as Real).collect();
     atoms.inv_mass = atoms.mass.iter().map(|&m| 1.0 / m).collect();
-    atoms.cutoff_radius = data.cutoff_radius;
+    atoms.cutoff_radius = data.cutoff_radius.iter().map(|&r| r as Real).collect();
 
     // Restore AtomData (DemAtom, etc.) from generic buffers
     if !data.atom_data_buffers.is_empty() {

@@ -34,7 +34,7 @@ use grass_scheduler::prelude::*;
 use serde::Deserialize;
 
 use soil_core::{
-    Atom, CommResource, Config, GroupRegistry, ParticleSimScheduleSet, ScheduleSetupSet,
+    Atom, CommResource, Config, GroupRegistry, ParticleSimScheduleSet, Real, ScheduleSetupSet,
 };
 
 /// Pins atoms in a group at their starting positions — a **hard translational
@@ -161,7 +161,9 @@ fn apply_pin_impl(atoms: &mut Atom, registry: &PinRegistry, groups: &GroupRegist
             let mut pinned: HashMap<u32, [f64; 3]> = HashMap::new();
             for i in 0..nlocal {
                 if group.mask[i] {
-                    pinned.insert(atoms.tag[i], atoms.pos[i]);
+                    // Captured pin positions stored in f64 (lossless across precisions).
+                    let p = atoms.pos[i];
+                    pinned.insert(atoms.tag[i], [p[0] as f64, p[1] as f64, p[2] as f64]);
                 }
             }
             state.captured.insert(def.group.clone(), pinned);
@@ -171,7 +173,7 @@ fn apply_pin_impl(atoms: &mut Atom, registry: &PinRegistry, groups: &GroupRegist
         for i in 0..nlocal {
             if group.mask[i] {
                 if let Some(&pos) = pinned.get(&atoms.tag[i]) {
-                    atoms.pos[i] = pos;
+                    atoms.pos[i] = [pos[0] as Real, pos[1] as Real, pos[2] as Real];
                 }
                 atoms.vel[i] = [0.0; 3];
                 atoms.force[i] = [0.0; 3];

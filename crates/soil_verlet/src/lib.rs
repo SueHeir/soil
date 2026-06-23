@@ -24,7 +24,7 @@
 use grass_app::prelude::*;
 use grass_scheduler::prelude::*;
 
-use soil_core::{Atom, ParticleSimScheduleSet};
+use soil_core::{Accum, Atom, ParticleSimScheduleSet, Real};
 
 /// Registers initial and final integration systems for translational Velocity Verlet.
 ///
@@ -104,20 +104,25 @@ pub fn initial_integration(mut atoms: ResMut<Atom>) {
     let force_ptr = atoms.force.as_ptr();
     let vel_ptr = atoms.vel.as_mut_ptr();
     let pos_ptr = atoms.pos.as_mut_ptr();
+    // Integration math runs in `Accum` (drift-safe), results stored back as `Real`.
+    let dt_a = dt as Accum;
     for i in 0..nlocal {
         unsafe {
-            let half_dt_over_m = 0.5 * dt * *inv_mass_ptr.add(i);
+            let half_dt_over_m: Accum = 0.5 * dt_a * (*inv_mass_ptr.add(i)) as Accum;
             let f = &*force_ptr.add(i);
             let v = &mut *vel_ptr.add(i);
             // Half-step velocity kick: v(t) → v(t + Δt/2)
-            v[0] += half_dt_over_m * f[0];
-            v[1] += half_dt_over_m * f[1];
-            v[2] += half_dt_over_m * f[2];
+            let v0 = v[0] as Accum + half_dt_over_m * f[0];
+            let v1 = v[1] as Accum + half_dt_over_m * f[1];
+            let v2 = v[2] as Accum + half_dt_over_m * f[2];
+            v[0] = v0 as Real;
+            v[1] = v1 as Real;
+            v[2] = v2 as Real;
             // Full-step position drift using the half-step velocity
             let p = &mut *pos_ptr.add(i);
-            p[0] += v[0] * dt;
-            p[1] += v[1] * dt;
-            p[2] += v[2] * dt;
+            p[0] = (p[0] as Accum + v0 * dt_a) as Real;
+            p[1] = (p[1] as Accum + v1 * dt_a) as Real;
+            p[2] = (p[2] as Accum + v2 * dt_a) as Real;
         }
     }
 }
@@ -140,15 +145,16 @@ pub fn final_integration(mut atoms: ResMut<Atom>) {
     let inv_mass_ptr = atoms.inv_mass.as_ptr();
     let force_ptr = atoms.force.as_ptr();
     let vel_ptr = atoms.vel.as_mut_ptr();
+    let dt_a = dt as Accum;
     for i in 0..nlocal {
         unsafe {
-            let half_dt_over_m = 0.5 * dt * *inv_mass_ptr.add(i);
+            let half_dt_over_m: Accum = 0.5 * dt_a * (*inv_mass_ptr.add(i)) as Accum;
             let f = &*force_ptr.add(i);
             let v = &mut *vel_ptr.add(i);
             // Completing velocity kick: v(t + Δt/2) → v(t + Δt)
-            v[0] += half_dt_over_m * f[0];
-            v[1] += half_dt_over_m * f[1];
-            v[2] += half_dt_over_m * f[2];
+            v[0] = (v[0] as Accum + half_dt_over_m * f[0]) as Real;
+            v[1] = (v[1] as Accum + half_dt_over_m * f[1]) as Real;
+            v[2] = (v[2] as Accum + half_dt_over_m * f[2]) as Real;
         }
     }
 }
@@ -157,6 +163,14 @@ pub fn final_integration(mut atoms: ResMut<Atom>) {
 mod tests {
     use super::*;
     use soil_core::Atom;
+
+    // `Atom` storage is `Real`, which is f32 in mixed/single builds. Loosen the
+    // tolerance for assertions that read stored positions/velocities. The pure
+    // f64-math tests (convergence, energy drift, parabolic) keep tight bounds.
+    #[cfg(feature = "precision-double")]
+    const ATOM_TOL: f64 = 1e-10;
+    #[cfg(not(feature = "precision-double"))]
+    const ATOM_TOL: f64 = 1e-4;
 
     fn make_atom() -> Atom {
         let mut atom = Atom::new();
@@ -180,8 +194,8 @@ mod tests {
         let atom = app.get_resource_ref::<Atom>().unwrap();
         // v += 0.5 * 0.01 * 2.0 / 1.0 = 0.01 → v = 1.01
         // x += 1.01 * 0.01 = 0.0101
-        assert!((atom.vel[0][0] - 1.01).abs() < 1e-10);
-        assert!((atom.pos[0][0] - 0.0101).abs() < 1e-10);
+        assert!((atom.vel[0][0] as f64 - 1.01).abs() < ATOM_TOL);
+        assert!((atom.pos[0][0] as f64 - 0.0101).abs() < ATOM_TOL);
     }
 
     // ══════════════════════════════════════════════════════════════════════
@@ -310,15 +324,15 @@ mod tests {
         let atom = app.get_resource_ref::<Atom>().unwrap();
         let t = 1.0; // 1000 * 0.001
         assert!(
-            (atom.pos[0][0] - 1.5 * t).abs() < 1e-10,
+            (atom.pos[0][0] as f64 - 1.5 * t).abs() < ATOM_TOL,
             "x position: {}", atom.pos[0][0]
         );
         assert!(
-            (atom.pos[0][1] - (-2.3 * t)).abs() < 1e-10,
+            (atom.pos[0][1] as f64 - (-2.3 * t)).abs() < ATOM_TOL,
             "y position: {}", atom.pos[0][1]
         );
         assert!(
-            (atom.vel[0][0] - 1.5).abs() < 1e-14,
+            (atom.vel[0][0] as f64 - 1.5).abs() < ATOM_TOL,
             "x velocity preserved: {}", atom.vel[0][0]
         );
     }
@@ -374,8 +388,8 @@ mod tests {
         app.run();
 
         let atom = app.get_resource_ref::<Atom>().unwrap();
-        assert!((atom.vel[0][0] - 1.01).abs() < 1e-10);
+        assert!((atom.vel[0][0] as f64 - 1.01).abs() < ATOM_TOL);
         // Position should be unchanged
-        assert!((atom.pos[0][0] - 0.0).abs() < 1e-10);
+        assert!((atom.pos[0][0] as f64 - 0.0).abs() < ATOM_TOL);
     }
 }

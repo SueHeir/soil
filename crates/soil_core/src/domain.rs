@@ -119,6 +119,26 @@ pub struct Domain {
     pub bounds_changed: bool,
     /// Ghost atom communication cutoff. 0 = use per-atom skin * 4.0 (DEM default).
     pub ghost_cutoff: f64,
+    /// Triclinic tilt factors `[xy, xz, yz]` of the box edge vectors:
+    /// `a=(Lx,0,0)`, `b=(xy,Ly,0)`, `c=(xz,yz,Lz)`. All zero = orthogonal box.
+    /// Only `xy` is exercised today (Lees–Edwards simple shear); `xz`/`yz` are
+    /// reserved for generality. See [`Domain::x2lamda`] / [`Domain::lamda2x`].
+    pub tilt: [f64; 3],
+    /// `true` when the box is non-orthogonal (any tilt active). Gates the
+    /// triclinic code paths in `pbc`, `borders`/`exchange`, and neighbor binning;
+    /// when `false`, the orthogonal fast paths run unchanged.
+    pub triclinic: bool,
+    /// Velocity of the upper box edges relative to the lower ones, used for the
+    /// Lees–Edwards streaming-velocity remap on periodic crossings. For simple
+    /// shear `boundary_vel = (γ̇·Ly, 0, 0)`. Tied to the shear *rate*, not the
+    /// tilt: a static tilted box has `boundary_vel = 0`.
+    pub boundary_vel: [f64; 3],
+    /// Sub-domain bounds in fractional (lamda) coordinates, `[p/n, (p+1)/n]` per
+    /// dimension. Used to classify atom ownership for ghost/exchange comm when
+    /// the box is triclinic (in lamda space the tilted box is a unit cube, so the
+    /// orthogonal single-hop-per-dim decomposition still applies).
+    pub sub_lamda_low: [f64; 3],
+    pub sub_lamda_high: [f64; 3],
 }
 
 impl Default for Domain {
@@ -141,6 +161,11 @@ impl Domain {
             bounds_changed: false,
             volume: 1.0,
             ghost_cutoff: 0.0,
+            tilt: [0.0; 3],
+            triclinic: false,
+            boundary_vel: [0.0; 3],
+            sub_lamda_low: [0.0; 3],
+            sub_lamda_high: [1.0; 3],
         }
     }
 
@@ -168,6 +193,39 @@ impl Domain {
     /// Return periodic flags as a `[bool; 3]` array (convenience for bulk assignment).
     pub fn periodic_flags(&self) -> [bool; 3] {
         [self.is_periodic(0), self.is_periodic(1), self.is_periodic(2)]
+    }
+
+    /// Convert a real-space point to fractional (lamda) box coordinates, where the
+    /// (possibly tilted) box maps onto the unit cube `[0,1)³`.
+    ///
+    /// With box origin `boundaries_low`, edge lengths `size = [Lx,Ly,Lz]`, and
+    /// upper-triangular tilt `H = [[Lx, xy, xz],[0, Ly, yz],[0, 0, Lz]]`, the
+    /// forward map is `r = origin + H·λ`. This inverts it (back-substitution):
+    /// ```text
+    /// λz = (z - z0) / Lz
+    /// λy = (y - y0 - yz·λz) / Ly
+    /// λx = (x - x0 - xy·λy - xz·λz) / Lx
+    /// ```
+    /// Reduces to the plain `(r - origin)/size` when all tilts are zero.
+    #[inline]
+    pub fn x2lamda(&self, r: [f64; 3]) -> [f64; 3] {
+        let [xy, xz, yz] = self.tilt;
+        let lz = (r[2] - self.boundaries_low[2]) / self.size[2];
+        let ly = (r[1] - self.boundaries_low[1] - yz * lz) / self.size[1];
+        let lx = (r[0] - self.boundaries_low[0] - xy * ly - xz * lz) / self.size[0];
+        [lx, ly, lz]
+    }
+
+    /// Convert fractional (lamda) box coordinates back to real space:
+    /// `r = origin + H·λ`. Inverse of [`x2lamda`](Self::x2lamda).
+    #[inline]
+    pub fn lamda2x(&self, lam: [f64; 3]) -> [f64; 3] {
+        let [xy, xz, yz] = self.tilt;
+        [
+            self.boundaries_low[0] + self.size[0] * lam[0] + xy * lam[1] + xz * lam[2],
+            self.boundaries_low[1] + self.size[1] * lam[1] + yz * lam[2],
+            self.boundaries_low[2] + self.size[2] * lam[2],
+        ]
     }
 }
 
@@ -203,6 +261,20 @@ pub fn decompose_domain(config: &DomainConfig, comm: &dyn CommBackend) -> Domain
     ];
     let sub_length = [delta_x, delta_y, delta_z];
 
+    // Sub-domain bounds in fractional (lamda) coordinates: a uniform Cartesian
+    // split of the unit cube, independent of any box tilt. Used by the triclinic
+    // comm/exchange paths.
+    let sub_lamda_low = [
+        proc_pos[0] as f64 / proc_decomp[0] as f64,
+        proc_pos[1] as f64 / proc_decomp[1] as f64,
+        proc_pos[2] as f64 / proc_decomp[2] as f64,
+    ];
+    let sub_lamda_high = [
+        (1 + proc_pos[0]) as f64 / proc_decomp[0] as f64,
+        (1 + proc_pos[1]) as f64 / proc_decomp[1] as f64,
+        (1 + proc_pos[2]) as f64 / proc_decomp[2] as f64,
+    ];
+
     Domain {
         boundaries_low,
         boundaries_high,
@@ -215,6 +287,11 @@ pub fn decompose_domain(config: &DomainConfig, comm: &dyn CommBackend) -> Domain
         bounds_changed: false,
         volume: size[0] * size[1] * size[2],
         ghost_cutoff: 0.0,
+        tilt: [0.0; 3],
+        triclinic: false,
+        boundary_vel: [0.0; 3],
+        sub_lamda_low,
+        sub_lamda_high,
     }
 }
 
@@ -247,7 +324,13 @@ boundary_z = "periodic"
         Config::load::<DomainConfig>(app, "domain");
 
         app.add_resource(Domain::new())
-            .add_setup_system(domain_read_input.label("domain_read_input"), ScheduleSetupSet::Setup)
+            // First stage only: re-running this every stage would re-apply the
+            // `[domain]` config and clobber any box deformation accumulated by a
+            // previous stage (e.g. `[deform]` compression/shear) — breaking
+            // multi-stage `fix deform`. Matches `comm_read_input`/`comm_setup`,
+            // which are likewise first-stage-only. Per-stage box changes are the
+            // job of the deform plugin, not a domain re-read.
+            .add_setup_system(domain_read_input.label("domain_read_input").run_if(first_stage_only()), ScheduleSetupSet::Setup)
             .add_update_system(
                 shrink_wrap.label("shrink_wrap").before("pbc"),
                 ParticleSimScheduleSet::PreExchange,
@@ -421,6 +504,11 @@ pub fn pbc(
     let size = domain.size;
     let periodic = domain.periodic_flags();
 
+    if domain.triclinic {
+        pbc_triclinic(&mut atoms, &domain, &registry, &mut comm_state);
+        return;
+    }
+
     if periodic[0] && periodic[1] && periodic[2] {
         // Fast path: fully periodic, no removals possible (local atoms only, ghosts live outside box)
         for i in 0..atoms.nlocal as usize {
@@ -455,6 +543,70 @@ pub fn pbc(
             atoms.nlocal = (nlocal_before - removed) as u32;
             comm_state.0 = CommState::FullRebuild;
         }
+    }
+}
+
+/// Triclinic periodic boundary conditions (used when `domain.triclinic`).
+///
+/// Wraps each local atom in fractional (lamda) coordinates — where the tilted box
+/// is the unit cube — so a crossing of the gradient (y) face automatically picks
+/// up the box's x-tilt via [`Domain::lamda2x`]. On top of the geometric wrap it
+/// applies the **Lees–Edwards streaming-velocity remap** (`remap v`): an atom that
+/// wraps across the y face by `Δi_y` images has its velocity shifted by
+/// `−Δi_y · boundary_vel` (the moving-edge velocity jump). Non-periodic axes fall
+/// back to out-of-bounds removal, matching the orthogonal slow path.
+fn pbc_triclinic(
+    atoms: &mut Atom,
+    domain: &Domain,
+    registry: &AtomDataRegistry,
+    comm_state: &mut CurrentState<CommState>,
+) {
+    let periodic = domain.periodic_flags();
+    let bvel = domain.boundary_vel;
+    let nlocal_before = atoms.nlocal as usize;
+    let mut removed = 0usize;
+
+    'outer: for i in (0..atoms.nlocal as usize).rev() {
+        let mut lam = domain.x2lamda(atoms.pos[i]);
+        let mut delta = [0i32; 3];
+        for d in 0..3 {
+            if periodic[d] {
+                // Single-step wrap: an atom moves < 1 box per rebuild interval
+                // (same assumption as the orthogonal `wrap_periodic`).
+                if lam[d] < 0.0 {
+                    lam[d] += 1.0;
+                    delta[d] = -1;
+                } else if lam[d] >= 1.0 {
+                    lam[d] -= 1.0;
+                    delta[d] = 1;
+                }
+            } else if lam[d] < 0.0 || lam[d] >= 1.0 {
+                // Fixed / shrink-wrap axis: atom left the box → remove it.
+                atoms.swap_remove(i);
+                registry.swap_remove_all(i);
+                removed += 1;
+                continue 'outer;
+            }
+        }
+        // Geometric wrap (the y-image shift carries the x-tilt through lamda2x).
+        atoms.pos[i] = domain.lamda2x(lam);
+        for d in 0..3 {
+            atoms.image[i][d] += delta[d];
+        }
+        // Lees–Edwards velocity remap: a y-face crossing jumps the streaming
+        // velocity by the moving-edge differential. `delta[1] = +1` means the
+        // atom wrapped down to the slower bottom edge → subtract boundary_vel.
+        if delta[1] != 0 {
+            let s = delta[1] as f64;
+            atoms.vel[i][0] -= s * bvel[0];
+            atoms.vel[i][1] -= s * bvel[1];
+            atoms.vel[i][2] -= s * bvel[2];
+        }
+    }
+
+    if removed > 0 {
+        atoms.nlocal = (nlocal_before - removed) as u32;
+        comm_state.0 = CommState::FullRebuild;
     }
 }
 
@@ -694,6 +846,63 @@ mod tests {
         // z bounds: [5.0 - 2.0, 5.0 + 2.0] = [3.0, 7.0]
         assert!((domain.boundaries_low[2] - 3.0).abs() < 1e-10);
         assert!((domain.boundaries_high[2] - 7.0).abs() < 1e-10);
+    }
+
+    // ── Triclinic / lamda tests ─────────────────────────────────────────────
+
+    fn tilted_domain() -> Domain {
+        let mut d = Domain::new();
+        d.boundaries_low = [0.0, 0.0, 0.0];
+        d.boundaries_high = [4.0, 3.0, 2.0];
+        d.size = [4.0, 3.0, 2.0];
+        d.sub_domain_low = [0.0, 0.0, 0.0];
+        d.sub_domain_high = [4.0, 3.0, 2.0];
+        d.sub_length = [4.0, 3.0, 2.0];
+        d.triclinic = true;
+        d.tilt = [1.2, 0.0, 0.0]; // xy tilt
+        d
+    }
+
+    #[test]
+    fn lamda_roundtrip_with_tilt() {
+        let d = tilted_domain();
+        for &r in &[[0.3, 0.7, 0.9], [3.9, 2.9, 0.1], [2.0, 1.5, 1.0]] {
+            let lam = d.x2lamda(r);
+            let back = d.lamda2x(lam);
+            for k in 0..3 {
+                assert!((back[k] - r[k]).abs() < 1e-12, "roundtrip {:?} -> {:?}", r, back);
+            }
+        }
+        // A point on the y-high face maps to lamda y = 1.
+        let lam = d.x2lamda([1.2, 3.0, 0.0]);
+        assert!((lam[1] - 1.0).abs() < 1e-12);
+        assert!((lam[0] - 0.0).abs() < 1e-12); // x - xy*λy = 1.2 - 1.2*1 = 0 -> λx = 0
+    }
+
+    #[test]
+    fn triclinic_pbc_wraps_and_remaps_velocity() {
+        let mut d = tilted_domain();
+        d.boundary_vel = [5.0, 0.0, 0.0]; // Δv = γ̇·Ly streaming jump
+
+        let mut atoms = Atom::new();
+        // Atom just above the y-high face (λy ≈ 1.01) → should wrap down by b=(xy,Ly,0)
+        // and have vx reduced by Δv (crossing to the slower bottom edge).
+        atoms.push_test_atom(0, [2.0, 3.03, 1.0], 0.1, 1.0);
+        atoms.vel[0] = [7.0, 0.0, 0.0];
+        atoms.nlocal = 1;
+        atoms.natoms = 1;
+
+        let registry = AtomDataRegistry::new();
+        let mut cs = CurrentState(CommState::FullRebuild);
+        pbc_triclinic(&mut atoms, &d, &registry, &mut cs);
+
+        // y wrapped down by Ly = 3.0
+        assert!((atoms.pos[0][1] - 0.03).abs() < 1e-9, "y={}", atoms.pos[0][1]);
+        // x shifted by -xy = -1.2 (the tilt carried by the b lattice vector)
+        assert!((atoms.pos[0][0] - 0.8).abs() < 1e-9, "x={}", atoms.pos[0][0]);
+        // velocity remapped: vx -= Δv
+        assert!((atoms.vel[0][0] - 2.0).abs() < 1e-12, "vx={}", atoms.vel[0][0]);
+        assert_eq!(atoms.image[0][1], 1);
     }
 
     #[test]

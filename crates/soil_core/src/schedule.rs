@@ -58,9 +58,10 @@ pub use grass_app::ScheduleSetupSet;
 
 /// Returns Verlet-specific schedule warnings for the given phase names.
 ///
-/// This function is registered as the scheduler's `warning_fn` callback by
-/// [`CorePlugins`] so that the generic scheduler can emit particle-simulation
-/// warnings without knowing about Verlet phase names directly.
+/// This function is registered as the scheduler's `warning_fn` callback by a
+/// downstream plugin group (e.g. `dirt_core`'s `CorePlugins`, which is **not**
+/// defined in this crate) so that the generic scheduler can emit
+/// particle-simulation warnings without knowing about Verlet phase names directly.
 pub fn verlet_schedule_warnings(phase_names: &[&str]) -> Vec<String> {
     let mut warnings = Vec::new();
 

@@ -117,7 +117,8 @@ pub struct SwapData {
     pub recv_count: usize,          // number of ghosts received
     pub to_proc: i32,
     pub from_proc: i32,
-    pub periodic_offset: [f64; 3],  // precomputed position shift
+    pub periodic_offset: [f64; 3],  // precomputed position shift (real lattice vector)
+    pub vel_offset: [f64; 3],       // Lees–Edwards streaming-velocity shift (sheared faces)
 }
 
 // ── CommTopology ─────────────────────────────────────────────────────────────
@@ -289,7 +290,8 @@ fn pack_border_atoms(
     registry: &AtomDataRegistry,
     dim: usize,
     swap: usize,
-    periodic_offset: f64,
+    change_pos: [f64; 3],
+    vel_offset: [f64; 3],
     domain: &Domain,
     send_buff: &mut Vec<f64>,
     packed_indices: &mut Vec<usize>,
@@ -298,16 +300,41 @@ fn pack_border_atoms(
 ) -> i32 {
     let mut count = 0i32;
     packed_indices.clear();
-    // Hoist everything loop-invariant out of the O(N) per-swap scan (C1):
-    //  - whether ghost_cutoff is in use (set once at setup, never per atom),
-    //  - the face threshold for the fixed-cutoff fast path (the DEM common case),
-    //  - the periodic position shift applied to every packed ghost.
+    let use_fixed_cut = ghost_cutoff > 0.0;
+
+    if domain.triclinic {
+        // Triclinic face selection in fractional (lamda) coordinates: the box is a
+        // unit cube, so the gradient/vorticity faces are axis-aligned planes. The
+        // x face (λ0) is sheared, so its lamda thickness is inflated by the tilt to
+        // stay conservative (the real-space force filter removes false positives).
+        let lo_face = domain.sub_lamda_low[dim];
+        let hi_face = domain.sub_lamda_high[dim];
+        let inflate = if dim == 0 { 1.0 + domain.tilt[0].abs() / domain.size[1] } else { 1.0 };
+        let cut_l = if use_fixed_cut { (ghost_cutoff / domain.size[dim]) * inflate } else { 0.0 };
+        for i in 0..scan_end {
+            let lam_dim = domain.x2lamda(atoms.pos[i])[dim];
+            let in_skin = if use_fixed_cut {
+                if swap == 0 { lam_dim < lo_face + cut_l } else { lam_dim >= hi_face - cut_l }
+            } else {
+                let cut = (atoms.cutoff_radius[i] * 4.0 / domain.size[dim]) * inflate;
+                if swap == 0 { lam_dim < lo_face + cut } else { lam_dim >= hi_face - cut }
+            };
+            if in_skin {
+                atoms.pack_border(i, change_pos, vel_offset, send_buff);
+                registry.pack_all(i, send_buff);
+                packed_indices.push(i);
+                count += 1;
+            }
+        }
+        return count;
+    }
+
+    // Orthogonal fast path. Hoist everything loop-invariant out of the O(N)
+    // per-swap scan (C1): whether ghost_cutoff is in use and the face threshold
+    // for the fixed-cutoff fast path (the DEM common case).
     let lo_face = domain.sub_domain_low[dim];
     let hi_face = domain.sub_domain_high[dim];
-    let use_fixed_cut = ghost_cutoff > 0.0;
     let fixed_thresh = if swap == 0 { lo_face + ghost_cutoff } else { hi_face - ghost_cutoff };
-    let mut change_pos = [0.0; 3];
-    change_pos[dim] = periodic_offset * domain.size[dim];
 
     for i in 0..scan_end {
         let pos_dim = atoms.pos_component(i, dim);
@@ -320,7 +347,7 @@ fn pack_border_atoms(
             if swap == 0 { pos_dim < lo_face + cut } else { pos_dim >= hi_face - cut }
         };
         if in_skin {
-            atoms.pack_border(i, change_pos, send_buff);
+            atoms.pack_border(i, change_pos, vel_offset, send_buff);
             registry.pack_all(i, send_buff);
             packed_indices.push(i);
             count += 1;
@@ -391,13 +418,14 @@ fn unpack_forward(msg: &[f64], atoms: &mut Atom, registry: &AtomDataRegistry, re
 /// that injects energy — a real Haff-cooling energy-conservation bug).
 fn pack_forward_into(swap: &SwapData, buf: &mut Vec<f64>, atoms: &Atom, registry: &AtomDataRegistry) {
     let offset = swap.periodic_offset;
+    let voff = swap.vel_offset;
     for &idx in &swap.send_indices {
         buf.push(atoms.pos[idx][0] + offset[0]);
         buf.push(atoms.pos[idx][1] + offset[1]);
         buf.push(atoms.pos[idx][2] + offset[2]);
-        buf.push(atoms.vel[idx][0]);
-        buf.push(atoms.vel[idx][1]);
-        buf.push(atoms.vel[idx][2]);
+        buf.push(atoms.vel[idx][0] + voff[0]);
+        buf.push(atoms.vel[idx][1] + voff[1]);
+        buf.push(atoms.vel[idx][2] + voff[2]);
         registry.pack_forward_all(idx, buf);
     }
 }
@@ -628,9 +656,23 @@ pub fn borders(
                 let periodic_offset = topo.periodic_swap[swap][dim];
                 send_buff.clear();
 
-                // Precompute periodic position shift for sendlist
-                let mut pbc_shift = [0.0; 3];
-                pbc_shift[dim] = periodic_offset * domain.size[dim];
+                // Periodic image shift = ±(the box edge vector for this dimension).
+                // For an orthogonal box this is axis-aligned (= ±L along `dim`); for a
+                // triclinic box the y/z edges carry the tilt (e.g. b = (xy, Ly, 0)), so
+                // a y-swap ghost is shifted in x by the tilt automatically.
+                let po = periodic_offset;
+                let pbc_shift = match dim {
+                    0 => [po * domain.size[0], 0.0, 0.0],
+                    1 => [po * domain.tilt[0], po * domain.size[1], 0.0],
+                    _ => [po * domain.tilt[1], po * domain.tilt[2], po * domain.size[2]],
+                };
+                // Lees–Edwards streaming-velocity shift on ghosts that wrap across the
+                // moving (sheared) y face. Zero for an orthogonal box (boundary_vel = 0).
+                let vel_shift = if dim == 1 {
+                    [po * domain.boundary_vel[0], po * domain.boundary_vel[1], po * domain.boundary_vel[2]]
+                } else {
+                    [0.0; 3]
+                };
 
                 // Get-or-create this swap's persistent entry, and borrow its
                 // send_indices buffer (capacity retained across rebuilds).
@@ -642,6 +684,7 @@ pub fn borders(
                         to_proc: -1,
                         from_proc: -1,
                         periodic_offset: [0.0; 3],
+                        vel_offset: [0.0; 3],
                     });
                 }
                 let mut packed_indices = std::mem::take(&mut topo.swap_data[swap_idx].send_indices);
@@ -651,7 +694,8 @@ pub fn borders(
                     &registry,
                     dim,
                     swap,
-                    periodic_offset,
+                    pbc_shift,
+                    vel_shift,
                     &domain,
                     &mut send_buff,
                     &mut packed_indices,
@@ -715,6 +759,7 @@ pub fn borders(
                 entry.to_proc = to_proc;
                 entry.from_proc = from_proc;
                 entry.periodic_offset = pbc_shift;
+                entry.vel_offset = vel_shift;
                 swap_idx += 1;
             }
             scan_end = atoms.nlocal as usize + atoms.nghost as usize;
@@ -945,8 +990,18 @@ pub fn exchange(
         // displacement → routed hi. A single lo/hi swap per dim still suffices
         // because each atom moves at most one subdomain per step.
         let periodic = domain.periodic_flags()[dim];
-        let box_size = domain.size[dim];
+        // For a triclinic box, classify ownership in fractional (lamda) coordinates
+        // where the box is a unit cube (period 1) and subdomain faces are the
+        // uniform lamda bounds — so the orthogonal single-hop-per-dim logic holds
+        // even under shear, including simultaneous x+y decomposition.
+        let triclinic = domain.triclinic;
+        let box_size = if triclinic { 1.0 } else { domain.size[dim] };
         let half = 0.5 * box_size;
+        let (sub_lo, sub_hi) = if triclinic {
+            (domain.sub_lamda_low[dim], domain.sub_lamda_high[dim])
+        } else {
+            (domain.sub_domain_low[dim], domain.sub_domain_high[dim])
+        };
         let min_image = |delta: f64| -> f64 {
             if periodic {
                 if delta > half {
@@ -963,8 +1018,9 @@ pub fn exchange(
 
         // Scan local atoms: pack those outside subdomain in this dimension
         for i in (0..atoms.len()).rev() {
-            let disp_lo = min_image(atoms.pos[i][dim] - domain.sub_domain_low[dim]);
-            let disp_hi = min_image(atoms.pos[i][dim] - domain.sub_domain_high[dim]);
+            let coord = if triclinic { domain.x2lamda(atoms.pos[i])[dim] } else { atoms.pos[i][dim] };
+            let disp_lo = min_image(coord - sub_lo);
+            let disp_hi = min_image(coord - sub_hi);
             if disp_lo < 0.0 {
                 lo_count += 1.0;
                 atoms.pack_exchange(i, &mut atoms_buff[0]);
@@ -1042,13 +1098,16 @@ pub fn exchange(
     {
         let mut lost = 0usize;
         for i in 0..atoms.len() {
+            let lam = if domain.triclinic { Some(domain.x2lamda(atoms.pos[i])) } else { None };
             for dim in 0..3usize {
                 if decomp[dim] == 1 {
                     continue;
                 }
-                if atoms.pos[i][dim] < domain.sub_domain_low[dim]
-                    || atoms.pos[i][dim] >= domain.sub_domain_high[dim]
-                {
+                let (coord, lo, hi) = match lam {
+                    Some(l) => (l[dim], domain.sub_lamda_low[dim], domain.sub_lamda_high[dim]),
+                    None => (atoms.pos[i][dim], domain.sub_domain_low[dim], domain.sub_domain_high[dim]),
+                };
+                if coord < lo || coord >= hi {
                     lost += 1;
                     break;
                 }
@@ -1160,6 +1219,7 @@ mod tests {
             to_proc: 1,
             from_proc: 2,
             periodic_offset: [10.0, 0.0, 0.0],
+            vel_offset: [0.0, 0.0, 0.0],
         };
         assert_eq!(swap.send_indices.len(), 3);
         assert_eq!(swap.recv_start, 100);

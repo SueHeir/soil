@@ -9,6 +9,47 @@
 //!   extensions, keyed by `TypeId`
 //! - [`AtomPlugin`]: registers the [`Atom`] and [`AtomDataRegistry`] resources
 //!   and the per-step force zeroing system
+//!
+//! # Writing an `AtomData` extension
+//!
+//! A physics tier attaches its per-particle state by implementing [`AtomData`]
+//! and registering an instance with [`register_atom_data!`](crate::register_atom_data). Almost always you
+//! get the implementation for free from `#[derive(AtomData)]` (in `soil_derive`);
+//! implement the trait by hand only for irregular layouts such as
+//! [`BondStore`](crate::BondStore).
+//!
+//! ## What you must provide vs. what defaults
+//!
+//! **Mandatory** (every extension must keep its columns consistent under
+//! structural ops): [`as_any`](AtomData::as_any) /
+//! [`as_any_mut`](AtomData::as_any_mut), [`truncate`](AtomData::truncate),
+//! [`swap_remove`](AtomData::swap_remove), [`pack`](AtomData::pack) /
+//! [`unpack`](AtomData::unpack) (migration + restart), and
+//! [`apply_permutation`](AtomData::apply_permutation).
+//!
+//! **Defaulted** (no-ops unless your state needs them): the forward pass
+//! ([`pack_forward`](AtomData::pack_forward) /
+//! [`unpack_forward`](AtomData::unpack_forward) /
+//! [`forward_comm_size`](AtomData::forward_comm_size)), the reverse pass
+//! ([`pack_reverse`](AtomData::pack_reverse) /
+//! [`unpack_reverse`](AtomData::unpack_reverse) /
+//! [`reverse_comm_size`](AtomData::reverse_comm_size)), and
+//! [`zero`](AtomData::zero).
+//!
+//! ## The two contracts that make parallel runs correct
+//!
+//! - **forward = overwrite, reverse = accumulate.** A `#[forward]` field is
+//!   read-only replicated state a neighbor needs (radius, omega, temperature):
+//!   the owner's value is *copied over* the ghost's each exchange. A `#[reverse]`
+//!   field is a contribution computed on a ghost that must reach the owner
+//!   (force, torque, heat flux): `unpack_reverse` must `+=` into the owner, and
+//!   the field should also be `#[zero]` so it starts each step at zero.
+//! - **`*_comm_size` must equal the number of `f64`s the matching `pack_*`
+//!   pushes per atom**, or the buffer striding desyncs and ghosts read garbage.
+//!   The derive keeps these in lockstep; a hand-written impl must too.
+//!
+//! Field declaration order also defines the migration/restart wire layout, so
+//! reordering fields is a restart-format break.
 
 use std::{
     any::{Any, TypeId},
@@ -27,11 +68,40 @@ pub const ATOM_PACK_SIZE: usize = 17;
 
 /// Register an [`AtomData`] extension with the [`AtomDataRegistry`] stored in `app`.
 ///
-/// Panics if `AtomPlugin` has not been added (i.e. `AtomDataRegistry` is missing).
+/// Call this from a plugin's `build()`. From then on the substrate carries the
+/// extension's columns through every migration, ghost exchange, permutation, and
+/// restart automatically. Panics if [`AtomPlugin`] has not been added yet (i.e.
+/// the [`AtomDataRegistry`] is missing).
 ///
 /// # Example
-/// ```ignore
-/// register_atom_data!(app, DemAtom::new());
+///
+/// In practice you derive [`AtomData`] (`#[derive(AtomData)]` from `soil_derive`)
+/// rather than hand-writing it, but the registration call is identical:
+///
+/// ```no_run
+/// use std::any::Any;
+/// use grass_app::prelude::*;
+/// use soil_core::{register_atom_data, AtomData, AtomPlugin};
+///
+/// // A minimal extension (a real one would use `#[derive(AtomData)]`).
+/// #[derive(Default)]
+/// struct Charge { q: Vec<f64> }
+/// impl AtomData for Charge {
+///     fn as_any(&self) -> &dyn Any { self }
+///     fn as_any_mut(&mut self) -> &mut dyn Any { self }
+///     fn truncate(&mut self, n: usize) { self.q.truncate(n); }
+///     fn swap_remove(&mut self, i: usize) { self.q.swap_remove(i); }
+///     fn pack(&self, i: usize, buf: &mut Vec<f64>) { buf.push(self.q[i]); }
+///     fn unpack(&mut self, buf: &[f64]) -> usize { self.q.push(buf[0]); 1 }
+///     fn apply_permutation(&mut self, perm: &[usize], n: usize) {
+///         let s: Vec<f64> = perm.iter().map(|&p| self.q[p]).collect();
+///         self.q[..n].copy_from_slice(&s);
+///     }
+/// }
+///
+/// let mut app = App::new();
+/// app.add_plugins(AtomPlugin);            // registers the AtomDataRegistry
+/// register_atom_data!(app, Charge::default());
 /// ```
 #[macro_export]
 macro_rules! register_atom_data {
@@ -447,8 +517,12 @@ impl Atom {
     }
 
     /// Shared packing logic: writes [`ATOM_PACK_SIZE`] `f64`s for atom `i` into `buf`,
-    /// with caller-supplied origin_index and position offset.
-    fn pack_atom_inner(&self, i: usize, origin_index_val: f64, pos_offset: [f64; 3], buf: &mut Vec<f64>) {
+    /// with caller-supplied origin_index, position offset, and velocity offset.
+    ///
+    /// `vel_offset` is the Lees–Edwards streaming-velocity jump applied to ghost
+    /// copies that wrap across a moving (sheared) periodic face; it is `[0;3]` for
+    /// ordinary ghosts and for exchanged (migrated) atoms.
+    fn pack_atom_inner(&self, i: usize, origin_index_val: f64, pos_offset: [f64; 3], vel_offset: [f64; 3], buf: &mut Vec<f64>) {
         buf.push(self.tag[i] as f64);
         buf.push(origin_index_val);
         buf.push(self.cutoff_radius[i]);
@@ -456,9 +530,9 @@ impl Atom {
         buf.push(self.pos[i][0] + pos_offset[0]);
         buf.push(self.pos[i][1] + pos_offset[1]);
         buf.push(self.pos[i][2] + pos_offset[2]);
-        buf.push(self.vel[i][0]);
-        buf.push(self.vel[i][1]);
-        buf.push(self.vel[i][2]);
+        buf.push(self.vel[i][0] + vel_offset[0]);
+        buf.push(self.vel[i][1] + vel_offset[1]);
+        buf.push(self.vel[i][2] + vel_offset[2]);
         buf.push(self.force[i][0]);
         buf.push(self.force[i][1]);
         buf.push(self.force[i][2]);
@@ -470,13 +544,14 @@ impl Atom {
 
     /// Pack atom `i` for MPI exchange (migration to another rank). Sets origin_index to 0.
     pub fn pack_exchange(&self, i: usize, buf: &mut Vec<f64>) {
-        self.pack_atom_inner(i, 0.0, [0.0; 3], buf);
+        self.pack_atom_inner(i, 0.0, [0.0; 3], [0.0; 3], buf);
     }
 
-    /// Pack atom `i` as a ghost for border communication, applying a periodic position shift.
+    /// Pack atom `i` as a ghost for border communication, applying a periodic
+    /// position shift and (for sheared periodic faces) a velocity shift.
     /// Stores the local index as `origin_index` so reverse comm can accumulate forces back.
-    pub fn pack_border(&mut self, i: usize, change_pos: [f64; 3], buf: &mut Vec<f64>) {
-        self.pack_atom_inner(i, i as f64, change_pos, buf);
+    pub fn pack_border(&mut self, i: usize, change_pos: [f64; 3], vel_offset: [f64; 3], buf: &mut Vec<f64>) {
+        self.pack_atom_inner(i, i as f64, change_pos, vel_offset, buf);
     }
 
     /// Unpack one atom from `buf` (ghost or exchanged). Returns [`ATOM_PACK_SIZE`].

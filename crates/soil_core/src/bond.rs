@@ -143,7 +143,7 @@ impl AtomData for BondStore {
 
 // ── Plugin ───────────────────────────────────────────────────────────────────
 
-/// Registers [`BondStore`] into the [`AtomDataRegistry`].
+/// Registers [`BondStore`] into the [`AtomDataRegistry`](crate::AtomDataRegistry).
 ///
 /// Must be added after [`AtomPlugin`](crate::AtomPlugin).
 pub struct BondPlugin;

@@ -264,6 +264,15 @@ impl GpuState {
         q.write_buffer(&self.inv_mass, 0, bytemuck::cast_slice(inv_mass));
     }
 
+    /// Update the cell-list grid (origin / bin size) WITHOUT re-uploading the
+    /// resident positions. Used by the GPU-resident MPI halo path, which keeps
+    /// the local bulk on-device and only writes the ghost slice each step (via
+    /// `pos_buffer()`/`vel_buffer()` + `queue.write_buffer` at the ghost offset),
+    /// then re-bins under the refreshed grid in the next `run_steps`.
+    pub fn set_grid(&self, grid: Grid) {
+        self.cell_list.set_grid(grid);
+    }
+
     pub fn set_params(&mut self, dt: f32, gravity: [f32; 3]) {
         self.dt = dt;
         self.gravity = gravity;

@@ -10,11 +10,11 @@ keywords = ["dem", "simulation", "mpi", "domain-decomposition"]
 categories = ["simulation", "science"]
 
 [features]
-default = ["mpi_backend", "precision-mixed"]
+default = ["mpi_backend", "precision-double"]
 mpi_backend = ["grass_mpi/mpi_backend"]
 
 # Mutually-exclusive precision configs (see src/precision.rs). Exactly one must
-# be active; the default feature set selects `precision-mixed`.
+# be active; the default feature set selects `precision-double`.
 precision-double = []
 precision-mixed = []
 precision-single = []

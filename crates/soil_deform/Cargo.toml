@@ -10,7 +10,7 @@ categories = ["simulation", "science"]
 
 [features]
 # Forward the precision config to soil_core. Exactly one must be active.
-default = ["precision-mixed"]
+default = ["precision-double"]
 precision-double = ["soil_core/precision-double"]
 precision-mixed = ["soil_core/precision-mixed"]
 precision-single = ["soil_core/precision-single"]

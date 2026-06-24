@@ -11,8 +11,8 @@ categories = ["simulation", "science"]
 
 [features]
 # Forward the precision config to soil_core. Exactly one must be active; the
-# default selects mixed (Real=f32, Accum=f64). See soil_core/src/precision.rs.
-default = ["precision-mixed"]
+# default selects double (Real=f64, Accum=f64). See soil_core/src/precision.rs.
+default = ["precision-double"]
 precision-double = ["soil_core/precision-double"]
 precision-mixed = ["soil_core/precision-mixed"]
 precision-single = ["soil_core/precision-single"]

@@ -11,7 +11,7 @@ categories = ["simulation", "science"]
 [features]
 # Forward the precision config to soil_core. The GPU kernels are always f32
 # (Apple GPUs have no f64); the feature only affects host-side Atom storage.
-default = ["precision-mixed"]
+default = ["precision-double"]
 precision-double = ["soil_core/precision-double", "soil_verlet/precision-double"]
 precision-mixed = ["soil_core/precision-mixed", "soil_verlet/precision-mixed"]
 precision-single = ["soil_core/precision-single", "soil_verlet/precision-single"]

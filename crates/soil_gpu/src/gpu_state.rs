@@ -21,6 +21,17 @@ struct Params {
     gx: f32,
     gy: f32,
     gz: f32,
+    // Periodic box: length on each axis (0 = non-periodic axis), low-corner
+    // origin, and the Lees–Edwards xy shear (x tilt per y-image + the Δv velocity
+    // offset). Drives the on-device PBC + LE remap in `integrate_initial`.
+    lx: f32,
+    ly: f32,
+    lz: f32,
+    ox: f32,
+    oy: f32,
+    oz: f32,
+    tilt_xy: f32,
+    dv_xy: f32,
     _p0: f32,
     _p1: f32,
     _p2: f32,
@@ -80,6 +91,11 @@ pub struct GpuState {
     hooks: Vec<Box<dyn GpuForce>>,
     gravity: [f32; 3],
     dt: f32,
+    /// Periodic box state (0 lengths = non-periodic). See [`Self::set_box`].
+    box_len: [f32; 3],
+    box_origin: [f32; 3],
+    tilt_xy: f32,
+    dv_xy: f32,
 }
 
 const WG: u32 = 64;
@@ -179,6 +195,7 @@ impl GpuState {
             p_aux, aux_bgl, aux_dofs: Vec::new(),
             ctx, n, cell_list, vel, force, inv_mass, params, staging, bind_group,
             hooks: Vec::new(), gravity: [0.0; 3], dt: 1.0e-4,
+            box_len: [0.0; 3], box_origin: [0.0; 3], tilt_xy: 0.0, dv_xy: 0.0,
         }
     }
 
@@ -291,7 +308,32 @@ impl GpuState {
     pub fn set_params(&mut self, dt: f32, gravity: [f32; 3]) {
         self.dt = dt;
         self.gravity = gravity;
-        let p = Params { n: self.n as u32, dt, gx: gravity[0], gy: gravity[1], gz: gravity[2], _p0: 0.0, _p1: 0.0, _p2: 0.0 };
+        self.write_params();
+    }
+
+    /// Enable on-device periodic boundaries + Lees–Edwards shear for the resident
+    /// loop. `lengths` is the box size per axis (0 = that axis is non-periodic);
+    /// `origin` is the low corner; `tilt_xy` is the LE x-shift per y-image and
+    /// `dv_xy` the corresponding velocity offset Δv = γ̇·Lᵧ. Atoms are wrapped into
+    /// the box each step (y-crossings get x,vx remapped by the tilt/Δv). For a
+    /// continuously-sheared run, advance `tilt_xy` (box-flip-wrapped) and re-call.
+    pub fn set_box(&mut self, lengths: [f32; 3], origin: [f32; 3], tilt_xy: f32, dv_xy: f32) {
+        self.box_len = lengths;
+        self.box_origin = origin;
+        self.tilt_xy = tilt_xy;
+        self.dv_xy = dv_xy;
+        self.write_params();
+    }
+
+    fn write_params(&self) {
+        let p = Params {
+            n: self.n as u32, dt: self.dt,
+            gx: self.gravity[0], gy: self.gravity[1], gz: self.gravity[2],
+            lx: self.box_len[0], ly: self.box_len[1], lz: self.box_len[2],
+            ox: self.box_origin[0], oy: self.box_origin[1], oz: self.box_origin[2],
+            tilt_xy: self.tilt_xy, dv_xy: self.dv_xy,
+            _p0: 0.0, _p1: 0.0, _p2: 0.0,
+        };
         self.ctx.queue.write_buffer(&self.params, 0, bytemuck::bytes_of(&p));
     }
 
@@ -481,6 +523,44 @@ mod tests {
             assert!((v[c] - ev[c]).abs() < 1e-3, "vel[{c}]: {} vs {}", v[c], ev[c]);
         }
         eprintln!("GpuState free-fall: pos={p:?} vel={v:?} (analytic match)");
+    }
+
+    #[test]
+    fn resident_periodic_wrap() {
+        let Some(ctx) = GpuContext::new() else { eprintln!("no GPU; skipping"); return; };
+        let p0 = [[0.9f32, 0.5, 0.5]];
+        let grid = Grid::from_positions(&p0, 1.0);
+        let mut gs = GpuState::new(ctx, 1, grid.total_cells);
+        let dt = 1.0e-2f32;
+        gs.set_params(dt, [0.0; 3]); // no gravity
+        gs.set_box([1.0, 1.0, 1.0], [0.0; 3], 0.0, 0.0); // unit periodic box
+        gs.set_state(&p0, &[[1.0, 0.0, 0.0]], &[1.0], grid); // streaming +x
+        gs.run_steps(20); // x: 0.9 + 1.0*0.01*20 = 1.1 -> wraps to 0.1
+        let p = gs.download_pos()[0];
+        assert!((p[0] - 0.1).abs() < 1e-4, "x did not wrap: {p:?}");
+        assert!(p[0] >= 0.0 && p[0] < 1.0, "x out of box: {p:?}");
+        eprintln!("resident periodic wrap: pos={p:?}");
+    }
+
+    #[test]
+    fn resident_lees_edwards_y_cross() {
+        let Some(ctx) = GpuContext::new() else { eprintln!("no GPU; skipping"); return; };
+        let p0 = [[0.5f32, 0.95, 0.5]];
+        let grid = Grid::from_positions(&p0, 1.0);
+        let mut gs = GpuState::new(ctx, 1, grid.total_cells);
+        let dt = 1.0e-2f32;
+        gs.set_params(dt, [0.0; 3]);
+        // Only y periodic (lx=lz=0); LE tilt 0.3, Δv 2.0 per y-image.
+        gs.set_box([0.0, 1.0, 0.0], [0.0; 3], 0.3, 2.0);
+        gs.set_state(&p0, &[[0.0, 1.0, 0.0]], &[1.0], grid); // streaming +y
+        gs.run_steps(10); // y: 0.95 + 0.1 = 1.05 -> crosses once
+        let p = gs.download_pos()[0];
+        let v = gs.download_vel()[0];
+        // One y-image crossing: y wrapped into [0,1), vx got the LE offset -Δv.
+        assert!(p[1] >= 0.0 && p[1] < 1.0, "y not wrapped: {p:?}");
+        assert!((v[0] - (-2.0)).abs() < 1e-4, "LE Δv not applied: vx={}", v[0]);
+        assert!((v[1] - 1.0).abs() < 1e-4, "vy changed: {v:?}");
+        eprintln!("resident Lees-Edwards y-cross: pos={p:?} vel={v:?}");
     }
 
     // A minimal Force hook: accumulates a constant force into every atom's slot.

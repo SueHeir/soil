@@ -9,6 +9,14 @@ struct Params {
     gx: f32,
     gy: f32,
     gz: f32,
+    lx: f32,
+    ly: f32,
+    lz: f32,
+    ox: f32,
+    oy: f32,
+    oz: f32,
+    tilt_xy: f32,
+    dv_xy: f32,
     _p0: f32,
     _p1: f32,
     _p2: f32,
@@ -46,15 +54,28 @@ fn integrate_initial(@builtin(global_invocation_id) gid: vec3<u32>) {
     let b = 3u * i;
     let im = inv_mass[i];
     let hdtm = 0.5 * params.dt * im;
-    let vx = vel[b]      + hdtm * force[b];
+    var vx = vel[b]      + hdtm * force[b];
     let vy = vel[b + 1u] + hdtm * force[b + 1u];
     let vz = vel[b + 2u] + hdtm * force[b + 2u];
+    var px = pos[b]      + vx * params.dt;
+    var py = pos[b + 1u] + vy * params.dt;
+    var pz = pos[b + 2u] + vz * params.dt;
+    // On-device PBC + Lees–Edwards remap (l == 0 → axis non-periodic, skipped).
+    // A y-image crossing shifts x by the tilt and vx by Δv (the LE boundary).
+    if (params.lz > 0.0) { pz = pz - params.lz * floor((pz - params.oz) / params.lz); }
+    if (params.ly > 0.0) {
+        let img = floor((py - params.oy) / params.ly);
+        py = py - params.ly * img;
+        px = px - params.tilt_xy * img;
+        vx = vx - params.dv_xy * img;
+    }
+    if (params.lx > 0.0) { px = px - params.lx * floor((px - params.ox) / params.lx); }
     vel[b]      = vx;
     vel[b + 1u] = vy;
     vel[b + 2u] = vz;
-    pos[b]      = pos[b]      + vx * params.dt;
-    pos[b + 1u] = pos[b + 1u] + vy * params.dt;
-    pos[b + 2u] = pos[b + 2u] + vz * params.dt;
+    pos[b]      = px;
+    pos[b + 1u] = py;
+    pos[b + 2u] = pz;
     // Seed next force = m*g (clump sub-spheres with inv_mass==0 -> no body force).
     let m = select(0.0, 1.0 / im, im > 0.0);
     force[b]      = m * params.gx;

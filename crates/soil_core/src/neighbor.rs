@@ -806,8 +806,10 @@ pub fn decide_rebuild(
     // so atoms can drift a little out of bounds between rebuilds. Coordinate
     // wrapping is now done cheaply every step by `pbc` (runs in both
     // CommunicateOnly and FullRebuild), and ghost positions for such drifted /
-    // wrapped atoms are kept correct by `forward_comm_borders`
-    // (`compute_per_atom_offset` recomputes the periodic image per atom). MPI
+    // wrapped atoms are kept correct by `forward_comm_borders` (it re-sends each
+    // ghost's owner position plus the swap's FIXED `periodic_offset` from the
+    // last rebuild — see `pack_forward_into`; the offset is deliberately NOT
+    // recomputed per atom, so a wrapped owner's ghost stays continuous). MPI
     // migration (`exchange`) still only happens on a scheduled FullRebuild; a
     // wrapped-but-not-yet-migrated atom stays within skin of the boundary and is
     // served by the ghost mechanism until then — standard DEM. Forcing a rebuild

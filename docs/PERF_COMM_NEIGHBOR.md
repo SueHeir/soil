@@ -29,13 +29,15 @@ rebuilds, reuse the existing `send_indices` Vecs (clear + refill, keeping
 capacity) instead of `swap_data.clear()` + fresh Vecs at `comm.rs:494`.
 
 ### C3 — Dead per-atom branch in the forward-comm hot path · impact M · effort S
-`compute_per_atom_offset` (`comm.rs:327`) now unconditionally returns
-`*stored_offset` (the body documents that it must **not** recompute). But
-`forward_comm` still does `if is_self_send { compute_per_atom_offset(…5 args…) }
-else { swap.periodic_offset }` **per ghost** (`comm.rs:384`), and both arms yield
-the same value. This branch + dead call run every `CommunicateOnly` step (the
-common step) over every ghost. Delete the branch and the function; just use
-`swap.periodic_offset`. Pure win, no behavior change.
+### ✅ DONE
+`compute_per_atom_offset` unconditionally returned `*stored_offset` (its body
+documented that it must **not** recompute), yet `forward_comm` still branched
+`if is_self_send { compute_per_atom_offset(…) } else { swap.periodic_offset }`
+**per ghost**, both arms yielding the same value — a dead branch + dead call on
+every `CommunicateOnly` step over every ghost. The branch and the function were
+removed; `pack_forward_into` now applies `swap.periodic_offset` directly. Pure
+win, no behavior change: the deleted function was already a no-op returning the
+stored offset, so both branch arms yielded the identical value.
 
 ### C4 — Element-by-element packing in forward comm · impact L-M · effort S
 `forward_comm` pushes pos+vel one f64 at a time (`comm.rs:395-401`) in the

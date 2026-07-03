@@ -117,8 +117,9 @@ peridynamics, or your own method.
 One line per tier, worded identically wherever these three repos describe
 themselves:
 
-- **[GRASS](https://github.com/SueHeir/grass)** — Build explicit solvers as
-  composable plugins instead of a hand-rolled main loop — and couple several
+- **[GRASS](https://github.com/SueHeir/grass)** — Build solvers as composable
+  plugins instead of a hand-rolled main loop — explicit time-stepping or a
+  single implicit global solve, particles or a mesh — and couple several
   together, in-process or across MPI.
 - **[SOIL](https://github.com/SueHeir/soil)** — Write your own particle method
   without hand-writing domain decomposition, halo exchange, migration, and

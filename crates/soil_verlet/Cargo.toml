@@ -23,7 +23,16 @@ grass_app = { git = "ssh://git@192.168.0.170:2222/SueHeir/grass.git", branch = "
 grass_scheduler = { git = "ssh://git@192.168.0.170:2222/SueHeir/grass.git", branch = "main" }
 
 [dev-dependencies]
+# Only examples/tests need the AtomData derive (to register a per-atom column);
+# the integrator itself does not, so keep it out of the normal dependency set.
+soil_derive = { path = "../soil_derive", version = "0.1.3" }
 
 [[example]]
 name = "free_fall"
+required-features = ["precision-double"]
+
+# LJ molecular-dynamics dimer: a second (non-DEM) particle method on the SOIL
+# substrate — neighbor list + ghost comm + a registered AtomData column + Verlet.
+[[example]]
+name = "lj_dimer"
 required-features = ["precision-double"]

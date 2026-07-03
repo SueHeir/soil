@@ -365,9 +365,18 @@ impl AtomDataRegistry {
     }
 
     /// Restore all extensions from restart file buffers (one buffer per extension).
+    ///
+    /// `unpack` is **push-based**: each call appends one atom's record to the
+    /// store. By the time a restart is read the stores have already been sized
+    /// to `nlocal` (empty per-atom slots) by `truncate_all` during setup, so we
+    /// must clear each store to length 0 first — otherwise the unpacked atoms
+    /// land at indices `[nlocal..2*nlocal)` and every atom reads a stale empty
+    /// slot at `[i]`, silently dropping restored per-atom state (e.g. rotational
+    /// `DemAtom` columns and per-contact tangential spring history).
     pub fn unpack_all_from_restart(&self, buffers: &[Vec<f64>]) {
         for ((_, cell), buf) in self.stores.iter().zip(buffers.iter()) {
             let mut store = cell.borrow_mut();
+            store.truncate(0); // reset: push-based unpack must start from empty to stay index-aligned
             let mut pos = 0;
             while pos < buf.len() {
                 pos += store.unpack(&buf[pos..]);

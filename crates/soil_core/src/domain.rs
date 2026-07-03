@@ -771,6 +771,157 @@ mod tests {
     }
 
     #[test]
+    fn rebalance_x_conserves_the_global_atom_set() {
+        // Substrate invariant: dynamic load balancing may only *re-partition* the
+        // atoms across ranks — it must never lose or duplicate one. The existing
+        // `balanced_planes_*` test only checks the plane-computation helper in
+        // isolation; this drives the full `rebalance_x` → re-exchange cycle across
+        // a real multi-rank decomposition and asserts the global atom set is
+        // conserved (count + id/position). A gap between adjacent ranks' new
+        // subdomains would silently drop atoms; an overlap would duplicate them —
+        // both are corruption-class bugs any method on soil (DEM/MD/SPH/Peri)
+        // would inherit.
+        let px = 4usize;
+        let (lo, hi) = (0.0f64, 40.0f64);
+        let n: u32 = 1000;
+        let nbins = 200usize;
+
+        // Global atom set with a badly left-skewed x distribution (quadratic
+        // pile-up near `lo`), so the initial uniform decomposition is imbalanced
+        // and a rebalance genuinely has to move the planes. Positions stay
+        // strictly inside (lo, hi) so no PBC remap is needed (u ∈ (0,1)).
+        let mut atoms = Atom::new();
+        for i in 0..n {
+            let u = (i as f64 + 0.5) / n as f64;
+            let x = lo + (hi - lo) * u * u;
+            let y = (i % 10) as f64 / 10.0 + 0.005;
+            let z = (i % 7) as f64 / 7.0 + 0.005;
+            atoms.push_test_atom(i, [x, y, z], 0.1, 1.0);
+        }
+        atoms.nlocal = n;
+        atoms.natoms = n as u64;
+
+        // Snapshot the "before" set: tag → stored position (positions must be
+        // carried through redecomposition untouched).
+        let before: std::collections::HashMap<u32, [Real; 3]> =
+            (0..n as usize).map(|i| (atoms.tag[i], atoms.pos[i])).collect();
+        let global_count = n as usize;
+
+        // Drive `rebalance_x` once per rank — exactly the call
+        // `LoadBalancePlugin::load_balance_system` makes at `PreExchange`. In real
+        // MPI each rank builds a *local* histogram and `all_reduce_sum`s it to the
+        // identical global histogram, so every rank computes the same planes and
+        // picks its own slice. Here we hand the full global atom set to an
+        // identity-all_reduce `SingleProcessComm`: the per-rank local histogram
+        // already equals the global one, so `rebalance_x` yields the same planes a
+        // distributed run would (bin counts are exact integers — no rounding).
+        let mut sub_lo = vec![0.0f64; px];
+        let mut sub_hi = vec![0.0f64; px];
+        for r in 0..px {
+            let comm = make_comm([px as i32, 1, 1], [r as i32, 0, 0]);
+            let config = DomainConfig {
+                x_low: lo,
+                x_high: hi,
+                y_low: 0.0,
+                y_high: 1.0,
+                z_low: 0.0,
+                z_high: 1.0,
+                ..Default::default()
+            };
+            let mut domain = decompose_domain(&config, &comm);
+            rebalance_x(&atoms, &mut domain, &comm, nbins);
+            sub_lo[r] = domain.sub_domain_low[0];
+            sub_hi[r] = domain.sub_domain_high[0];
+            assert!(
+                domain.bounds_changed,
+                "rebalance_x must flag bounds_changed so the following Exchange re-migrates atoms",
+            );
+        }
+
+        // The rebalanced subdomains must tile [lo, hi] with NO gap and NO overlap:
+        // a gap loses atoms, an overlap duplicates them. This contiguity is the
+        // conservation precondition the subsequent exchange relies on.
+        assert_eq!(sub_lo[0], lo, "rank 0 must start at the global low edge");
+        assert_eq!(sub_hi[px - 1], hi, "last rank must end at the global high edge");
+        for r in 0..px - 1 {
+            assert_eq!(
+                sub_hi[r], sub_lo[r + 1],
+                "ranks {r}/{} subdomains must be contiguous (no gap/overlap)",
+                r + 1,
+            );
+        }
+
+        // Emulate the Exchange redecomposition: assign every atom to the rank whose
+        // new subdomain [sub_lo, sub_hi) owns its x — the same half-open ownership
+        // predicate `exchange()` uses. Counting owners per atom directly exposes
+        // loss (0 owners) and duplication (>1 owner).
+        let mut owned: Vec<Vec<usize>> = vec![Vec::new(); px];
+        for i in 0..n as usize {
+            let x = atoms.pos[i][0] as f64;
+            let mut owners = 0;
+            for r in 0..px {
+                if x >= sub_lo[r] && x < sub_hi[r] {
+                    owned[r].push(i);
+                    owners += 1;
+                }
+            }
+            assert_eq!(
+                owners, 1,
+                "atom tag {} (x={x}) has {owners} owners after rebalance (0 = lost, >1 = duplicated)",
+                atoms.tag[i],
+            );
+        }
+
+        // (1) Sum of owned local atom counts across ranks == original global count.
+        let total_owned: usize = owned.iter().map(|v| v.len()).sum();
+        assert_eq!(
+            total_owned, global_count,
+            "particle count changed across rebalance (lost or duplicated atoms)",
+        );
+
+        // (2) The set of (id, position) after rebalance == the set before. Rebuild
+        // it from the per-rank owned lists and compare against the snapshot.
+        let mut after: std::collections::HashMap<u32, [Real; 3]> = std::collections::HashMap::new();
+        for r in 0..px {
+            for &i in &owned[r] {
+                let prev = after.insert(atoms.tag[i], atoms.pos[i]);
+                assert!(prev.is_none(), "atom tag {} owned by two ranks", atoms.tag[i]);
+            }
+        }
+        assert_eq!(after.len(), before.len(), "atom id set size changed across rebalance");
+        for (tag, pos) in &before {
+            assert_eq!(
+                after.get(tag),
+                Some(pos),
+                "atom tag {tag} was lost or its position was disturbed by rebalance",
+            );
+        }
+
+        // Sanity: the rebalance genuinely fired — the skewed input is heavily
+        // imbalanced under the initial uniform decomposition (~half the atoms on
+        // one rank) and must be materially more even afterwards. This guards
+        // against a degenerate "did nothing" pass; the conservation asserts above
+        // are the acceptance criterion.
+        let ideal = global_count as f64 / px as f64;
+        let max_after = owned.iter().map(|v| v.len()).max().unwrap() as f64;
+        let mut uniform = vec![0usize; px];
+        for i in 0..n as usize {
+            let x = atoms.pos[i][0] as f64;
+            let r = (((x - lo) / (hi - lo) * px as f64).floor() as usize).min(px - 1);
+            uniform[r] += 1;
+        }
+        let max_uniform = *uniform.iter().max().unwrap() as f64;
+        assert!(
+            max_after < max_uniform,
+            "rebalance did not improve balance (uniform max {max_uniform}, rebalanced max {max_after})",
+        );
+        assert!(
+            max_after <= 1.5 * ideal,
+            "rebalanced load still far from even (max {max_after}, ideal {ideal})",
+        );
+    }
+
+    #[test]
     fn cartesian_single_proc_full_domain() {
         let config = DomainConfig {
             x_low: 0.0,

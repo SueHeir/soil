@@ -20,11 +20,11 @@ precision-mixed = []
 precision-single = []
 
 [dependencies]
-grass_scheduler = { git = "https://github.com/SueHeir/grass.git", branch = "main" }
-grass_app = { git = "https://github.com/SueHeir/grass.git", branch = "main" }
-grass_mpi = { git = "https://github.com/SueHeir/grass.git", branch = "main", default-features = false }
-grass_derive = { git = "https://github.com/SueHeir/grass.git", branch = "main" }
-grass_io = { git = "https://github.com/SueHeir/grass.git", branch = "main" }
+grass_scheduler = { git = "ssh://git@192.168.0.170:2222/SueHeir/grass.git", branch = "main" }
+grass_app = { git = "ssh://git@192.168.0.170:2222/SueHeir/grass.git", branch = "main" }
+grass_mpi = { git = "ssh://git@192.168.0.170:2222/SueHeir/grass.git", branch = "main", default-features = false }
+grass_derive = { git = "ssh://git@192.168.0.170:2222/SueHeir/grass.git", branch = "main" }
+grass_io = { git = "ssh://git@192.168.0.170:2222/SueHeir/grass.git", branch = "main" }
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 rand = "0.9"

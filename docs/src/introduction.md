@@ -19,6 +19,11 @@ GRASS    framework: App, Plugin, Scheduler, IO, coupling      (no particles)
 - **[DIRT](https://github.com/SueHeir/dirt)** is one physics tier built on
   SOIL (Discrete Element Method). See the [DIRT book](https://sueheir.github.io/dirt).
 
+For the canonical, tier-by-tier walkthrough of how these three compose — and
+which one to start at — see
+[How the Stack Fits Together](https://sueheir.github.io/grass/stack/how-the-stack-fits-together.html)
+in the GRASS book.
+
 ## Who this book is for
 
 If you want to write your **own** particle method — your own force law, an SPH

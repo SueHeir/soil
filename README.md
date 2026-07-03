@@ -107,12 +107,34 @@ GRASS    framework: App, Plugin, Scheduler, IO, coupling      (no particles)
        └─ DIRT (DEM) / SPH / peridynamics / …   physics: forces, bonds, walls
 ```
 
+## How the three fit together
+
 GRASS gives you the `App`/scheduler/coupling; SOIL turns that into a parallel
 particle substrate via one `AtomData` contract; DIRT is the proof that a full
 LAMMPS-validated physics tier rides it — and the same seams are open for SPH,
-peridynamics, or your own method. See the
-[GRASS](https://github.com/SueHeir/grass) book to write your own framework-level
-solver, or [DIRT](https://github.com/SueHeir/dirt) for a worked physics tier.
+peridynamics, or your own method.
+
+One line per tier, worded identically wherever these three repos describe
+themselves:
+
+- **[GRASS](https://github.com/SueHeir/grass)** — Build explicit solvers as
+  composable plugins instead of a hand-rolled main loop — and couple several
+  together, in-process or across MPI.
+- **[SOIL](https://github.com/SueHeir/soil)** — Write your own particle method
+  without hand-writing domain decomposition, halo exchange, migration, and
+  neighbor lists — declare your state once, SOIL carries it through all of it.
+- **[DIRT](https://github.com/SueHeir/dirt)** — A Rust granular-DEM engine that
+  resolves every contact individually — cross-checked against LAMMPS and
+  closed-form theory.
+
+**Where to start:** to *run* granular simulations, start at
+[DIRT](https://github.com/SueHeir/dirt), the batteries-included physics tier; to
+*write your own* particle method or solver, start at
+[SOIL](https://github.com/SueHeir/soil) (the particle substrate) or
+[GRASS](https://github.com/SueHeir/grass) (the framework). The full walkthrough
+of how the tiers compose — one timestep end to end, and where the seams are — is
+the canonical [How the stack fits together](https://sueheir.github.io/grass/stack/how-the-stack-fits-together.html)
+page in the GRASS book.
 
 ## Install
 

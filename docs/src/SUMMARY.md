@@ -6,6 +6,7 @@
 
 - [What SOIL Owns](./substrate/what-soil-owns.md)
 - [The AtomData Contract](./substrate/atomdata-contract.md)
+- [Does the Seam Hold? — A Peridynamics Worked Check](./substrate/peridynamics-check.md)
 - [Writing an AtomData Extension](./substrate/writing-atomdata.md)
 - [Time Integration](./substrate/integration.md)
 - [Fixes](./substrate/fixes.md)

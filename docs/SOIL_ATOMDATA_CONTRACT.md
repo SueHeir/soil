@@ -142,41 +142,23 @@ zero before ghosts add into them, or contributions double across steps.
    accumulation is `+=` in receipt order; keep per-pair contributions
    associative-safe (don't rely on summation order for bit-exactness).
 
-## 5. Worked example — does the seam hold for peridynamics?
+## 5. Does the seam hold? — peridynamics + a runnable non-DEM method
 
-Peridynamics is bond-based and Lagrangian, so it should drop straight onto
-SOIL with no substrate change. The test:
+Peridynamics is bond-based and Lagrangian, so it should drop straight onto SOIL
+with no substrate change: `damage` becomes `#[forward]` replicated state, the
+force-state and dilatation accumulators become `#[reverse]` + `#[zero]`, and the
+reference configuration migrates but never ghosts (no attribute). **No new
+substrate primitive is required** — which is the evidence that the
+GRASS → SOIL → physics tiering is real and not a relabeling. The one thing PD
+needs beyond this is a *bond/horizon* neighbor list with a larger, fixed cutoff:
+a neighbor-list strategy configured per-physics on the SOIL side, not a change to
+this contract.
 
-```rust
-#[derive(AtomData)]
-pub struct PeriAtom {
-    /// Scalar damage φ ∈ [0,1]; neighbors need it to compute the bond force.
-    #[forward]
-    pub damage: Vec<f64>,
-
-    /// Pairwise force-state contributions summed from ghost bonds, reset/step.
-    #[reverse]
-    #[zero]
-    pub force_state: Vec<[f64; 3]>,
-
-    /// Weighted volume / dilatation accumulator (state-based PD), reset/step.
-    #[reverse]
-    #[zero]
-    pub dilatation: Vec<f64>,
-
-    /// Reference (undeformed) position — migrates with the atom, never a ghost.
-    pub ref_pos: Vec<[f64; 3]>,
-}
-```
-
-Everything peridynamics needs maps onto an existing attribute:
-`damage` is replicated state (`#[forward]`), the force/dilatation accumulators
-are ghost-summed (`#[reverse]` + `#[zero]`), and the reference configuration
-migrates but never ghosts (no attribute). **No new substrate primitive is
-required** — which is the evidence that the GRASS → SOIL → physics tiering is
-real and not a relabeling. The one thing PD needs beyond this is a *bond/horizon
-neighbor list* with a larger, fixed cutoff; that is a neighbor-list strategy on
-the SOIL side, configured per-physics, not a change to the `AtomData` contract.
+The full worked mapping — plus a *runnable* second proof, the Lennard-Jones
+molecular-dynamics dimer (`soil_verlet/examples/lj_dimer.rs`) that rides the whole
+substrate with no DEM code and validates to machine precision — is on its own
+page:
+[**Does the Seam Hold? — A Peridynamics Worked Check**](https://github.com/SueHeir/soil/tree/master/docs/src/substrate/peridynamics-check.md).
 
 ## 6. The boundary rule
 

@@ -70,5 +70,7 @@ trait by hand — see [Writing an AtomData Extension](../substrate/writing-atomd
 > is *not* recognized and fails to compile. And, as noted above, the derive
 > generates no `new()` or `Default` — build the struct literal yourself.
 
-For the full semantics, invariants, and the peridynamics worked example that
-proves the seam holds, see [The AtomData Contract](../substrate/atomdata-contract.md).
+For the full semantics and invariants, see
+[The AtomData Contract](../substrate/atomdata-contract.md); for the peridynamics
+worked example (and a runnable non-DEM method) that proves the seam holds, see
+[Does the Seam Hold? — A Peridynamics Worked Check](../substrate/peridynamics-check.md).

@@ -48,6 +48,7 @@ The deal is simple, and it is the whole point of the substrate:
 The seam between SOIL and a physics tier is a single contract — `AtomData`
 registration. Because that contract is physics-agnostic, the same substrate
 carries DEM today and could carry SPH or peridynamics tomorrow with **no change
-to SOIL**. The [AtomData contract](./substrate/atomdata-contract.md) includes a
-worked check that peridynamics drops onto the substrate with no new primitive —
-the evidence that the tiering is real and not a relabeling.
+to SOIL**. [Does the Seam Hold? — A Peridynamics Worked Check](./substrate/peridynamics-check.md)
+maps peridynamics onto the substrate with no new primitive, and points at a
+runnable non-DEM method (a Lennard-Jones MD dimer) that already rides it — the
+evidence that the tiering is real and not a relabeling.

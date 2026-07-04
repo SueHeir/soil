@@ -1041,10 +1041,10 @@ pub fn reverse_send_force(
 
 #[cfg(feature = "mpi_backend")]
 /// Exchange (migrate) atoms that have crossed a sub-domain boundary to their new
-/// owning rank. Runs at `PreExchange` on full-rebuild steps, before the ghost
+/// owning rank. Runs at `Exchange` on full-rebuild steps, before the ghost
 /// halo and neighbor list are rebuilt. One send/recv hop per dimension moves each
 /// atom to the correct neighbor; each migrated atom carries its full base fields
-/// plus every [`AtomData`] extension column.
+/// plus every [`AtomData`](crate::AtomData) extension column.
 pub fn exchange(
     comm: Res<CommResource>,
     topo: Res<CommTopology>,

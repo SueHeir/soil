@@ -96,6 +96,24 @@ $ cargo run --release -p soil_verlet --example lj_dimer
 DEM is not special: the same `AtomData` mechanism that moves DEM's torque moves
 MD's per-atom energy.
 
+## When to use it
+
+Reach for SOIL when you're building a **short-range, off-lattice particle
+(Lagrangian) method** — a force law, an SPH kernel, a peridynamic bond model —
+that needs parallel domain decomposition, halo exchange, migration, and neighbor
+lists but shouldn't have to hand-write any of them. You bring the physics; SOIL
+brings the parallel plumbing.
+
+It is deliberately *not* two things. It is not a mesh/Eulerian framework: a
+grid-based finite-volume or finite-element solver, whose state is a field over
+cells rather than a cloud of migrating particles, belongs on a mesh substrate on
+the same [GRASS](https://github.com/SueHeir/grass) scheduler — not here. And it
+owns no physics: no contact model, material, or force law lives in the substrate,
+because that is the tier *you* write on top. [DIRT](https://github.com/SueHeir/dirt)
+is the worked example of a full one. If your interactions are long-range (an Ewald
+or particle-mesh sum over all pairs) rather than cutoff-bounded, the neighbor
+substrate is a starting point, not the whole answer — that solver is unwritten.
+
 ## The stack
 
 SOIL is the middle tier of a three-repo stack; each tier depends only on the ones

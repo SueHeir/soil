@@ -179,6 +179,7 @@ impl Default for AtomDataRegistry {
 }
 
 impl AtomDataRegistry {
+    /// Create an empty registry with no extensions registered.
     pub fn new() -> Self {
         AtomDataRegistry {
             stores: Vec::new(),
@@ -237,6 +238,9 @@ impl AtomDataRegistry {
             })
     }
 
+    /// Borrow a registered [`AtomData`] extension immutably, panicking with
+    /// `context` if it is not registered. Use when the extension is a hard
+    /// requirement (its plugin should have registered it during setup).
     pub fn expect<T: AtomData + 'static>(&self, context: &str) -> Ref<'_, T> {
         self.get::<T>().unwrap_or_else(|| {
             panic!(
@@ -247,6 +251,8 @@ impl AtomDataRegistry {
         })
     }
 
+    /// Borrow a registered [`AtomData`] extension mutably, panicking with
+    /// `context` if it is not registered. Mutable counterpart of [`expect`](Self::expect).
     pub fn expect_mut<T: AtomData + 'static>(&self, context: &str) -> RefMut<'_, T> {
         self.get_mut::<T>().unwrap_or_else(|| {
             panic!(
@@ -413,27 +419,42 @@ macro_rules! for_each_atom_vec {
 
 /// Struct-of-arrays storage for all per-atom fields (position, velocity, force, etc.).
 pub struct Atom {
+    /// Total number of atoms across all ranks (global count).
     pub natoms: u64,
+    /// Number of local atoms this rank owns; they occupy indices `0..nlocal`.
     pub nlocal: u32,
+    /// Number of ghost atoms (halo copies); they occupy `nlocal..nlocal+nghost`.
     pub nghost: u32,
 
     /// Number of distinct atom types in the simulation.
     pub ntypes: usize,
 
+    /// Integration timestep.
     pub dt: f64,
 
+    /// Globally unique atom identifier (persists across migration/restart).
     pub tag: Vec<u32>,
+    /// Per-atom type index in `0..ntypes`.
     pub atom_type: Vec<u32>,
+    /// For a ghost, the local index of its owner atom on the sending rank
+    /// (set during border packing so reverse comm can accumulate back).
     pub origin_index: Vec<i32>,
+    /// `true` for ghost (halo) atoms, `false` for locally owned atoms.
     pub is_ghost: Vec<bool>,
 
     // Interleaved arrays: field[i] = [x, y, z]
+    /// Position `[x, y, z]` per atom.
     pub pos: Vec<[Real; 3]>,
+    /// Velocity `[vx, vy, vz]` per atom.
     pub vel: Vec<[Real; 3]>,
+    /// Force accumulator `[fx, fy, fz]` per atom (zeroed each step before force systems).
     pub force: Vec<[Accum; 3]>,
 
+    /// Per-atom interaction cutoff radius; feeds the neighbor skin/ghost-cutoff chain.
     pub cutoff_radius: Vec<Real>,
+    /// Per-atom mass.
     pub mass: Vec<Real>,
+    /// Cached reciprocal mass `1/mass` (kept in sync with `mass`; avoids per-step division).
     pub inv_mass: Vec<Real>,
     /// PBC image flags: number of times atom has crossed each periodic boundary.
     pub image: Vec<[i32; 3]>,
@@ -447,6 +468,7 @@ impl Default for Atom {
 
 macro_rules! impl_atom_new {
     ( $( ($field:ident, $ty:ty) ),* $(,)? ) => {
+        /// Create an empty `Atom` store (no atoms; `ntypes = 1`, `dt = 1.0`).
         pub fn new() -> Self {
             Atom {
                 natoms: 0,
@@ -462,6 +484,10 @@ macro_rules! impl_atom_new {
 
 macro_rules! impl_atom_swap_remove {
     ( $( ($field:ident, $ty:ty) ),* $(,)? ) => {
+        /// Remove the atom at index `i` from every field array by swapping in the
+        /// last element. **Must** be mirrored on the [`AtomDataRegistry`] via
+        /// [`swap_remove_all`](AtomDataRegistry::swap_remove_all) to keep the
+        /// parallel arrays aligned.
         pub fn swap_remove(&mut self, i: usize) {
             $( self.$field.swap_remove(i); )*
         }
@@ -470,6 +496,9 @@ macro_rules! impl_atom_swap_remove {
 
 macro_rules! impl_atom_truncate {
     ( $( ($field:ident, $ty:ty) ),* $(,)? ) => {
+        /// Drop all ghost atoms by truncating every field array to `nlocal`.
+        /// Mirror on the registry with
+        /// [`truncate_all`](AtomDataRegistry::truncate_all).
         pub fn truncate_to_nlocal(&mut self) {
             let n = self.nlocal as usize;
             $( self.$field.truncate(n); )*
@@ -479,6 +508,8 @@ macro_rules! impl_atom_truncate {
 
 macro_rules! impl_atom_reserve {
     ( $( ($field:ident, $ty:ty) ),* $(,)? ) => {
+        /// Reserve capacity for `additional` more atoms in every field array
+        /// (avoids repeated reallocation when bulk-inserting).
         pub fn reserve(&mut self, additional: usize) {
             $( self.$field.reserve(additional); )*
         }
@@ -487,6 +518,10 @@ macro_rules! impl_atom_reserve {
 
 macro_rules! impl_atom_apply_permutation {
     ( $( ($field:ident, $ty:ty) ),* $(,)? ) => {
+        /// Reorder the first `n` atoms in every field array according to
+        /// `perm` (spatial re-sort for cache locality). **Must** be mirrored on
+        /// the registry via
+        /// [`apply_permutation_all`](AtomDataRegistry::apply_permutation_all).
         pub fn apply_permutation(&mut self, perm: &[usize], n: usize) {
             $(
                 {

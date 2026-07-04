@@ -29,8 +29,11 @@ fn default_periodic() -> BoundaryType {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum BoundaryType {
+    /// Atoms exiting one face re-enter from the opposite face.
     Periodic,
+    /// Static box face; atoms that leave the box are removed.
     Fixed,
+    /// Box face auto-adjusts each step to wrap all atoms (plus padding).
     ShrinkWrap,
 }
 
@@ -103,12 +106,19 @@ impl Default for DomainConfig {
 
 /// Simulation box geometry: global boundaries, sub-domain bounds, and periodicity.
 pub struct Domain {
+    /// Global lower box corner `[x, y, z]`.
     pub boundaries_low: [f64; 3],
+    /// Global upper box corner `[x, y, z]`.
     pub boundaries_high: [f64; 3],
+    /// Lower corner of this rank's sub-domain `[x, y, z]`.
     pub sub_domain_low: [f64; 3],
+    /// Upper corner of this rank's sub-domain `[x, y, z]`.
     pub sub_domain_high: [f64; 3],
+    /// Per-axis extent of this rank's sub-domain (`sub_domain_high - sub_domain_low`).
     pub sub_length: [f64; 3],
+    /// Global box volume.
     pub volume: f64,
+    /// Per-axis extent of the global box (`boundaries_high - boundaries_low`).
     pub size: [f64; 3],
     /// Per-axis boundary type (single source of truth).
     pub boundary_type: [BoundaryType; 3],
@@ -138,6 +148,7 @@ pub struct Domain {
     /// the box is triclinic (in lamda space the tilted box is a unit cube, so the
     /// orthogonal single-hop-per-dim decomposition still applies).
     pub sub_lamda_low: [f64; 3],
+    /// Upper sub-domain bound in fractional (lamda) coordinates; see [`sub_lamda_low`](Self::sub_lamda_low).
     pub sub_lamda_high: [f64; 3],
 }
 
@@ -148,6 +159,8 @@ impl Default for Domain {
 }
 
 impl Domain {
+    /// Create a unit-cube [`Domain`] (box `[0,1]³`, single sub-domain, fully periodic).
+    /// Real bounds are set later from [`DomainConfig`] during setup.
     pub fn new() -> Self {
         Domain {
             boundaries_high: [1.0; 3],
@@ -391,7 +404,9 @@ fn load_balance_system(
 /// the x-decomposition by particle count every `every` steps. Physics is
 /// decomposition-invariant, so a rebalanced run reproduces a static one.
 pub struct LoadBalancePlugin {
+    /// Rebalance every `every` steps (0 disables rebalancing).
     pub every: usize,
+    /// Number of histogram bins used to find balanced cut planes along x.
     pub nbins: usize,
 }
 

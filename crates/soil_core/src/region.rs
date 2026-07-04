@@ -7,8 +7,11 @@ use serde::Deserialize;
 #[derive(Deserialize, Clone, Debug)]
 #[serde(rename_all = "lowercase")]
 pub enum Axis {
+    /// The x axis.
     X,
+    /// The y axis.
     Y,
+    /// The z axis.
     Z,
 }
 
@@ -20,8 +23,12 @@ pub enum Axis {
 /// (positive = outside, negative = inside).
 #[derive(Debug, Clone, Copy)]
 pub struct SurfaceResult {
+    /// Nearest point on the region boundary to the query position.
     pub point: [f64; 3],
+    /// Outward unit normal at `point`.
     pub normal: [f64; 3],
+    /// Signed distance from the query position to the surface
+    /// (positive = outside, negative = inside).
     pub distance: f64,
 }
 
@@ -38,19 +45,31 @@ pub struct SurfaceResult {
 #[derive(Deserialize, Clone, Debug)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum Region {
+    /// Axis-aligned rectangular box spanning `min` to `max` on each axis.
     Block {
+        /// Lower corner `[x, y, z]`.
         min: [f64; 3],
+        /// Upper corner `[x, y, z]`.
         max: [f64; 3],
     },
+    /// Ball of the given `radius` centered at `center`.
     Sphere {
+        /// Center `[x, y, z]`.
         center: [f64; 3],
+        /// Radius.
         radius: f64,
     },
+    /// Finite cylinder aligned to `axis`, capped between `lo` and `hi`.
     Cylinder {
+        /// Center in the two axes perpendicular to `axis`.
         center: [f64; 2],
+        /// Cylinder radius.
         radius: f64,
+        /// Axis the cylinder is aligned to.
         axis: Axis,
+        /// Lower cap coordinate along `axis`.
         lo: f64,
+        /// Upper cap coordinate along `axis`.
         hi: f64,
     },
     /// Truncated cone (frustum) aligned to an axis.
@@ -58,21 +77,34 @@ pub enum Region {
     /// `rad_lo` is the radius at the `lo` end, `rad_hi` at the `hi` end.
     /// The cone tapers linearly from `rad_lo` to `rad_hi` along the axis.
     Cone {
+        /// Center in the two axes perpendicular to `axis`.
         center: [f64; 2],
+        /// Axis the cone is aligned to.
         axis: Axis,
+        /// Radius at the `lo` end.
         rad_lo: f64,
+        /// Radius at the `hi` end.
         rad_hi: f64,
+        /// Lower cap coordinate along `axis`.
         lo: f64,
+        /// Upper cap coordinate along `axis`.
         hi: f64,
     },
+    /// Half-space on the positive (normal-facing) side of a plane.
     Plane {
+        /// A point on the plane.
         point: [f64; 3],
+        /// Plane normal; the region is the side this points toward.
         normal: [f64; 3],
     },
+    /// Boolean union: a point is inside if it lies in **any** sub-region.
     Union {
+        /// Sub-regions to union.
         regions: Vec<Region>,
     },
+    /// Boolean intersection: a point is inside only if it lies in **every** sub-region.
     Intersect {
+        /// Sub-regions to intersect.
         regions: Vec<Region>,
     },
 }

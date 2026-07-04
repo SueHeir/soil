@@ -151,8 +151,11 @@ pub struct Neighbor {
     /// rebuilds. Dedicated (not shared with the `bin_*` build buffers) so the
     /// spatial sort stays decoupled from the neighbor build.
     pub sort_cell: Vec<u32>,
+    /// Per-cell atom counts for the spatial-sort counting sort (companion to `sort_cell`).
     pub sort_counts: Vec<u32>,
+    /// Permutation produced by the spatial sort, applied to the atom arrays.
     pub sort_perm: Vec<usize>,
+    /// Scratch positions used while building the spatial-sort permutation.
     pub sort_pos_scratch: Vec<[f64; 3]>,
     /// N2: post-permute local cell indices written by `sort_atoms_by_bin`, so the
     /// neighbor build doesn't recompute the cell for every local atom (it already
@@ -161,6 +164,8 @@ pub struct Neighbor {
     /// and populated this for the current `nlocal`, and cleared once the build
     /// consumes it (so a build with no preceding sort falls back to computing all).
     pub sorted_local_cell: Vec<u32>,
+    /// `true` when `sorted_local_cell` was populated by a sort for the current
+    /// `nlocal` and may be reused by the build; cleared once the build consumes it.
     pub local_cells_valid: bool,
     /// When all atoms share the same cutoff radius, cache `(2 * r * skin_fraction)²`
     /// to skip per-pair cutoff computation. `None` for polydisperse systems.

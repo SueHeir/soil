@@ -429,8 +429,11 @@ pub struct DumpRegistry {
 /// Global simulation-box snapshot for dump headers.
 #[derive(Clone, Copy)]
 pub struct BoxInfo {
+    /// Global lower box corner `[x, y, z]`.
     pub low: [f64; 3],
+    /// Global upper box corner `[x, y, z]`.
     pub high: [f64; 3],
+    /// Per-axis periodicity flags `[x, y, z]`.
     pub periodic: [bool; 3],
 }
 
@@ -450,11 +453,17 @@ pub struct DumpFrame {
     /// Output path WITHOUT extension (e.g. `dump/dump_500` or `dump/dump_500_rank2`);
     /// the writer appends its own format-specific suffix.
     pub path_stem: String,
+    /// Per-atom global tag (unique id).
     pub tag: Vec<u64>,
+    /// Per-atom type index.
     pub atom_type: Vec<u64>,
+    /// Per-atom position `[x, y, z]`.
     pub pos: Vec<[f64; 3]>,
+    /// Per-atom velocity `[vx, vy, vz]`.
     pub vel: Vec<[f64; 3]>,
+    /// Per-atom force `[fx, fy, fz]`.
     pub force: Vec<[f64; 3]>,
+    /// Per-atom radius (from `cutoff_radius`; `0` for point particles).
     pub radius: Vec<f64>,
     /// Registered scalar columns `(name, values)`, each of length `n()`.
     pub scalars: Vec<(String, Vec<f64>)>,
@@ -1098,6 +1107,9 @@ pub fn sync_dump_box(domain: Res<Domain>, dump_registry: Res<DumpRegistry>) {
     });
 }
 
+/// Output system: build a [`DumpFrame`] from the current atom state (optionally
+/// MPI-gathering to rank 0) and write it via the registered format writers when
+/// the configured dump interval fires.
 #[allow(clippy::too_many_arguments)]
 pub fn dump_atoms(
     atoms: Res<Atom>,

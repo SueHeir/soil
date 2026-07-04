@@ -33,6 +33,7 @@ pub struct BondStore {
 }
 
 impl BondStore {
+    /// Create an empty bond store (no atoms, no bonds).
     pub fn new() -> Self {
         BondStore {
             bonds: Vec::new(),

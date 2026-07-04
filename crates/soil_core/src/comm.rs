@@ -68,12 +68,15 @@ impl Default for CommConfig {
 /// across timesteps so the hot path never reallocates.
 #[derive(Default)]
 pub struct SwapScratch {
+    /// Send buffer for this swap's outgoing payload.
     pub send: Vec<f64>,
+    /// Receive buffer for this swap's incoming payload.
     pub recv: Vec<f64>,
 }
 
 /// Persistent communication buffers, reused across timesteps to avoid re-allocation.
 pub struct CommBuffers {
+    /// Send buffer for the ghost border build (forward path).
     pub border_send_buff: Vec<f64>,
     /// Per-rank exchange buffers, reused across exchange() calls.
     pub exchange_buffs: Vec<Vec<f64>>,
@@ -112,13 +115,20 @@ impl Default for CommBuffers {
 /// Saved sendlist data for a single border swap, enabling lightweight forward_comm
 /// position updates without full ghost rebuild.
 pub struct SwapData {
-    pub send_indices: Vec<usize>,   // atom indices packed in this swap
-    pub recv_start: usize,          // first ghost index for received atoms
-    pub recv_count: usize,          // number of ghosts received
+    /// Local atom indices packed (sent) in this swap.
+    pub send_indices: Vec<usize>,
+    /// First ghost index at which received atoms are stored.
+    pub recv_start: usize,
+    /// Number of ghosts received in this swap.
+    pub recv_count: usize,
+    /// Rank this swap sends to.
     pub to_proc: i32,
+    /// Rank this swap receives from.
     pub from_proc: i32,
-    pub periodic_offset: [f64; 3],  // precomputed position shift (real lattice vector)
-    pub vel_offset: [f64; 3],       // Lees–Edwards streaming-velocity shift (sheared faces)
+    /// Precomputed periodic position shift (real lattice vector) applied to ghosts.
+    pub periodic_offset: [f64; 3],
+    /// Lees–Edwards streaming-velocity shift applied to ghosts crossing a sheared face.
+    pub vel_offset: [f64; 3],
 }
 
 // ── CommTopology ─────────────────────────────────────────────────────────────
@@ -126,10 +136,14 @@ pub struct SwapData {
 /// Swap directions and counts for ghost communication (replaces MpiCommInternal).
 /// Works for both single-process and MPI.
 pub struct CommTopology {
+    /// Neighbor rank direction per swap slot (lower/upper) in each dimension.
     pub swap_directions: [[i32; 3]; 2],
+    /// Periodic position shift applied on each swap slot (lower/upper) per dimension.
     pub periodic_swap: [[f64; 3]; 2],
-    pub swap_data: Vec<SwapData>,   // sendlists for forward_comm
-    pub maxneed: [i32; 3],          // number of swap layers per dimension (0 = not yet computed)
+    /// Saved per-swap sendlists, enabling forward_comm without a full ghost rebuild.
+    pub swap_data: Vec<SwapData>,
+    /// Number of swap layers needed per dimension (0 = not yet computed).
+    pub maxneed: [i32; 3],
 }
 
 /// Run condition: returns true when Newton's third law optimization is enabled.
@@ -1026,6 +1040,11 @@ pub fn reverse_send_force(
 // ── Exchange (MPI only) ──────────────────────────────────────────────────────
 
 #[cfg(feature = "mpi_backend")]
+/// Exchange (migrate) atoms that have crossed a sub-domain boundary to their new
+/// owning rank. Runs at `PreExchange` on full-rebuild steps, before the ghost
+/// halo and neighbor list are rebuilt. One send/recv hop per dimension moves each
+/// atom to the correct neighbor; each migrated atom carries its full base fields
+/// plus every [`AtomData`] extension column.
 pub fn exchange(
     comm: Res<CommResource>,
     topo: Res<CommTopology>,

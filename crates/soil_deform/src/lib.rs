@@ -170,16 +170,28 @@ pub struct DeformConfig {
 #[derive(Clone, Debug)]
 pub enum DeformStyle {
     /// Engineering strain rate: L(t) = L0 * (1 + rate * dt * step)
-    Erate { rate: f64 },
+    Erate {
+        /// Engineering strain rate (per unit time).
+        rate: f64,
+    },
     /// Constant velocity on box faces: L(t) = L0 + velocity * dt * step
-    Vel { velocity: f64 },
+    Vel {
+        /// Face velocity (length per unit time).
+        velocity: f64,
+    },
     /// Linear ramp to target lo/hi over the run duration.
-    Final { target_lo: f64, target_hi: f64 },
+    Final {
+        /// Target lower box bound at the end of the run.
+        target_lo: f64,
+        /// Target upper box bound at the end of the run.
+        target_hi: f64,
+    },
 }
 
 /// Per-axis deformation state.
 #[derive(Clone, Debug)]
 pub struct AxisDeform {
+    /// How this axis deforms (strain rate, face velocity, or ramp-to-target).
     pub style: DeformStyle,
     /// Initial lower bound at start of deformation.
     pub lo_0: f64,

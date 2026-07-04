@@ -12,7 +12,9 @@ use crate::{Atom, Config, Region, ParticleSimScheduleSet, ScheduleSetupSet, Stag
 #[serde(deny_unknown_fields)]
 /// Definition of a single atom group from TOML `[[group]]`.
 pub struct GroupDef {
+    /// Group name (used to reference the group elsewhere in the config).
     pub name: String,
+    /// Atom types included in this group; `None` = all types (subject to `region`).
     #[serde(rename = "type", default)]
     pub atom_types: Option<Vec<u32>>,
     /// Spatial region filter (AND-combined with type filter if both present).
@@ -36,9 +38,13 @@ impl GroupDef {
 
 /// A named group with a boolean mask over local atoms.
 pub struct Group {
+    /// Group name (matches [`GroupDef::name`]).
     pub name: String,
+    /// The definition (type/region filters) this group was built from.
     pub def: GroupDef,
+    /// Boolean membership mask over local atoms; `mask[i]` is `true` if atom `i` is in the group.
     pub mask: Vec<bool>,
+    /// Number of local atoms in the group (count of `true` entries in `mask`).
     pub count: usize,
 }
 
@@ -46,10 +52,12 @@ pub struct Group {
 
 /// Registry of all atom groups. Always contains a built-in "all" group.
 pub struct GroupRegistry {
+    /// All registered groups, including the built-in "all" group.
     pub groups: Vec<Group>,
 }
 
 impl GroupRegistry {
+    /// Create an empty registry (the "all" group is added during setup).
     pub fn new() -> Self {
         GroupRegistry {
             groups: Vec::new(),
@@ -178,6 +186,8 @@ impl Plugin for GroupPlugin {
 
 // ── Systems ─────────────────────────────────────────────────────────────────
 
+/// Setup system: build the [`GroupRegistry`] from the config's `[[group]]`
+/// definitions (plus the built-in "all" group) and populate initial masks.
 pub fn setup_groups(
     config: Res<Config>,
     atoms: Res<Atom>,
@@ -259,6 +269,8 @@ pub fn setup_groups(
     rebuild_group_masks(&mut groups, &atoms);
 }
 
+/// Per-step system: recompute every dynamic group's membership mask against the
+/// current atom positions/types (static groups are left unchanged).
 pub fn rebuild_groups(atoms: Res<Atom>, mut groups: ResMut<GroupRegistry>) {
     rebuild_group_masks(&mut groups, &atoms);
 }

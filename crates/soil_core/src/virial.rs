@@ -17,11 +17,17 @@ use crate::{RunState, ParticleSimScheduleSet};
 /// - `fx, fy, fz` = force on atom i from atom j
 /// - Pressure: `P = NkT/V - trace/(3V)` (repulsion → negative trace → positive P)
 pub struct VirialStress {
+    /// xx (normal, x) component of the stress tensor.
     pub xx: f64,
+    /// yy (normal, y) component of the stress tensor.
     pub yy: f64,
+    /// zz (normal, z) component of the stress tensor.
     pub zz: f64,
+    /// xy (shear) component of the stress tensor.
     pub xy: f64,
+    /// xz (shear) component of the stress tensor.
     pub xz: f64,
+    /// yz (shear) component of the stress tensor.
     pub yz: f64,
     /// Whether virial should be computed this step.
     pub active: bool,
@@ -45,6 +51,7 @@ impl Default for VirialStress {
 }
 
 impl VirialStress {
+    /// Reset all six tensor components to zero (called each step before accumulation).
     pub fn zero(&mut self) {
         self.xx = 0.0;
         self.yy = 0.0;

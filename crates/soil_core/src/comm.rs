@@ -826,13 +826,29 @@ pub fn borders(
                     swap_recv_start = atoms.len();
                     swap_recv_count = 0;
                 } else if from_proc != -1 {
-                    // Receive only — matching 2-message protocol (meta then payload).
-                    let meta = comm.recv_f64(from_proc);
-                    let recv_count = meta[0] as usize;
-                    let payload = comm.recv_f64(from_proc);
+                    // Receive only — matching 2-message protocol (meta then payload),
+                    // probe-free into persistent buffers. A recv-only batch op
+                    // (dest = -1) posts a single Irecv into a caller-sized buffer,
+                    // so there is no MPI_Probe and no per-call heap allocation: the
+                    // recv-side analog of the symmetric sendrecv_f64_into path above.
+                    let mut recv_meta = [0.0f64; 2];
+                    comm.sendrecv_batch_f64_into(&mut [SendRecvOp {
+                        dest: -1,
+                        send_buf: &[],
+                        source: from_proc,
+                        recv_buf: &mut recv_meta,
+                    }]);
+                    let recv_count = recv_meta[0] as usize;
+                    recv_buff.resize(recv_meta[1] as usize, 0.0);
+                    comm.sendrecv_batch_f64_into(&mut [SendRecvOp {
+                        dest: -1,
+                        send_buf: &[],
+                        source: from_proc,
+                        recv_buf: &mut recv_buff,
+                    }]);
                     swap_recv_start = atoms.len();
                     swap_recv_count = recv_count;
-                    unpack_ghost_payload(&mut atoms, &registry, &payload, recv_count);
+                    unpack_ghost_payload(&mut atoms, &registry, &recv_buff, recv_count);
                 } else {
                     swap_recv_start = atoms.len();
                     swap_recv_count = 0;
@@ -1144,9 +1160,23 @@ pub fn exchange(
             comm.send_f64(lo_proc, &send_meta);
             comm.send_f64(lo_proc, &atoms_buff[0]);
         } else if hi_proc != -1 {
-            let meta = comm.recv_f64(hi_proc);
-            let payload = comm.recv_f64(hi_proc);
-            unpack_exchanged(&mut atoms, &registry, &payload, meta[0] as usize);
+            // Receive only — probe-free into persistent buffers via a recv-only
+            // batch op (dest = -1): one Irecv, no MPI_Probe, no per-call heap Vec.
+            let mut recv_meta = [0.0f64; 2];
+            comm.sendrecv_batch_f64_into(&mut [SendRecvOp {
+                dest: -1,
+                send_buf: &[],
+                source: hi_proc,
+                recv_buf: &mut recv_meta,
+            }]);
+            recv_buff.resize(recv_meta[1] as usize, 0.0);
+            comm.sendrecv_batch_f64_into(&mut [SendRecvOp {
+                dest: -1,
+                send_buf: &[],
+                source: hi_proc,
+                recv_buf: &mut recv_buff,
+            }]);
+            unpack_exchanged(&mut atoms, &registry, &recv_buff, recv_meta[0] as usize);
         }
 
         // Send hi, receive from lo
@@ -1162,9 +1192,23 @@ pub fn exchange(
             comm.send_f64(hi_proc, &send_meta);
             comm.send_f64(hi_proc, &atoms_buff[1]);
         } else if lo_proc != -1 {
-            let meta = comm.recv_f64(lo_proc);
-            let payload = comm.recv_f64(lo_proc);
-            unpack_exchanged(&mut atoms, &registry, &payload, meta[0] as usize);
+            // Receive only — probe-free into persistent buffers via a recv-only
+            // batch op (dest = -1): one Irecv, no MPI_Probe, no per-call heap Vec.
+            let mut recv_meta = [0.0f64; 2];
+            comm.sendrecv_batch_f64_into(&mut [SendRecvOp {
+                dest: -1,
+                send_buf: &[],
+                source: lo_proc,
+                recv_buf: &mut recv_meta,
+            }]);
+            recv_buff.resize(recv_meta[1] as usize, 0.0);
+            comm.sendrecv_batch_f64_into(&mut [SendRecvOp {
+                dest: -1,
+                send_buf: &[],
+                source: lo_proc,
+                recv_buf: &mut recv_buff,
+            }]);
+            unpack_exchanged(&mut atoms, &registry, &recv_buff, recv_meta[0] as usize);
         }
     }
 

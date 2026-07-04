@@ -95,13 +95,23 @@ Previously validated at the **DEM** tier by dirt's `mpi_loadbalance_validate`
 so the overlap serves DEM/MD/SPH/Peridynamics alike.
 
 ### C7 — `borders`/`exchange` use the allocating, probing `sendrecv_f64` · impact M · effort M
-The hot per-step path already uses the probe-free `sendrecv_f64_into` with a
-persistent buffer (`comm.rs:413`, `comm.rs:633`). But `borders` (`comm.rs:535`)
-and `exchange` (`comm.rs:757`, `comm.rs:780`) still call `sendrecv_f64` /
-`recv_f64`, which internally `receive_vec` → MPI_Probe + fresh `Vec` alloc
-(`grass_mpi:320`, `grass_mpi:334`). The probe adds a round-trip. Exchange counts
-can be communicated first (small fixed message), then payload received with the
-`_into` variant into a persistent buffer.
+### ✅ DONE
+The symmetric paired-swap branches of `borders`/`exchange` already used the
+probe-free `sendrecv_f64_into` (count-first meta, then payload into a persistent
+buffer). The three **receive-only** branches (non-periodic-boundary edge ranks:
+`borders` at the swap with a `from_proc` but no `to_proc`, and `exchange`'s
+hi-/lo-only sides) still called `recv_f64`, which internally does
+`receive_vec` → MPI_Probe + a fresh `Vec` alloc every step. They now receive the
+already-count-first protocol probe-free: a single recv-only batch op (`dest = -1`
+→ one `Irecv`) via `sendrecv_batch_f64_into` — the recv-side analog of
+`sendrecv_f64_into` — first into a fixed `[f64; 2]` meta, then into the persistent
+`recv_buff` sized from the meta. No `MPI_Probe`, no per-call heap `Vec`, on any
+border/exchange branch. Kept fully in soil (reused the existing probe-free
+`_into` batch primitive), so no `grass` change was needed. Validated: `cargo test
+-p soil_core` (92 pass); the periodic `overlap_forward_validate` sweep (n1/n2/n4,
+9/9); and a **non-periodic** 2-rank run (`boundary_x = fixed`) that exercises all
+recv-only branches (600 firings) is **byte-identical** to the pre-change baseline
+binary — no behavior change, transport only.
 
 ### C8 — `all_reduce_sum_f64` collective on every full rebuild · impact L-M · effort S
 `borders` calls `all_reduce_sum_f64` every rebuild (`comm.rs:468`) only to set

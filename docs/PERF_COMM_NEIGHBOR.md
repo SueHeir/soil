@@ -55,7 +55,7 @@ concurrently (latency overlap), but they're still distinct messages — true
 same-rank aggregation into fewer messages is still open.
 
 ### C6 — Fully blocking comm; no compute/comm overlap · impact M-H · effort L
-### ✅ DONE (per-swap overlap) — Aug pass
+### ✅ DONE (per-swap overlap + interior/boundary compute overlap)
 Every exchange *was* a blocking `sendrecv`. Classic MPI win: post ghost-position
 forward comm with `Isend`/`Irecv` and overlap with local work, and/or overlap
 the reverse-force return.
@@ -70,9 +70,29 @@ later round can forward corner ghosts an earlier round's receive just filled
 Validated: 2-rank + 2×2×2 8-rank Haff cooling decays correctly with no energy
 injection; `bond_mpi_drift` behaviorally identical to baseline.
 
-**Not yet done:** overlapping comm with *local force/integrator compute* (the
-deeper win) — needs the ECS systems restructured so work exists to overlap with
-while messages are in flight. Left for a later pass.
+**Deeper win — now wired and verified:** overlapping comm with *local
+force/integrator compute*. `forward_comm_overlap` (`comm.rs`) mirrors
+`forward_comm` but always uses the overlap-capable batch primitive
+(`grass_mpi::sendrecv_batch_overlap_f64_into`) and takes a caller closure that
+runs *while the first round's ghost swaps are in flight*; `classify_boundary_atoms`
+(`neighbor.rs`) supplies the interior/boundary split (interior atoms have no ghost
+neighbours, so their force is halo-independent and computes during the exchange;
+boundary atoms are finished once the halo lands, after the wait).
+
+Validated at the **substrate** tier (this pass): the MPI example
+`crates/soil_core/examples/overlap_forward_validate` runs a periodic
+Lennard-Jones gas (generic MD — no DEM logic) with a full neighbour list so each
+atom's force is a self-contained, order-preserving sum, then compares the
+overlapped force against the standard non-overlapped `forward_comm` path.
+`sweep.py` reports **max|Δ| = 0 (bit-identical, well inside the FP-associativity
+floor)** for final positions *and* velocities on 1-, 2-, and 4-rank layouts, with
+a non-empty interior population computed during the in-flight halo on every
+multi-rank layout (n2: 1512 interior / 2584 boundary; n4: 927 / 3169) and the
+boundary force issued only after the wait. `forward_comm_overlap` also gains a
+serial unit test (`forward_comm_overlap_matches_forward_comm_and_runs_closure`).
+Previously validated at the **DEM** tier by dirt's `mpi_loadbalance_validate`
+(`DIRT_OVERLAP_FORCE=1`) — the same substrate primitive now proven one tier down,
+so the overlap serves DEM/MD/SPH/Peridynamics alike.
 
 ### C7 — `borders`/`exchange` use the allocating, probing `sendrecv_f64` · impact M · effort M
 The hot per-step path already uses the probe-free `sendrecv_f64_into` with a

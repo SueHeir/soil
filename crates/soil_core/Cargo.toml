@@ -28,3 +28,12 @@ grass_io = { git = "ssh://git@192.168.0.170:2222/SueHeir/grass.git", branch = "m
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 rand = "0.9"
+
+# ── Examples ─────────────────────────────────────────────────────────────────
+# MPI validation of forward_comm_overlap (roadmap step 4, comm/compute overlap):
+# an LJ gas whose overlapped force must match the non-overlapped force to the
+# FP floor across rank layouts. Requires the MPI backend (default feature).
+[[example]]
+name = "overlap_forward_validate"
+path = "examples/overlap_forward_validate/main.rs"
+required-features = ["mpi_backend", "precision-double"]

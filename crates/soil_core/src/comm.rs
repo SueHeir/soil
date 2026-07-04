@@ -1320,4 +1320,66 @@ mod tests {
         assert_eq!(swap.to_proc, 1);
         assert_eq!(swap.from_proc, 2);
     }
+
+    /// Build a 2-local + 1-ghost atom set and a single self-send periodic swap
+    /// (atom 0 → ghost slot 2, offset +10 in x). Used by the two overlap tests.
+    fn overlap_fixture() -> (Atom, CommTopology, AtomDataRegistry) {
+        let mut atoms = Atom::new();
+        atoms.push_test_atom(0, [1.0, 2.0, 3.0], 0.5, 1.0);
+        atoms.push_test_atom(1, [4.0, 5.0, 6.0], 0.5, 1.0);
+        atoms.push_test_atom(2, [0.0, 0.0, 0.0], 0.5, 1.0); // ghost slot
+        atoms.vel[0] = [0.1, 0.2, 0.3];
+        atoms.nlocal = 2;
+        atoms.nghost = 1;
+
+        let topo = CommTopology {
+            swap_directions: [[-1, -1, -1], [-1, -1, -1]],
+            periodic_swap: [[0.0; 3], [0.0; 3]],
+            swap_data: vec![SwapData {
+                send_indices: vec![0],
+                recv_start: 2,
+                recv_count: 1,
+                to_proc: 0, // self-send (rank 0 → rank 0): periodic image onto self
+                from_proc: 0,
+                periodic_offset: [10.0, 0.0, 0.0],
+                vel_offset: [0.0, 0.0, 0.0],
+            }],
+            maxneed: [1, 0, 0],
+        };
+        (atoms, topo, AtomDataRegistry::new())
+    }
+
+    /// `forward_comm_overlap` must (a) run the caller's overlap closure and
+    /// (b) produce exactly the ghost data `forward_comm` produces. Uses the
+    /// serial [`SingleProcessComm`] backend (no MPI runtime needed): the swap is
+    /// a periodic self-send, so `forward_comm_overlap` takes its "no batch ran"
+    /// path and still executes the closure — the substrate-level guarantee that
+    /// interior work is never dropped even when there are no real MPI messages.
+    #[test]
+    fn forward_comm_overlap_matches_forward_comm_and_runs_closure() {
+        let comm = SingleProcessComm::new();
+
+        // Reference: standard forward_comm fills the ghost from local atom 0 + offset.
+        let (mut ref_atoms, topo, registry) = overlap_fixture();
+        let mut pool = Vec::new();
+        forward_comm(&mut ref_atoms, &registry, &topo, &comm, &mut pool);
+
+        // Under test: forward_comm_overlap with a closure that records it ran.
+        let (mut atoms, topo2, registry2) = overlap_fixture();
+        let mut pool2 = Vec::new();
+        let mut ran = false;
+        {
+            let mut overlap = |_a: &mut Atom| {
+                ran = true;
+            };
+            forward_comm_overlap(&mut atoms, &registry2, &topo2, &comm, &mut pool2, &mut overlap);
+        }
+
+        assert!(ran, "overlap closure must execute during forward_comm_overlap");
+        // Ghost position = local atom 0 shifted by the periodic offset; velocity copied.
+        assert_eq!(atoms.pos[2], ref_atoms.pos[2], "ghost pos must match forward_comm");
+        assert_eq!(atoms.vel[2], ref_atoms.vel[2], "ghost vel must match forward_comm");
+        assert_eq!(atoms.pos[2][0] as f64, 11.0, "pos[0]+offset applied to ghost");
+        assert_eq!(atoms.vel[2][0] as f64, 0.1, "ghost velocity copied from owner");
+    }
 }

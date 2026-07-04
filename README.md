@@ -132,13 +132,13 @@ particle substrate via one `AtomData` contract; DIRT is the proof that a full
 LAMMPS-validated physics tier rides it — and the same seams are open for SPH,
 peridynamics, or your own method.
 
-One line per tier, worded identically wherever these three repos describe
-themselves:
+One line per tier, matching how each repo describes itself:
 
 - **[GRASS](https://github.com/SueHeir/grass)** — Build solvers as composable
-  plugins instead of a hand-rolled main loop — explicit time-stepping or a
-  single implicit global solve, particles or a mesh — and couple several
-  together, in-process or across MPI.
+  plugins instead of a hand-rolled main loop — explicit, time-stepping methods —
+  and couple several together, in-process or across MPI. The framework knows
+  nothing about particles or physics, and is not proven for implicit global
+  solvers (FEM, spectral, Newton-Krylov).
 - **[SOIL](https://github.com/SueHeir/soil)** — Write your own particle method
   without hand-writing domain decomposition, halo exchange, migration, and
   neighbor lists — declare your state once, SOIL carries it through all of it.

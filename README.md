@@ -163,12 +163,11 @@ Built on [GRASS](https://github.com/SueHeir/grass). Consumed by
 [DIRT](https://github.com/SueHeir/dirt) (DEM, validated) and by
 development-stage sibling physics tiers that ride the same `AtomData` contract
 as demonstrations that the substrate is method-agnostic:
-[dev_pond](https://github.com/SueHeir/dev_pond) (bond-based peridynamics — a PD
-point cloud is a soil atom set, its horizon is a neighbor cutoff, and its PD
-family is a `BondStore`) and [dev_sph](https://github.com/SueHeir/dev_sph)
-(granular SPH — kernels plus a `mu(I)` constitutive update over the same
-neighbor machinery). These `dev_` tiers are not yet peer-reviewed; they exist to
-show that one particle substrate carries more than one method.
+`dev_soil_peri` (bond-based peridynamics — a PD point cloud is a soil atom set,
+its horizon is a neighbor cutoff, and its PD family is a `BondStore`) and
+`dev_soil_sph` (granular SPH — kernels plus a `mu(I)` constitutive update over
+the same neighbor machinery). These `dev_` tiers are not yet peer-reviewed; they
+exist to show that one particle substrate carries more than one method.
 
 **Where to start:** to *run* granular simulations, start at
 [DIRT](https://github.com/SueHeir/dirt), the batteries-included physics tier; to

@@ -20,11 +20,12 @@
 //!
 //! ## What does NOT change with precision
 //!
-//! Wire and persistence formats stay `f64` regardless of config: MPI pack/unpack
-//! buffers, `grass_mpi` reductions, and restart files. We convert `Real`/`Accum`
-//! <-> `f64` only at those boundaries. This keeps the external `grass` crates
-//! untouched and lets a restart file round-trip losslessly across precision
-//! builds.
+//! Wire and persistence formats stay `f64` regardless of compile-time precision:
+//! most MPI pack/unpack buffers, `grass_mpi` reductions, and restart files. The
+//! explicit runtime experiment `[comm] forward_precision = "f32"` narrows only
+//! the base ghost position/velocity forward payload before the current f64
+//! backend boundary; reverse force accumulation stays f64 in double/mixed.
+//! Restart files still round-trip losslessly across precision builds.
 
 // Exactly one precision feature must be active. The build system defaults to
 // `precision-mixed`; selecting two (or none) is a configuration error.

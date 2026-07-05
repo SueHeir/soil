@@ -65,8 +65,8 @@ use grass_app::prelude::*;
 use grass_scheduler::prelude::*;
 use soil_core::{
     classify_boundary_atoms, forward_comm_overlap, Accum, Atom, AtomDataRegistry, AtomPlugin,
-    CommBuffers, CommResource, CommTopology, CommunicationPlugin, Config, Domain, DomainPlugin,
-    Neighbor, NeighborPlugin, ParticleSimScheduleSet, Real,
+    CommBuffers, CommConfig, CommResource, CommTopology, CommunicationPlugin, Config, Domain,
+    DomainPlugin, ForwardCommPrecision, Neighbor, NeighborPlugin, ParticleSimScheduleSet, Real,
 };
 
 // ── Lennard-Jones parameters (reduced units: ε = σ = m = 1) ──────────────────
@@ -192,7 +192,14 @@ fn force_overlap(
             lj_force_pass(a, neighbor_ref, |i| !mask_ref[i]);
             interior_ran = true;
         };
-        forward_comm_overlap(&mut atoms, &registry, &topo, &**comm, &mut pool, &mut interior);
+        forward_comm_overlap(
+            &mut atoms,
+            &registry,
+            &topo,
+            &**comm,
+            &mut pool,
+            &mut interior,
+        );
     }
     buffers.forward_scratch = pool;
 
@@ -231,7 +238,8 @@ fn final_integration(mut atoms: ResMut<Atom>) {
     for i in 0..nlocal {
         let half_dt_over_m = 0.5 * dt * atoms.inv_mass[i] as Accum;
         for k in 0..3 {
-            atoms.vel[i][k] = (atoms.vel[i][k] as Accum + half_dt_over_m * atoms.force[i][k]) as Real;
+            atoms.vel[i][k] =
+                (atoms.vel[i][k] as Accum + half_dt_over_m * atoms.force[i][k]) as Real;
         }
     }
 }
@@ -240,7 +248,9 @@ fn main() {
     let cfg_path = std::env::args()
         .nth(1)
         .expect("usage: overlap_forward_validate <config.toml>");
-    let overlap = std::env::var("SOIL_OVERLAP").map(|s| s == "1").unwrap_or(false);
+    let overlap = std::env::var("SOIL_OVERLAP")
+        .map(|s| s == "1")
+        .unwrap_or(false);
 
     let toml = fs::read_to_string(&cfg_path)
         .unwrap_or_else(|e| panic!("cannot read config {cfg_path}: {e}"));
@@ -259,20 +269,25 @@ fn main() {
     } else {
         app.add_update_system(force_baseline, ParticleSimScheduleSet::Force);
     }
-    app.add_update_system(initial_integration, ParticleSimScheduleSet::InitialIntegration);
+    app.add_update_system(
+        initial_integration,
+        ParticleSimScheduleSet::InitialIntegration,
+    );
     app.add_update_system(final_integration, ParticleSimScheduleSet::FinalIntegration);
 
     app.prepare();
 
     // ── Seed the deterministic global system, keeping only atoms this rank owns.
-    let (sub_low, sub_high, ranks, rank) = {
+    let (sub_low, sub_high, ranks, rank, forward_precision) = {
         let domain = app.get_resource_ref::<Domain>().unwrap();
         let comm = app.get_resource_ref::<CommResource>().unwrap();
+        let comm_config = app.get_resource_ref::<CommConfig>().unwrap();
         (
             domain.sub_domain_low,
             domain.sub_domain_high,
             comm.size(),
             comm.rank(),
+            comm_config.forward_precision,
         )
     };
     let a = lattice_spacing();
@@ -325,7 +340,13 @@ fn main() {
     // ── Dump this rank's final state (tag, position, velocity). ──
     let dir = "examples/overlap_forward_validate/data";
     fs::create_dir_all(dir).ok();
-    let mode = if overlap { "overlap" } else { "baseline" };
+    let mode = if overlap {
+        "overlap"
+    } else if forward_precision == ForwardCommPrecision::F32 {
+        "f32"
+    } else {
+        "baseline"
+    };
     let path = format!("{dir}/state_{mode}_n{ranks}_rank{rank}.csv");
     {
         let atoms = app.get_resource_ref::<Atom>().unwrap();
@@ -336,8 +357,12 @@ fn main() {
                 f,
                 "{},{:.17e},{:.17e},{:.17e},{:.17e},{:.17e},{:.17e}",
                 atoms.tag[i],
-                atoms.pos[i][0], atoms.pos[i][1], atoms.pos[i][2],
-                atoms.vel[i][0], atoms.vel[i][1], atoms.vel[i][2],
+                atoms.pos[i][0],
+                atoms.pos[i][1],
+                atoms.pos[i][2],
+                atoms.vel[i][0],
+                atoms.vel[i][1],
+                atoms.vel[i][2],
             )
             .unwrap();
         }

@@ -7,9 +7,12 @@ Crate directories contain library code only.
 
 MPI validation that overlapped forward communication matches the baseline path
 to the FP floor on 1, 2, and 4 ranks while doing measured interior work before
-boundary work.
+boundary work. The same sweep compares opt-in f32 forward ghost position/velocity
+communication against the default f64 path.
 
 ![overlap forward validation](overlap_forward_validate/plots/overlap_forward_validate.png)
+
+![f32 forward drift](overlap_forward_validate/plots/f32_forward_drift.png)
 
 ## tree_farfield_proof
 

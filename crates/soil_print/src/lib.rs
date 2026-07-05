@@ -1724,7 +1724,7 @@ mod tests {
     // (de)serialization primitives in isolation.
 
     use std::any::Any;
-    use soil_core::{Atom, AtomData, AtomDataRegistry, Domain};
+    use soil_core::{apply_permutation_in_place, Atom, AtomData, AtomDataRegistry, Domain};
 
     /// A generic, method-agnostic per-atom extension used only to prove the
     /// substrate carries *registered* columns losslessly. It has no physical
@@ -1762,10 +1762,17 @@ mod tests {
             4
         }
         fn apply_permutation(&mut self, perm: &[usize], n: usize) {
-            let s: Vec<f64> = perm.iter().map(|&p| self.scalar[p]).collect();
-            let v: Vec<[f64; 3]> = perm.iter().map(|&p| self.vector[p]).collect();
-            self.scalar[..n].copy_from_slice(&s);
-            self.vector[..n].copy_from_slice(&v);
+            let mut visited = Vec::new();
+            self.apply_permutation_with_scratch(perm, n, &mut visited);
+        }
+        fn apply_permutation_with_scratch(
+            &mut self,
+            perm: &[usize],
+            n: usize,
+            visited: &mut Vec<bool>,
+        ) {
+            apply_permutation_in_place(&mut self.scalar, perm, n, visited);
+            apply_permutation_in_place(&mut self.vector, perm, n, visited);
         }
     }
 

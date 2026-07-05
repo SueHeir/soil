@@ -81,7 +81,7 @@ pub const ATOM_PACK_SIZE: usize = 17;
 /// ```no_run
 /// use std::any::Any;
 /// use grass_app::prelude::*;
-/// use soil_core::{register_atom_data, AtomData, AtomPlugin};
+/// use soil_core::{apply_permutation_in_place, register_atom_data, AtomData, AtomPlugin};
 ///
 /// // A minimal extension (a real one would use `#[derive(AtomData)]`).
 /// #[derive(Default)]
@@ -94,8 +94,8 @@ pub const ATOM_PACK_SIZE: usize = 17;
 ///     fn pack(&self, i: usize, buf: &mut Vec<f64>) { buf.push(self.q[i]); }
 ///     fn unpack(&mut self, buf: &[f64]) -> usize { self.q.push(buf[0]); 1 }
 ///     fn apply_permutation(&mut self, perm: &[usize], n: usize) {
-///         let s: Vec<f64> = perm.iter().map(|&p| self.q[p]).collect();
-///         self.q[..n].copy_from_slice(&s);
+///         let mut visited = Vec::new();
+///         apply_permutation_in_place(&mut self.q, perm, n, &mut visited);
 ///     }
 /// }
 ///
@@ -115,6 +115,44 @@ macro_rules! register_atom_data {
             panic!("AtomDataRegistry not found — AtomPlugin must be added first");
         }
     };
+}
+
+/// Apply `perm[0..n]` to `values[0..n]` in place, with `perm[new_i] = old_i`.
+///
+/// `visited` is caller-owned scratch. It is cleared and resized, but its capacity
+/// is retained so spatial sorts can reuse the same allocation across every base
+/// atom field and registered [`AtomData`] column.
+pub fn apply_permutation_in_place<T: Clone>(
+    values: &mut [T],
+    perm: &[usize],
+    n: usize,
+    visited: &mut Vec<bool>,
+) {
+    assert!(n <= values.len(), "permutation length exceeds value slice");
+    assert!(n <= perm.len(), "permutation length exceeds perm slice");
+
+    visited.clear();
+    visited.resize(n, false);
+
+    for start in 0..n {
+        if visited[start] {
+            continue;
+        }
+
+        let mut current = start;
+        let saved = values[start].clone();
+        loop {
+            visited[current] = true;
+            let source = perm[current];
+            assert!(source < n, "permutation index out of bounds");
+            if source == start {
+                values[current] = saved;
+                break;
+            }
+            values[current] = values[source].clone();
+            current = source;
+        }
+    }
 }
 
 /// Per-atom extension data (e.g. radius, density for DEM).
@@ -151,6 +189,19 @@ pub trait AtomData: Any {
     fn unpack_reverse(&mut self, _i: usize, _buf: &[f64]) -> usize { 0 }
     /// Zero per-step accumulators (e.g. torque) for atoms 0..n.
     fn zero(&mut self, _n: usize) {}
+    /// Reorder atoms with caller-owned cycle scratch.
+    ///
+    /// Implementations should use this when possible so spatial sorting can reuse
+    /// one scratch allocation across all registered extensions. The default keeps
+    /// older hand-written implementations source-compatible.
+    fn apply_permutation_with_scratch(
+        &mut self,
+        perm: &[usize],
+        n: usize,
+        _visited: &mut Vec<bool>,
+    ) {
+        self.apply_permutation(perm, n);
+    }
     /// Number of f64s per atom in forward comm.
     fn forward_comm_size(&self) -> usize { 0 }
     /// Number of f64s per atom in reverse comm.
@@ -295,8 +346,19 @@ impl AtomDataRegistry {
 
     /// Reorder all extensions according to `perm[0..n]`.
     pub fn apply_permutation_all(&self, perm: &[usize], n: usize) {
+        let mut visited = Vec::new();
+        self.apply_permutation_all_with_scratch(perm, n, &mut visited);
+    }
+
+    /// Reorder all extensions with caller-owned cycle scratch.
+    pub fn apply_permutation_all_with_scratch(
+        &self,
+        perm: &[usize],
+        n: usize,
+        visited: &mut Vec<bool>,
+    ) {
         for (_, cell) in &self.stores {
-            cell.borrow_mut().apply_permutation(perm, n);
+            cell.borrow_mut().apply_permutation_with_scratch(perm, n, visited);
         }
     }
 
@@ -523,12 +585,18 @@ macro_rules! impl_atom_apply_permutation {
         /// the registry via
         /// [`apply_permutation_all`](AtomDataRegistry::apply_permutation_all).
         pub fn apply_permutation(&mut self, perm: &[usize], n: usize) {
-            $(
-                {
-                    let scratch: Vec<$ty> = perm.iter().map(|&p| self.$field[p].clone()).collect();
-                    self.$field[..n].clone_from_slice(&scratch);
-                }
-            )*
+            let mut visited = Vec::new();
+            self.apply_permutation_with_scratch(perm, n, &mut visited);
+        }
+
+        /// Reorder the first `n` atoms using caller-owned cycle scratch.
+        pub fn apply_permutation_with_scratch(
+            &mut self,
+            perm: &[usize],
+            n: usize,
+            visited: &mut Vec<bool>,
+        ) {
+            $( apply_permutation_in_place(&mut self.$field, perm, n, visited); )*
         }
     };
 }
@@ -676,4 +744,41 @@ fn zero_all_forces(mut atoms: ResMut<Atom>, registry: Res<AtomDataRegistry>) {
     let n = atoms.len();
     atoms.force[..n].fill([0.0; 3]);
     registry.zero_all(n);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::apply_permutation_in_place;
+
+    #[test]
+    fn apply_permutation_in_place_matches_scratch_collect() {
+        let cases: &[&[usize]] = &[
+            &[0, 1, 2, 3, 4],
+            &[2, 0, 1, 4, 3],
+            &[4, 3, 2, 1, 0],
+            &[1, 2, 3, 4, 0],
+        ];
+
+        for &perm in cases {
+            let original = vec![10, 20, 30, 40, 50];
+            let mut values = original.clone();
+            let expected: Vec<_> = perm.iter().map(|&p| original[p]).collect();
+            let mut visited = Vec::new();
+
+            apply_permutation_in_place(&mut values, perm, perm.len(), &mut visited);
+
+            assert_eq!(values, expected);
+            assert!(visited.capacity() >= perm.len());
+        }
+    }
+
+    #[test]
+    fn apply_permutation_in_place_only_reorders_prefix() {
+        let mut values = vec!["a", "b", "c", "ghost"];
+        let mut visited = Vec::new();
+
+        apply_permutation_in_place(&mut values, &[2, 0, 1], 3, &mut visited);
+
+        assert_eq!(values, vec!["c", "a", "b", "ghost"]);
+    }
 }

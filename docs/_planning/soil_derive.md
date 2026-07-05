@@ -147,9 +147,11 @@ lib.rs:430–435).
 0..old_len but guarantees correctness for both growth and shrink
 (lib.rs:481–491).
 
-**`apply_permutation(perm, n)`** — builds a scratch vector by collecting
-`perm.iter().map(|&p| self.field[p])`, then copies back into `self.field[..n]`.
-Allocates one scratch Vec per field per call (lib.rs:288–308).
+**`apply_permutation(perm, n)`** — delegates to
+`apply_permutation_with_scratch` with one visited buffer. The scratch-aware path
+calls `soil_core::apply_permutation_in_place` for each field, so spatial sorts
+can pass one persistent visited buffer through every registered extension instead
+of allocating one scratch Vec per field (lib.rs:288–308).
 
 ---
 
@@ -201,9 +203,10 @@ they live in Rust source.
    struct changes all subsequent offsets — another facet of the wire-format
    stability constraint.
 
-7. **`apply_permutation` allocates per field.** Each field requires a scratch Vec
-   allocation on every permutation call (`lib.rs:288–308`). For structs with many
-   large fields this can be significant. A hand-written impl can avoid this.
+7. **`apply_permutation_with_scratch` is the hot path.** The plain
+   `apply_permutation` method still creates one visited buffer for compatibility,
+   but spatial sorting calls the scratch-aware method so all fields reuse the
+   same allocation (`lib.rs:288–308`).
 
 8. **Type aliases are not recognized.** `classify_field` checks for the literal
    path `Vec` with one angle-bracketed argument (`lib.rs:98–133`). A type alias

@@ -289,22 +289,8 @@ pub fn derive_atom_data(input: TokenStream) -> TokenStream {
         .iter()
         .map(|f| {
             let id = &f.ident;
-            match &f.kind {
-                FieldKind::Scalar => quote! {
-                    {
-                        let scratch: Vec<f64> = perm.iter().map(|&p| self.#id[p]).collect();
-                        self.#id[..n].copy_from_slice(&scratch);
-                    }
-                },
-                FieldKind::Array(n_val) => {
-                    let n_lit = *n_val;
-                    quote! {
-                        {
-                            let scratch: Vec<[f64; #n_lit]> = perm.iter().map(|&p| self.#id[p]).collect();
-                            self.#id[..n].copy_from_slice(&scratch);
-                        }
-                    }
-                }
+            quote! {
+                soil_core::apply_permutation_in_place(&mut self.#id, perm, n, visited);
             }
         })
         .collect();
@@ -345,6 +331,16 @@ pub fn derive_atom_data(input: TokenStream) -> TokenStream {
             }
 
             fn apply_permutation(&mut self, perm: &[usize], n: usize) {
+                let mut visited = Vec::new();
+                self.apply_permutation_with_scratch(perm, n, &mut visited);
+            }
+
+            fn apply_permutation_with_scratch(
+                &mut self,
+                perm: &[usize],
+                n: usize,
+                visited: &mut Vec<bool>,
+            ) {
                 #(#perm_stmts)*
             }
 
@@ -500,4 +496,3 @@ fn build_zero_method(fields: &[FieldInfo]) -> proc_macro2::TokenStream {
         }
     }
 }
-

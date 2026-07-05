@@ -35,6 +35,23 @@ fn default_one_i32() -> i32 {
     1
 }
 
+/// Precision used for the base position/velocity payload in lightweight
+/// forward ghost communication.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ForwardCommPrecision {
+    /// Preserve the historical f64 forward communication path.
+    F64,
+    /// Round ghost positions/velocities to f32 before forward communication.
+    F32,
+}
+
+impl Default for ForwardCommPrecision {
+    fn default() -> Self {
+        Self::F64
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
 /// TOML `[comm]` — MPI processor grid configuration.
@@ -48,6 +65,12 @@ pub struct CommConfig {
     /// Number of MPI ranks in z dimension.
     #[serde(default = "default_one_i32")]
     pub processors_z: i32,
+    /// Precision for per-step forward ghost position/velocity updates.
+    ///
+    /// Defaults to `f64`. Setting `"f32"` is an explicit numerics experiment:
+    /// reverse force accumulation and extension fields still use f64.
+    #[serde(default)]
+    pub forward_precision: ForwardCommPrecision,
 }
 
 impl Default for CommConfig {
@@ -56,6 +79,7 @@ impl Default for CommConfig {
             processors_x: 1,
             processors_y: 1,
             processors_z: 1,
+            forward_precision: ForwardCommPrecision::F64,
         }
     }
 }
@@ -72,6 +96,19 @@ pub struct SwapScratch {
     pub send: Vec<f64>,
     /// Receive buffer for this swap's incoming payload.
     pub recv: Vec<f64>,
+    /// f32 base pos/vel send buffer for precision-gated forward comm.
+    pub send_f32: Vec<f32>,
+    /// f32 base pos/vel receive buffer for precision-gated forward comm.
+    pub recv_f32: Vec<f32>,
+    /// Existing grass_mpi point-to-point transport is f64-only; this bridge
+    /// carries already-rounded f32 values across that backend boundary.
+    pub send_bridge: Vec<f64>,
+    /// Receive-side bridge for already-rounded f32 base forward payloads.
+    pub recv_bridge: Vec<f64>,
+    /// f64 extension-field payload used alongside f32 base pos/vel forwarding.
+    pub send_extra: Vec<f64>,
+    /// f64 extension-field receive buffer used alongside f32 base forwarding.
+    pub recv_extra: Vec<f64>,
 }
 
 /// Persistent communication buffers, reused across timesteps to avoid re-allocation.
@@ -164,7 +201,9 @@ impl Plugin for CommunicationPlugin {
 # Number of MPI processors in each dimension
 processors_x = 1
 processors_y = 1
-processors_z = 1"#,
+processors_z = 1
+# Forward ghost position/velocity precision: "f64" (default) or "f32"
+forward_precision = "f64""#,
         )
     }
 
@@ -423,6 +462,26 @@ fn unpack_forward(msg: &[f64], atoms: &mut Atom, registry: &AtomDataRegistry, re
     }
 }
 
+fn unpack_forward_f32(
+    base_msg: &[f32],
+    extra_msg: &[f64],
+    atoms: &mut Atom,
+    registry: &AtomDataRegistry,
+    recv_start: usize,
+    recv_count: usize,
+    extra_per_atom: usize,
+) {
+    for k in 0..recv_count {
+        let base = k * FORWARD_PACK_SIZE;
+        atoms.pos[recv_start + k] = [base_msg[base] as Real, base_msg[base + 1] as Real, base_msg[base + 2] as Real];
+        atoms.vel[recv_start + k] = [base_msg[base + 3] as Real, base_msg[base + 4] as Real, base_msg[base + 5] as Real];
+        if extra_per_atom > 0 {
+            let extra_base = k * extra_per_atom;
+            registry.unpack_forward_all(recv_start + k, &extra_msg[extra_base..extra_base + extra_per_atom]);
+        }
+    }
+}
+
 /// Append one swap's outgoing ghost pos/vel (+ registry forward fields) to `buf`.
 ///
 /// The periodic-image offset is the FIXED value from the last neighbor build
@@ -441,6 +500,25 @@ fn pack_forward_into(swap: &SwapData, buf: &mut Vec<f64>, atoms: &Atom, registry
         buf.push(atoms.vel[idx][0] as f64 + voff[0]);
         buf.push(atoms.vel[idx][1] as f64 + voff[1]);
         buf.push(atoms.vel[idx][2] as f64 + voff[2]);
+        registry.pack_forward_all(idx, buf);
+    }
+}
+
+fn pack_forward_base_f32_into(swap: &SwapData, buf: &mut Vec<f32>, atoms: &Atom) {
+    let offset = swap.periodic_offset;
+    let voff = swap.vel_offset;
+    for &idx in &swap.send_indices {
+        buf.push((atoms.pos[idx][0] as f64 + offset[0]) as f32);
+        buf.push((atoms.pos[idx][1] as f64 + offset[1]) as f32);
+        buf.push((atoms.pos[idx][2] as f64 + offset[2]) as f32);
+        buf.push((atoms.vel[idx][0] as f64 + voff[0]) as f32);
+        buf.push((atoms.vel[idx][1] as f64 + voff[1]) as f32);
+        buf.push((atoms.vel[idx][2] as f64 + voff[2]) as f32);
+    }
+}
+
+fn pack_forward_extra_into(swap: &SwapData, buf: &mut Vec<f64>, registry: &AtomDataRegistry) {
+    for &idx in &swap.send_indices {
         registry.pack_forward_all(idx, buf);
     }
 }
@@ -481,6 +559,69 @@ fn forward_prepare_swap<'s>(
         source,
         recv_buf: &mut scratch.recv,
     })
+}
+
+fn forward_comm_f32(
+    atoms: &mut Atom,
+    registry: &AtomDataRegistry,
+    topo: &CommTopology,
+    comm: &dyn CommBackend,
+    pool: &mut Vec<SwapScratch>,
+) {
+    let rank = comm.rank();
+    let extra = registry.forward_comm_size();
+    let swaps = &topo.swap_data;
+    if pool.len() < swaps.len() {
+        pool.resize_with(swaps.len(), SwapScratch::default);
+    }
+
+    for (idx, swap) in swaps.iter().enumerate() {
+        let scratch = &mut pool[idx];
+        scratch.send_f32.clear();
+        scratch.send_f32.reserve(swap.send_indices.len() * FORWARD_PACK_SIZE);
+        pack_forward_base_f32_into(swap, &mut scratch.send_f32, atoms);
+
+        scratch.send_extra.clear();
+        if extra > 0 {
+            scratch.send_extra.reserve(swap.send_indices.len() * extra);
+            pack_forward_extra_into(swap, &mut scratch.send_extra, registry);
+        }
+
+        if swap.to_proc == rank {
+            unpack_forward_f32(&scratch.send_f32, &scratch.send_extra, atoms, registry, swap.recv_start, swap.recv_count, extra);
+            continue;
+        }
+
+        let recv_base_len = if swap.from_proc != -1 { swap.recv_count * FORWARD_PACK_SIZE } else { 0 };
+        scratch.send_bridge.clear();
+        scratch.send_bridge.extend(scratch.send_f32.iter().map(|&x| x as f64));
+        scratch.recv_bridge.resize(recv_base_len, 0.0);
+        comm.sendrecv_batch_f64_into(&mut [SendRecvOp {
+            dest: swap.to_proc,
+            send_buf: &scratch.send_bridge,
+            source: swap.from_proc,
+            recv_buf: &mut scratch.recv_bridge,
+        }]);
+
+        if extra > 0 {
+            let recv_extra_len = if swap.from_proc != -1 { swap.recv_count * extra } else { 0 };
+            scratch.recv_extra.resize(recv_extra_len, 0.0);
+            comm.sendrecv_batch_f64_into(&mut [SendRecvOp {
+                dest: swap.to_proc,
+                send_buf: &scratch.send_extra,
+                source: swap.from_proc,
+                recv_buf: &mut scratch.recv_extra,
+            }]);
+        } else {
+            scratch.recv_extra.clear();
+        }
+
+        if swap.from_proc != -1 {
+            scratch.recv_f32.clear();
+            scratch.recv_f32.extend(scratch.recv_bridge.iter().map(|&x| x as f32));
+            unpack_forward_f32(&scratch.recv_f32, &scratch.recv_extra, atoms, registry, swap.recv_start, swap.recv_count, extra);
+        }
+    }
 }
 
 /// C5: can a round's two swaps be aggregated into a single sendrecv? True when
@@ -595,13 +736,17 @@ fn forward_comm(
 /// so positions stay correct even when atoms cross PBC boundaries between rebuilds.
 pub fn forward_comm_borders(
     comm: Res<CommResource>,
+    config: Res<CommConfig>,
     topo: Res<CommTopology>,
     mut atoms: ResMut<Atom>,
     registry: Res<AtomDataRegistry>,
     mut buffers: ResMut<CommBuffers>,
 ) {
     let mut pool = std::mem::take(&mut buffers.forward_scratch);
-    forward_comm(&mut atoms, &registry, &topo, &**comm, &mut pool);
+    match config.forward_precision {
+        ForwardCommPrecision::F64 => forward_comm(&mut atoms, &registry, &topo, &**comm, &mut pool),
+        ForwardCommPrecision::F32 => forward_comm_f32(&mut atoms, &registry, &topo, &**comm, &mut pool),
+    }
     buffers.forward_scratch = pool;
 }
 

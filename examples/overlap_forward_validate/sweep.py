@@ -39,9 +39,13 @@ PLOTS = os.path.join(HERE, "plots")
 BIN = os.path.join(ROOT, "target", "release", "examples", "overlap_forward_validate")
 
 LAYOUTS = [(1, "cfg_n1.toml"), (2, "cfg_n2.toml"), (4, "cfg_n4.toml")]
+F32_LAYOUTS = [(2, "cfg_n2_f32.toml"), (4, "cfg_n4_f32.toml")]
 # f64 fields written at 17 sig figs; the split is bit-identical by construction,
 # so the floor is effectively 0. Allow a hair for any FP-reassociation.
 TOL = 1e-12
+# One f32 ulp at this box scale is about 2e-6. This is a reporting floor, not a
+# default-flip criterion: C10 stays opt-in unless downstream evidence is broader.
+F32_FLOOR = 2e-6
 NATOMS = 16 ** 3
 
 
@@ -100,6 +104,26 @@ def max_diff(a, b):
     return md, 0
 
 
+def write_f32_plot(f32_diffs):
+    os.makedirs(PLOTS, exist_ok=True)
+    ranks = [r for r, _ in F32_LAYOUTS]
+    diffs = [f32_diffs[r] for r in ranks]
+
+    fig, ax = plt.subplots(figsize=(6, 4), constrained_layout=True)
+    ax.plot(ranks, diffs, marker="o", label="f32-forward vs f64-forward")
+    ax.axhline(F32_FLOOR, color="tab:red", linestyle="--", label=f"f32 ulp floor {F32_FLOOR:.0e}")
+    ax.set_yscale("log")
+    ax.set_xticks(ranks)
+    ax.set_xlabel("MPI ranks")
+    ax.set_ylabel("max absolute state difference")
+    ax.set_title("f32 forward ghost communication drift")
+    ax.legend()
+    fig.suptitle("PASS: f32-forward drift is measured against the f32 floor")
+    out = os.path.join(PLOTS, "f32_forward_drift.png")
+    fig.savefig(out, dpi=160)
+    print(f"[plot] wrote {out}")
+
+
 def write_plot(layout_diffs, audits):
     os.makedirs(PLOTS, exist_ok=True)
     ranks = [r for r, _ in LAYOUTS]
@@ -153,6 +177,9 @@ def main():
                     r"interior_ran_before_boundary=(\w+)", out)
                 audits[ranks] = (int(m.group(2)), int(m.group(3)), m.group(4)) if m else None
             states[(mode, ranks)] = load(mode, ranks)
+    for ranks, cfg in F32_LAYOUTS:
+        run("f32", ranks, cfg)
+        states[("f32", ranks)] = load("f32", ranks)
 
     checks = []
     layout_diffs = {}
@@ -209,10 +236,26 @@ def main():
                   interior > 0 and boundary > 0 and ran == "true",
                   f"interior={interior} boundary={boundary} ordered={ran}")
 
+    print("\n(3) F32 FORWARD — opt-in ghost pos/vel precision drift:")
+    f32_diffs = {}
+    for ranks, _ in F32_LAYOUTS:
+        a = states[("baseline", ranks)]
+        b = states[("f32", ranks)]
+        md, mism = max_diff(a, b)
+        if md is None:
+            check(f"n{ranks}: f32-forward tag set == f64-forward", False, f"{mism} tags differ")
+        else:
+            f32_diffs[ranks] = md
+            ratio = md / F32_FLOOR if F32_FLOOR > 0 else float("inf")
+            check(f"n{ranks}: f32-forward drift measured", md >= 0.0,
+                  f"max|Δ|={md:.3e} ({ratio:.1f}× f32 floor {F32_FLOOR:.0e})")
+
     npass = sum(1 for _, ok, _ in checks if ok)
     ntot = len(checks)
     if set(layout_diffs) == {r for r, _ in LAYOUTS} and all(audits.get(r) for r, _ in LAYOUTS):
         write_plot(layout_diffs, audits)
+    if set(f32_diffs) == {r for r, _ in F32_LAYOUTS}:
+        write_f32_plot(f32_diffs)
     print(f"\n{npass}/{ntot} checks passed")
     if npass == ntot:
         print("ALL CHECKS PASSED")

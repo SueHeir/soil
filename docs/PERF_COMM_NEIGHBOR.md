@@ -126,11 +126,26 @@ post-condition check that warns once. Gate it behind `cfg!(debug_assertions)` or
 a config flag so production runs don't pay it.
 
 ### C10 — Ghost comm in f64; could be f32 (ties to GPU port) · impact H(bandwidth) · effort L
-All pack buffers are f64 (`atom.rs:455-468`). With the Real/Accum f32 work in the
-GPU roadmap ([[gpu-port]]), ghost **position/velocity** forward comm could move
-as f32, halving MPI bandwidth and pack/unpack cost. Reverse **force**
-accumulation needs precision care (accumulate in f64). Natural co-design with the
-GPU force kernel.
+Prototype verdict (2026-07-05): keep f64 forward communication as the default.
+SOIL now has an explicit `[comm] forward_precision = "f32"` gate that rounds and
+buffers the base ghost **position/velocity** forward payload as f32 while keeping
+reverse **force** accumulation and forward extension fields in f64. The current
+`grass_mpi` point-to-point API is still f64-only, so this validates numerics and
+SOIL pack/unpack structure but is not yet a wire-bandwidth win.
+
+Validation evidence:
+- SOIL MD-style `examples/overlap_forward_validate/sweep.py`: f64 overlap remains
+  bit-identical to baseline (`max|Δ|=0` on 1/2/4 ranks, tolerance `1e-12`).
+  Opt-in f32-forward drift against f64-forward after 300 LJ steps was `4.733e-05`
+  on 2 ranks and `5.778e-05` on 4 ranks, about 24-29x the `2e-06` f32 ulp-scale
+  reporting floor.
+- DIRT/DEM consumer check: `mpi_loadbalance_validate` on 2 ranks with the local
+  SOIL branch patched in and a temporary declarative config adding
+  `forward_precision = "f32"` preserved all 2000 particle tags and measured
+  `max|Δxyz|=4.453e-09` versus the f64-forward run, below the same f32 floor.
+
+Next step for C10 is a grass/soil co-design PR that adds true f32 point-to-point
+transport in `grass_mpi`; only then can this become a bandwidth optimization.
 
 ---
 

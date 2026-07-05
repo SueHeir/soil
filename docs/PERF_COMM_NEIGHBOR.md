@@ -40,9 +40,17 @@ win, no behavior change: the deleted function was already a no-op returning the
 stored offset, so both branch arms yielded the identical value.
 
 ### C4 — Element-by-element packing in forward comm · impact L-M · effort S
-`forward_comm` pushes pos+vel one f64 at a time (`comm.rs:395-401`) in the
-per-step hot loop. Pack the 6 base fields via a `[f64;6]` + `extend_from_slice`
-(or write through a reserved slice with indices) to cut bounds-check overhead.
+### ✅ DONE
+`forward_comm` pushed pos+vel one f64 at a time in the per-step hot loop.
+`pack_forward_into` now builds the six base fields as a `[f64; 6]` and appends
+them with one `extend_from_slice`, then immediately appends registry forward
+fields as before, preserving the base-pos/base-vel/registry packing order. Pure
+packing cleanup, no physics/tolerance change.
+
+Validated: `cargo test -p soil_core comm --features precision-double` (6/6
+comm tests pass); `examples/overlap_forward_validate/sweep.py` (1-, 2-, and
+4-rank layouts, 9/9 checks) reports overlap vs baseline `max|Δ|=0.000e+00`
+with tolerance `1e-12` on every layout.
 
 ### C5 — Many small messages: one sendrecv per swap · impact M-H · effort L
 Forward and reverse comm issue a separate `sendrecv` per swap

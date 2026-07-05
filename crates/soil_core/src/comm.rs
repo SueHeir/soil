@@ -435,12 +435,15 @@ fn pack_forward_into(swap: &SwapData, buf: &mut Vec<f64>, atoms: &Atom, registry
     let offset = swap.periodic_offset;
     let voff = swap.vel_offset;
     for &idx in &swap.send_indices {
-        buf.push(atoms.pos[idx][0] as f64 + offset[0]);
-        buf.push(atoms.pos[idx][1] as f64 + offset[1]);
-        buf.push(atoms.pos[idx][2] as f64 + offset[2]);
-        buf.push(atoms.vel[idx][0] as f64 + voff[0]);
-        buf.push(atoms.vel[idx][1] as f64 + voff[1]);
-        buf.push(atoms.vel[idx][2] as f64 + voff[2]);
+        let base = [
+            atoms.pos[idx][0] as f64 + offset[0],
+            atoms.pos[idx][1] as f64 + offset[1],
+            atoms.pos[idx][2] as f64 + offset[2],
+            atoms.vel[idx][0] as f64 + voff[0],
+            atoms.vel[idx][1] as f64 + voff[1],
+            atoms.vel[idx][2] as f64 + voff[2],
+        ];
+        buf.extend_from_slice(&base);
         registry.pack_forward_all(idx, buf);
     }
 }

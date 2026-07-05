@@ -71,6 +71,8 @@
 //! [`CommunicationPlugin`] (plus `InputPlugin`/`RunPlugin` for the config + run
 //! loop), as `examples/minimal_sim.rs` shows.
 
+#![warn(missing_docs)]
+
 pub mod atom;
 pub mod bond;
 pub mod comm;

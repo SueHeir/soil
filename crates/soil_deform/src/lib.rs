@@ -78,6 +78,8 @@
 //! - a stage with **no** `[deform]` section clears all axes and the xy shear, so
 //!   deformation does not silently persist from a previous stage.
 
+#![warn(missing_docs)]
+
 use grass_app::prelude::*;
 use soil_core::{Atom, CommResource, Config, Domain, ParticleSimScheduleSet, Real, ScheduleSetupSet, StageOverrides};
 use soil_core::Neighbor;

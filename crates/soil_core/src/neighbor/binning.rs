@@ -385,8 +385,16 @@ pub fn sort_atoms_by_bin(
     neighbor.local_cells_valid = true;
 
     if !already_sorted {
-        atoms.apply_permutation(&perm, nlocal);
-        registry.apply_permutation_all(&perm, nlocal);
+        atoms.apply_permutation_with_scratch(
+            &perm,
+            nlocal,
+            &mut neighbor.sort_permutation_visited,
+        );
+        registry.apply_permutation_all_with_scratch(
+            &perm,
+            nlocal,
+            &mut neighbor.sort_permutation_visited,
+        );
 
         // Apply the same permutation to last_build_pos so displacement checks
         // compare the correct atom's current position against its saved position.

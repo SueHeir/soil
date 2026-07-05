@@ -171,6 +171,9 @@ pub struct Neighbor {
     pub sort_perm: Vec<usize>,
     /// Scratch positions used while building the spatial-sort permutation.
     pub sort_pos_scratch: Vec<[f64; 3]>,
+    /// Cycle-visited scratch reused while applying the spatial-sort permutation
+    /// to `Atom` fields and all registered `AtomData` extension columns.
+    pub sort_permutation_visited: Vec<bool>,
     /// N2: post-permute local cell indices written by `sort_atoms_by_bin`, so the
     /// neighbor build doesn't recompute the cell for every local atom (it already
     /// did, identically, when sorting). Only the boundary ghosts are binned in the
@@ -238,6 +241,7 @@ impl Neighbor {
             sort_counts: Vec::new(),
             sort_perm: Vec::new(),
             sort_pos_scratch: Vec::new(),
+            sort_permutation_visited: Vec::new(),
             sorted_local_cell: Vec::new(),
             local_cells_valid: false,
             cached_uniform_cutoff_sq: None,

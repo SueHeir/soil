@@ -220,9 +220,15 @@ cache-friendly `sorted_pos`. Since locals are bin-sorted after `sort_atoms_by_bi
 read `pi` from `sorted_pos` too so the kernel walks a single sequential stream.
 
 ### N8 — Per-field scratch alloc in `apply_permutation` · impact L-M · effort M
-`atom.rs:411-419` allocates one scratch Vec **per atom field** (11 base + every
-registered extension) on each spatial sort. Reuse a persistent scratch buffer or
-apply the permutation in place via cycle-following (no allocation).
+### ✅ DONE
+`Atom::apply_permutation`, `AtomDataRegistry::apply_permutation_all`, the
+`#[derive(AtomData)]` output, and in-tree hand-written `AtomData` stores now
+apply spatial-sort permutations by cycle-following in place. `sort_atoms_by_bin`
+passes one persistent `Neighbor::sort_permutation_visited` scratch buffer through
+the base atom fields and every registered extension, so rebuild-time spatial
+sorts no longer allocate one full scratch vector per field/column. The legacy
+entry points still work by creating a single visited buffer per call, but the
+hot spatial-sort path reuses the persistent scratch.
 
 ### N9 — Redundant min/max fold of `cutoff_radius` each rebuild · impact L · effort S
 `save_build_positions` (`:545-561`) re-folds min/max over `cutoff_radius` every

@@ -8,7 +8,7 @@ use std::any::Any;
 
 use grass_app::prelude::*;
 
-use crate::AtomData;
+use crate::{apply_permutation_in_place, AtomData};
 
 // ── BondEntry & BondStore ────────────────────────────────────────────────────
 
@@ -102,9 +102,17 @@ impl AtomData for BondStore {
     }
 
     fn apply_permutation(&mut self, perm: &[usize], n: usize) {
-        let new_bonds: Vec<Vec<BondEntry>> =
-            perm.iter().map(|&p| self.bonds[p].clone()).collect();
-        self.bonds[..n].clone_from_slice(&new_bonds);
+        let mut visited = Vec::new();
+        self.apply_permutation_with_scratch(perm, n, &mut visited);
+    }
+
+    fn apply_permutation_with_scratch(
+        &mut self,
+        perm: &[usize],
+        n: usize,
+        visited: &mut Vec<bool>,
+    ) {
+        apply_permutation_in_place(&mut self.bonds, perm, n, visited);
     }
 
     /// Pack format: `[count, (partner_tag, bond_type, r0) × count]` — 1 + 3×count f64s.

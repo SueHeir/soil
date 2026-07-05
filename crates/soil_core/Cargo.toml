@@ -37,3 +37,11 @@ rand = "0.9"
 name = "overlap_forward_validate"
 path = "examples/overlap_forward_validate/main.rs"
 required-features = ["mpi_backend", "precision-double"]
+
+# DSMC rarefied-gas thermal relaxation: SOIL owns particle state + cell binning;
+# the example adds only a Maxwell-molecule stochastic collision step and compares
+# the temperature-anisotropy decay to the published BGK exponential reference.
+[[example]]
+name = "dsmc_thermal_relaxation"
+path = "examples/dsmc_thermal_relaxation/main.rs"
+required-features = ["precision-double"]

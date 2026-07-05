@@ -1,0 +1,28 @@
+[domain]
+x_low = 0.0
+x_high = 1.0
+y_low = 0.0
+y_high = 0.03125
+z_low = 0.0
+z_high = 0.03125
+boundary_x = "periodic"
+boundary_y = "periodic"
+boundary_z = "periodic"
+
+[neighbor]
+skin_fraction = 1.0
+bin_size = 0.03125
+every = 1
+check = false
+sort_every = 0
+newton = false
+
+[dsmc]
+seed = 9223372036854775783
+cells_x = 32
+particles_per_cell = 1024
+steps = 8
+collision_pairs_per_particle = 0.25
+tx0 = 2.0
+ty0 = 0.5
+tz0 = 0.5

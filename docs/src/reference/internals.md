@@ -227,4 +227,4 @@ yourself: `AtomPlugin`, `DomainPlugin`, `NeighborPlugin`, `CommunicationPlugin`
 Source: `soil_core` (`neighbor.rs`, `comm.rs`, `domain.rs`, `region.rs`,
 `group.rs`, `virial.rs`). Every TOML knob mentioned above is collected in the
 [Config Reference](./config.md). See also
-[`docs/PERF_COMM_NEIGHBOR.md`](https://github.com/SueHeir/soil/blob/master/docs/PERF_COMM_NEIGHBOR.md).
+[`docs/PERF_COMM_NEIGHBOR.md`](https://github.com/SueHeir/soil/blob/main/docs/PERF_COMM_NEIGHBOR.md).

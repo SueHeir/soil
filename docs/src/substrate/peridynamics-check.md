@@ -77,7 +77,7 @@ missing capability.
 
 The peridynamics check above is a paper argument. The substrate also carries a
 *second, non-DEM particle method today* that you can run and check yourself:
-[`examples/lj_dimer/main.rs`](https://github.com/SueHeir/soil/tree/master/examples/lj_dimer/main.rs)
+[`examples/lj_dimer/main.rs`](https://github.com/SueHeir/soil/tree/main/examples/lj_dimer/main.rs)
 is a Lennard-Jones molecular-dynamics dimer. It uses **no DEM code** — a pairwise
 LJ potential and generic viscous drag, no contact model, rotation, clumps, or
 friction — and it drives the full substrate:

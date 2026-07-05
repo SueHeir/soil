@@ -158,7 +158,7 @@ The full worked mapping — plus a *runnable* second proof, the Lennard-Jones
 molecular-dynamics dimer (`soil_verlet/examples/lj_dimer.rs`) that rides the whole
 substrate with no DEM code and validates to machine precision — is on its own
 page:
-[**Does the Seam Hold? — A Peridynamics Worked Check**](https://github.com/SueHeir/soil/tree/master/docs/src/substrate/peridynamics-check.md).
+[**Does the Seam Hold? — A Peridynamics Worked Check**](https://github.com/SueHeir/soil/tree/main/docs/src/substrate/peridynamics-check.md).
 
 ## 6. The boundary rule
 

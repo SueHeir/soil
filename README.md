@@ -103,11 +103,14 @@ MD's per-atom energy.
 
 ## When to use it
 
-Reach for SOIL when you're building a **short-range, off-lattice particle
-(Lagrangian) method** — a force law, an SPH kernel, a peridynamic bond model —
-that needs parallel domain decomposition, halo exchange, migration, and neighbor
-lists but shouldn't have to hand-write any of them. You bring the physics; SOIL
-brings the parallel plumbing.
+Reach for SOIL when you're building an **off-lattice particle (Lagrangian)
+method** — a force law, an SPH kernel, a peridynamic bond model, or a long-range
+treecode — that needs shared particle storage and substrate machinery instead of
+hand-written infrastructure. For local-reach methods, SOIL gives you parallel
+domain decomposition, halo exchange, migration, and neighbor lists. For
+long-range particle methods, `soil_core::Octree` supplies the agnostic spatial
+hierarchy and near/far partition; the force kernel, multipole expansion, and
+time integration still belong in the physics tier above it.
 
 It is deliberately *not* two things. It is not a mesh/Eulerian framework: a
 grid-based finite-volume or finite-element solver, whose state is a field over
@@ -115,9 +118,10 @@ cells rather than a cloud of migrating particles, belongs on a mesh substrate on
 the same [GRASS](https://github.com/SueHeir/grass) scheduler — not here. And it
 owns no physics: no contact model, material, or force law lives in the substrate,
 because that is the tier *you* write on top. [DIRT](https://github.com/SueHeir/dirt)
-is the worked example of a full one. If your interactions are long-range (an Ewald
-or particle-mesh sum over all pairs) rather than cutoff-bounded, the neighbor
-substrate is a starting point, not the whole answer — that solver is unwritten.
+is the worked example of a full one. If your interactions are long-range rather
+than cutoff-bounded, start from the tree primitive and keep the physics out of
+the substrate: the checked examples below show a generic 1/r treecode proof and
+a Barnes-Hut gravity demonstrator built that way.
 
 ## The stack
 
@@ -129,6 +133,17 @@ GRASS    framework: App, Plugin, Scheduler, IO, coupling      (no particles)
   └─ SOIL   substrate: Atom, domain decomposition, comm, neighbor lists   (no physics)
        └─ DIRT (DEM) / SPH / peridynamics / …   physics: forces, bonds, walls
 ```
+
+SOIL covers the local-reach particle substrate: particles interact through
+bounded neighbor lists and halo exchange. It also now carries the first
+long-range-particle substrate primitive: `soil_core::Octree`, an ORBIT-style
+spatial tree with near/far partitioning and monopole aggregation. That does not
+make a gravity, electrostatics, or vortex solver part of SOIL; it means the
+shared particle/tree structure is in the substrate, while the kernel and method
+remain above it. In the six-part substrate map, the GRASS ecosystem therefore
+has local-reach particles (SOIL), local-reach meshes (FIELD), and an initial
+ORBIT particle-tree foothold. Global mesh solves remain a separate BEDROCK
+roadmap on the mesh side, not something SOIL should absorb.
 
 ## How the three fit together
 
@@ -150,6 +165,16 @@ themselves:
 - **[DIRT](https://github.com/SueHeir/dirt)** — A Rust granular-DEM engine that
   resolves every contact individually — cross-checked against LAMMPS and
   closed-form theory.
+
+Built on [GRASS](https://github.com/SueHeir/grass). Consumed by
+[DIRT](https://github.com/SueHeir/dirt) (DEM, validated) and by
+development-stage sibling physics tiers that ride the same `AtomData` contract
+as demonstrations that the substrate is method-agnostic:
+`dev_soil_peri` (bond-based peridynamics — a PD point cloud is a soil atom set,
+its horizon is a neighbor cutoff, and its PD family is a `BondStore`) and
+`dev_soil_sph` (granular SPH — kernels plus a `mu(I)` constitutive update over
+the same neighbor machinery). These `dev_` tiers are not yet peer-reviewed; they
+exist to show that one particle substrate carries more than one method.
 
 **Where to start:** to *run* granular simulations, start at
 [DIRT](https://github.com/SueHeir/dirt), the batteries-included physics tier; to
@@ -200,6 +225,12 @@ tiers you reach for as needed:
   interface every physics tier honors; read it before you write a method.
 - **[Does the Seam Hold? — A Peridynamics Worked Check](docs/src/substrate/peridynamics-check.md)** —
   the evidence that the tiering is real, not a relabeling.
+- **`cargo run --release -p soil_core --example tree_farfield_proof`** — the
+  ORBIT tree primitive checked against direct O(n^2) sums without adding a
+  force law to the substrate.
+- **`cargo run --release -p soil_core --example orbit_nbody_gravity`** — a
+  Barnes-Hut gravity demonstrator that keeps gravity in the example and uses
+  SOIL only for the agnostic tree.
 - **[Write Your Own Particle Physics](docs/src/tutorial/write-your-own-physics.md)** —
   the step-by-step tutorial. Built on [grass](https://github.com/SueHeir/grass),
   consumed by [dirt](https://github.com/SueHeir/dirt) (DEM).

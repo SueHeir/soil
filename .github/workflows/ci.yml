@@ -34,3 +34,6 @@ jobs:
 
       - name: Run validation example
         run: cargo run --release -p soil_core --example tree_farfield_proof
+
+      - name: Run MPI overlap validation
+        run: python3 crates/soil_core/examples/overlap_forward_validate/sweep.py

@@ -241,7 +241,7 @@ rank order and appends via `push_unpacked` (`lib.rs:1229–1245`).
    second run.  All `AtomData` extensions registered with `AtomPlugin` are
    automatically included.
 
-See `crates/soil_print/examples/output_wiring.rs` for a compiling demonstration
+See `examples/output_wiring/main.rs` for a compiling demonstration
 of steps 3–5.
 
 ---

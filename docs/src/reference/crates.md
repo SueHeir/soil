@@ -25,8 +25,8 @@ A physics tier adds its own per-atom dump/VTP columns and thermo values through
 - `Thermo::set(name, value)` — publish a value that becomes a thermo column when
   listed in `[thermo] columns`.
 
-See `crates/soil_print/examples/output_wiring.rs` for a compiling end-to-end use,
-and `crates/soil_core/examples/minimal_sim.rs` for assembling the substrate
+See `examples/output_wiring/main.rs` for a compiling end-to-end use,
+and `examples/minimal_sim/main.rs` for assembling the substrate
 plugins serially.
 
 > **Three `soil_print` behaviors that surprise people.** A bad restart file is

@@ -77,7 +77,7 @@ missing capability.
 
 The peridynamics check above is a paper argument. The substrate also carries a
 *second, non-DEM particle method today* that you can run and check yourself:
-[`crates/soil_verlet/examples/lj_dimer.rs`](https://github.com/SueHeir/soil/tree/master/crates/soil_verlet/examples/lj_dimer.rs)
+[`examples/lj_dimer/main.rs`](https://github.com/SueHeir/soil/tree/master/examples/lj_dimer/main.rs)
 is a Lennard-Jones molecular-dynamics dimer. It uses **no DEM code** — a pairwise
 LJ potential and generic viscous drag, no contact model, rotation, clumps, or
 friction — and it drives the full substrate:
@@ -95,7 +95,7 @@ friction — and it drives the full substrate:
 Relaxed to force balance, it reproduces both Lennard-Jones closed forms exactly:
 
 ```text
-$ cargo run --release -p soil_verlet --example lj_dimer
+$ cargo run --release --example lj_dimer
   ghosts present at end : 2  (pair is ghost-mediated across the periodic face)
   relaxed separation    : r = 1.122462048 σ
   analytic well minimum : r_min = 2^(1/6) σ = 1.122462048

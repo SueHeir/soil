@@ -7,7 +7,7 @@
 //! Run from the soil repo root:
 //!
 //! ```sh
-//! cargo run --release -p soil_core --example neighbor_hot_path -- 24 60
+//! cargo run --release --example neighbor_hot_path -- 24 60
 //! ```
 
 use std::hint::black_box;

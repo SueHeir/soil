@@ -7,7 +7,7 @@ import sys
 
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.abspath(os.path.join(HERE, "..", "..", "..", ".."))
+ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))
 CFG = os.path.join(HERE, "cfg.toml")
 
 
@@ -21,13 +21,11 @@ def run(cmd):
 
 
 def main():
-    print("[run] cargo run --release -p soil_core --example dsmc_thermal_relaxation")
+    print("[run] cargo run --release --example dsmc_thermal_relaxation")
     out = run([
         "cargo",
         "run",
         "--release",
-        "-p",
-        "soil_core",
         "--example",
         "dsmc_thermal_relaxation",
         "--",

@@ -53,9 +53,9 @@
 //! ```bash
 //! cargo build --release --example overlap_forward_validate
 //! SOIL_OVERLAP=1 mpiexec -n 2 target/release/examples/overlap_forward_validate \
-//!     crates/soil_core/examples/overlap_forward_validate/cfg_n2.toml
+//!     examples/overlap_forward_validate/cfg_n2.toml
 //! # or drive the whole comparison:
-//! python3 crates/soil_core/examples/overlap_forward_validate/sweep.py
+//! python3 examples/overlap_forward_validate/sweep.py
 //! ```
 
 use std::fs;
@@ -323,7 +323,7 @@ fn main() {
     }
 
     // ── Dump this rank's final state (tag, position, velocity). ──
-    let dir = "crates/soil_core/examples/overlap_forward_validate/data";
+    let dir = "examples/overlap_forward_validate/data";
     fs::create_dir_all(dir).ok();
     let mode = if overlap { "overlap" } else { "baseline" };
     let path = format!("{dir}/state_{mode}_n{ranks}_rank{rank}.csv");

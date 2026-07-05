@@ -1,3 +1,12 @@
+[package]
+name = "soil-bin"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "SOIL examples and validation drivers"
+publish = false
+
 [workspace]
 resolver = "2"
 members = ["crates/*"]
@@ -7,3 +16,78 @@ version = "0.1.3"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/SueHeir/soil"
+
+[features]
+default = ["mpi_backend", "precision-double"]
+mpi_backend = ["soil_core/mpi_backend"]
+precision-double = [
+  "soil_core/precision-double",
+  "soil_print/precision-double",
+  "soil_verlet/precision-double",
+]
+precision-mixed = [
+  "soil_core/precision-mixed",
+  "soil_print/precision-mixed",
+  "soil_verlet/precision-mixed",
+]
+precision-single = [
+  "soil_core/precision-single",
+  "soil_print/precision-single",
+  "soil_verlet/precision-single",
+]
+
+[dependencies]
+grass_app = { git = "ssh://git@192.168.0.170:2222/SueHeir/grass.git", branch = "main" }
+grass_scheduler = { git = "ssh://git@192.168.0.170:2222/SueHeir/grass.git", branch = "main" }
+soil_core = { path = "crates/soil_core", version = "0.1.3", default-features = false }
+soil_derive = { path = "crates/soil_derive", version = "0.1.3" }
+soil_print = { path = "crates/soil_print", version = "0.1.3", default-features = false }
+soil_verlet = { path = "crates/soil_verlet", version = "0.1.3", default-features = false }
+rand = "0.9"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+
+[[example]]
+name = "output_wiring"
+path = "examples/output_wiring/main.rs"
+required-features = ["precision-double"]
+
+[[example]]
+name = "free_fall"
+path = "examples/free_fall/main.rs"
+required-features = ["precision-double"]
+
+[[example]]
+name = "lj_dimer"
+path = "examples/lj_dimer/main.rs"
+required-features = ["precision-double"]
+
+[[example]]
+name = "minimal_sim"
+path = "examples/minimal_sim/main.rs"
+required-features = ["precision-double"]
+
+[[example]]
+name = "overlap_forward_validate"
+path = "examples/overlap_forward_validate/main.rs"
+required-features = ["mpi_backend", "precision-double"]
+
+[[example]]
+name = "tree_farfield_proof"
+path = "examples/tree_farfield_proof/main.rs"
+required-features = ["precision-double"]
+
+[[example]]
+name = "dsmc_thermal_relaxation"
+path = "examples/dsmc_thermal_relaxation/main.rs"
+required-features = ["precision-double"]
+
+[[example]]
+name = "neighbor_hot_path"
+path = "examples/neighbor_hot_path/main.rs"
+required-features = ["precision-double"]
+
+[[example]]
+name = "orbit_nbody_gravity"
+path = "examples/orbit_nbody_gravity/main.rs"
+required-features = ["precision-double"]

@@ -80,7 +80,7 @@ neighbours, so their force is halo-independent and computes during the exchange;
 boundary atoms are finished once the halo lands, after the wait).
 
 Validated at the **substrate** tier (this pass): the MPI example
-`crates/soil_core/examples/overlap_forward_validate` runs a periodic
+`examples/overlap_forward_validate` runs a periodic
 Lennard-Jones gas (generic MD — no DEM logic) with a full neighbour list so each
 atom's force is a self-contained, order-preserving sum, then compares the
 overlapped force against the standard non-overlapped `forward_comm` path.

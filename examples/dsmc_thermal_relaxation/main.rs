@@ -13,8 +13,8 @@
 //! Run with:
 //!
 //! ```sh
-//! cargo run --release -p soil_core --example dsmc_thermal_relaxation -- \
-//!   crates/soil_core/examples/dsmc_thermal_relaxation/cfg.toml
+//! cargo run --release --example dsmc_thermal_relaxation -- \
+//!   examples/dsmc_thermal_relaxation/cfg.toml
 //! ```
 
 use std::{any::TypeId, env, fs, path::PathBuf};
@@ -205,7 +205,7 @@ fn fit_decay(collision_time: &[f64], ratio: &[f64]) -> f64 {
 
 fn main() {
     let cfg_path = env::args_os().nth(1).map(PathBuf::from).unwrap_or_else(|| {
-        PathBuf::from("crates/soil_core/examples/dsmc_thermal_relaxation/cfg.toml")
+        PathBuf::from("examples/dsmc_thermal_relaxation/cfg.toml")
     });
     let toml = fs::read_to_string(&cfg_path).expect("read declarative TOML case file");
     let case: CaseFile = toml::from_str(&toml).expect("parse [dsmc] case config");

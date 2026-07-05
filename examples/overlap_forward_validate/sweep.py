@@ -17,7 +17,7 @@ interior atoms *inside* forward_comm_overlap while the ghost halo is in flight
                    the boundary force is issued only after the wait.
 
 Usage (from the soil repo root):
-    python3 crates/soil_core/examples/overlap_forward_validate/sweep.py
+    python3 examples/overlap_forward_validate/sweep.py
 Exit code 0 == ALL CHECKS PASSED.
 """
 
@@ -26,10 +26,16 @@ import re
 import subprocess
 import sys
 
+import matplotlib
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+
 HERE = os.path.dirname(os.path.abspath(__file__))
-# repo root = .../soil ; this file is at crates/soil_core/examples/<name>/sweep.py
-ROOT = os.path.abspath(os.path.join(HERE, "..", "..", "..", ".."))
+# repo root = .../soil ; this file is at examples/<name>/sweep.py
+ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))
 DATA = os.path.join(HERE, "data")
+PLOTS = os.path.join(HERE, "plots")
 BIN = os.path.join(ROOT, "target", "release", "examples", "overlap_forward_validate")
 
 LAYOUTS = [(1, "cfg_n1.toml"), (2, "cfg_n2.toml"), (4, "cfg_n4.toml")]
@@ -48,8 +54,7 @@ def sh(cmd, env=None):
 
 def build():
     print("[build] cargo build --release --example overlap_forward_validate")
-    r = sh(["cargo", "build", "--release", "--example",
-            "overlap_forward_validate", "-p", "soil_core"])
+    r = sh(["cargo", "build", "--release", "--example", "overlap_forward_validate"])
     if r.returncode != 0:
         print(r.stdout)
         print(r.stderr)
@@ -95,6 +100,41 @@ def max_diff(a, b):
     return md, 0
 
 
+def write_plot(layout_diffs, audits):
+    os.makedirs(PLOTS, exist_ok=True)
+    ranks = [r for r, _ in LAYOUTS]
+    diffs = [layout_diffs[r] for r in ranks]
+    interiors = [audits[r][0] for r in ranks]
+    boundaries = [audits[r][1] for r in ranks]
+
+    fig, axes = plt.subplots(1, 2, figsize=(10, 4), constrained_layout=True)
+    ax = axes[0]
+    ax.plot(ranks, diffs, marker="o", label="measured max |delta|")
+    ax.axhline(TOL, color="tab:red", linestyle="--", label=f"tolerance {TOL:.0e}")
+    ax.set_yscale("symlog", linthresh=1e-16)
+    ax.set_xticks(ranks)
+    ax.set_xlabel("MPI ranks")
+    ax.set_ylabel("max absolute state difference")
+    ax.set_title("Overlap vs baseline")
+    ax.legend()
+
+    ax = axes[1]
+    width = 0.35
+    xs = range(len(ranks))
+    ax.bar([x - width / 2 for x in xs], interiors, width, label="interior atoms")
+    ax.bar([x + width / 2 for x in xs], boundaries, width, label="boundary atoms")
+    ax.set_xticks(list(xs), [str(r) for r in ranks])
+    ax.set_xlabel("MPI ranks")
+    ax.set_ylabel("atoms")
+    ax.set_title("Work split in overlap mode")
+    ax.legend()
+
+    fig.suptitle("PASS: overlapped forward communication matches baseline")
+    out = os.path.join(PLOTS, "overlap_forward_validate.png")
+    fig.savefig(out, dpi=160)
+    print(f"[plot] wrote {out}")
+
+
 def main():
     build()
     os.makedirs(DATA, exist_ok=True)
@@ -115,6 +155,7 @@ def main():
             states[(mode, ranks)] = load(mode, ranks)
 
     checks = []
+    layout_diffs = {}
 
     def check(name, ok, detail=""):
         checks.append((name, ok, detail))
@@ -131,6 +172,7 @@ def main():
         if md is None:
             check(f"n{ranks}: overlap tag set == baseline", False, f"{mism} tags differ")
         else:
+            layout_diffs[ranks] = md
             check(f"n{ranks}: overlap == baseline to FP floor", md <= TOL,
                   f"max|Δ|={md:.3e} (tol {TOL:.0e})")
 
@@ -169,6 +211,8 @@ def main():
 
     npass = sum(1 for _, ok, _ in checks if ok)
     ntot = len(checks)
+    if set(layout_diffs) == {r for r, _ in LAYOUTS} and all(audits.get(r) for r, _ in LAYOUTS):
+        write_plot(layout_diffs, audits)
     print(f"\n{npass}/{ntot} checks passed")
     if npass == ntot:
         print("ALL CHECKS PASSED")

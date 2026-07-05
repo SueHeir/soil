@@ -23,7 +23,3 @@ grass_scheduler = { git = "ssh://git@192.168.0.170:2222/SueHeir/grass.git", bran
 serde = { version = "1", features = ["derive"] }
 bincode = "1"
 serde_json = "1"
-
-[[example]]
-name = "output_wiring"
-required-features = ["precision-double"]

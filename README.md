@@ -82,7 +82,7 @@ on the SOIL side, **not** a change to `AtomData`. The full worked check is
 [Does the Seam Hold? — A Peridynamics Worked Check](docs/src/substrate/peridynamics-check.md).
 
 **A non-DEM method already rides the substrate — and validates to machine
-precision.** [`crates/soil_verlet/examples/lj_dimer.rs`](crates/soil_verlet/examples/lj_dimer.rs)
+precision.** [`examples/lj_dimer/main.rs`](examples/lj_dimer/main.rs)
 is a Lennard-Jones **molecular-dynamics** dimer: a pairwise potential, no contact
 model, no rotation, no clumps, no friction. It exercises the whole substrate —
 the neighbor list finds the pair, ghost comm carries the partner across a
@@ -93,7 +93,7 @@ integrates the motion. Relaxed to force balance, it reproduces both closed forms
 exactly:
 
 ```text
-$ cargo run --release -p soil_verlet --example lj_dimer
+$ cargo run --release --example lj_dimer
   ghosts present at end : 2  (pair is ghost-mediated across the periodic face)
   relaxed separation    : r = 1.122462048 σ
   analytic well minimum : r_min = 2^(1/6) σ = 1.122462048
@@ -200,12 +200,12 @@ The fastest way to watch the substrate carry a real method is the LJ-MD dimer:
 ```bash
 git clone https://github.com/SueHeir/soil
 cd soil
-cargo run --release -p soil_verlet --example lj_dimer
+cargo run --release --example lj_dimer
 ```
 
 To build your own tier on top, depend on the substrate crates and add the four
 plugins (`AtomPlugin`, `DomainPlugin`, `NeighborPlugin`, `CommunicationPlugin`) —
-[`crates/soil_core/examples/minimal_sim.rs`](crates/soil_core/examples/minimal_sim.rs)
+[`examples/minimal_sim/main.rs`](examples/minimal_sim/main.rs)
 shows the bare assembly, and the mdBook tutorial
 [Write Your Own Particle Physics](docs/src/tutorial/write-your-own-physics.md)
 builds a minimal method step by step.
@@ -231,10 +231,10 @@ tiers you reach for as needed:
   interface every physics tier honors; read it before you write a method.
 - **[Does the Seam Hold? — A Peridynamics Worked Check](docs/src/substrate/peridynamics-check.md)** —
   the evidence that the tiering is real, not a relabeling.
-- **`cargo run --release -p soil_core --example tree_farfield_proof`** — the
+- **`cargo run --release --example tree_farfield_proof`** — the
   ORBIT tree primitive checked against direct O(n^2) sums without adding a
   force law to the substrate.
-- **`cargo run --release -p soil_core --example orbit_nbody_gravity`** — a
+- **`cargo run --release --example orbit_nbody_gravity`** — a
   Barnes-Hut gravity demonstrator that keeps gravity in the example and uses
   SOIL only for the agnostic tree.
 - **[Write Your Own Particle Physics](docs/src/tutorial/write-your-own-physics.md)** —

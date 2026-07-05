@@ -178,7 +178,7 @@ The stub content is correct — add the gaps listed above.
 | `crates/soil_verlet/src/lib.rs` | 62-119 | `VelocityVerletPlugin` struct, `new()`, `for_stage()`, `Plugin::build()` |
 | `crates/soil_verlet/src/lib.rs` | 121-157 | `initial_integration` implementation |
 | `crates/soil_verlet/src/lib.rs` | 159-188 | `final_integration` implementation |
-| `crates/soil_verlet/examples/free_fall.rs` | 50-53 | Force priming pattern for step-0 correctness |
+| `examples/free_fall/main.rs` | 50-53 | Force priming pattern for step-0 correctness |
 | `crates/soil_verlet/README.md` | 1-49 | User-facing summary of the same |
 | `docs/src/substrate/integration.md` | 1-49 | Existing stub (accurate, needs expansion) |
 | `docs/src/substrate/what-soil-owns.md` | 38-39 | Link to integration.md |

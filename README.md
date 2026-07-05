@@ -19,6 +19,12 @@ damage. It rides [GRASS](https://github.com/SueHeir/grass) for the
 `App`/scheduler/coupling machinery, and [DIRT](https://github.com/SueHeir/dirt)
 (granular DEM) is the physics tier that proves it.
 
+Everything SOIL provides is itself a GRASS **plugin** — decomposition, halo
+exchange, migration, and neighbor lists are ordinary systems and resources, not a
+privileged core. So a physics tier adds, removes, or swaps any of them the same
+way it adds its own force law, and the substrate work you'd otherwise rewrite per
+method is written once here and reused by all of them.
+
 ## A particle method is one `AtomData` column plus a force function
 
 You extend a particle by declaring a struct of per-particle columns and deriving

@@ -21,3 +21,11 @@ exact near pairs, convergent `1/r` treecode accuracy, and sub-quadratic
 interaction-count scaling.
 
 ![tree far-field proof](tree_farfield_proof/plots/tree_farfield_proof.png)
+
+## dsmc_thermal_relaxation
+
+Homogeneous Maxwell-molecule DSMC thermal-relaxation check against the BGK
+`exp(-tau)` anisotropy decay reference, with the stochastic final-ratio and
+fitted-rate gates shown in the committed figure.
+
+![DSMC thermal relaxation](dsmc_thermal_relaxation/plots/dsmc_thermal_relaxation.png)

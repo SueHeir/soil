@@ -77,6 +77,8 @@
 //! - `pack_reverse` / `unpack_reverse` — communicate `#[reverse]` fields (accumulate)
 //! - `zero` — zero out `#[zero]` fields for `n` atoms
 
+#![warn(missing_docs)]
+
 use proc_macro::TokenStream;
 use quote::quote;
 use syn::{parse_macro_input, DeriveInput, Fields, Type};

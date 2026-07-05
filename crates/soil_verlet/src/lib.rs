@@ -54,6 +54,8 @@
 //! separate constraint. (For a hard positional constraint that also corrects
 //! stray drift, see `soil_fixes`'s `[[pin]]`.)
 
+#![warn(missing_docs)]
+
 use grass_app::prelude::*;
 use grass_scheduler::prelude::*;
 

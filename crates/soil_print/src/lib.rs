@@ -62,6 +62,8 @@
 //! registers a scalar column, a vector column, a custom dump format, and a
 //! thermo value.
 
+#![warn(missing_docs)]
+
 use std::{
     cell::RefCell,
     collections::HashMap,

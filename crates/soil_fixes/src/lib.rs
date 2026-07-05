@@ -76,6 +76,8 @@
 //! fix, which zeros velocity, force, and (for DEM atoms) angular velocity and
 //! torque.
 
+#![warn(missing_docs)]
+
 use std::collections::HashMap;
 
 use grass_app::prelude::*;

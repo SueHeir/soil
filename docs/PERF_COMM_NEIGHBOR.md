@@ -13,13 +13,24 @@ Legend: impact **H/M/L**, effort **S(mall)/M(edium)/L(arge)**.
 ## A. Communication (`comm.rs`)
 
 ### C1 — Brute-force border scan is O(N) per swap · impact H · effort M
-`pack_border_atoms` (`comm.rs:279`) scans **every** local atom (`0..scan_end`)
-on each of the up-to-6 dim×swap iterations of a full ghost rebuild, recomputing
-`cut` and a low/high branch per atom. This O(N · swaps) scan is the dominant
-cost of `borders`. The neighbor build already produces a spatial bin list — the
-border scan could restrict itself to atoms in the boundary bins instead of the
-whole subdomain. Cheapest partial win: hoist the `ghost_cutoff > 0` test out of
-the loop (it's loop-invariant) and precompute the comparison threshold once.
+### ✅ DONE (orthogonal fixed-cutoff path; small validation case is no-win)
+`pack_border_atoms` no longer scans every local atom for each orthogonal
+fixed-cutoff face swap. `borders` borrows the existing neighbor bin geometry and
+the `sorted_local_cell` array produced by `sort_atoms_by_bin` on full rebuilds,
+binary-searches only cells whose slab can overlap the face skin, and then applies
+the exact face predicate before packing. Ghosts received by earlier swaps are
+still scanned linearly for multi-hop/corner forwarding because they are not in
+the local-cell index. Triclinic and per-atom-cutoff fallback paths keep the old
+conservative scan.
+
+Validation/perf (2026-07-05, `overlap_forward_validate`, 4 MPI ranks,
+`SOIL_OVERLAP=0`, 5 warm-cache runs, release binary): baseline
+`0.50, 0.43, 0.48, 0.47, 0.48 s` (mean `0.472 s`); bin-restricted path
+`0.50, 0.48, 0.51, 0.52, 0.47 s` (mean `0.496 s`). This tiny 4096-atom validation
+case is an honest no-win: the extra boundary-cell binary searches dominate the
+saved local scans. Correctness was unchanged: the n1/n2/n4 validation sweep
+passed 9/9, and every final per-rank CSV from the branch matched the pre-change
+`origin/main` run exactly (`max|Δ|=0`) for both baseline and overlap modes.
 
 ### C2 — Fresh `Vec<usize>` allocated per swap in the rebuild · impact M-H · effort S
 `pack_border_atoms` allocates `packed_indices = Vec::new()` (`comm.rs:277`) every

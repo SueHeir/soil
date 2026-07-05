@@ -125,6 +125,10 @@ pub struct Neighbor {
     /// Forward-only stencil: cell offsets with `offset > 0`, used for half-neighbor-list
     /// construction to avoid counting each pair twice.
     pub bin_stencil_forward: Vec<i32>,
+    /// Full-list stencil excluding the self-cell offset. Used when `newton = false`
+    /// so the offset-zero case is handled by the dedicated self-cell scan instead
+    /// of being checked in the neighbor-cell loop.
+    pub bin_stencil_nonself: Vec<i32>,
     /// Whether the self-cell (offset 0) passes the stencil distance test.
     pub bin_stencil_self: bool,
     /// Lower-left corner of the bin grid, offset by ghost layers from `sub_domain_low`.
@@ -214,6 +218,7 @@ impl Neighbor {
             pbc_flags: [false; 3],
             bin_stencil: Vec::new(),
             bin_stencil_forward: Vec::new(),
+            bin_stencil_nonself: Vec::new(),
             bin_stencil_self: false,
             bin_origin: [0.0; 3],
             bin_total_cells: 0,
@@ -648,6 +653,62 @@ mod tests {
                 pair
             );
         }
+    }
+
+    #[test]
+    fn full_bin_neighbor_list_scans_self_cell_without_self_pairs() {
+        // Dense same-cell case for the newton=false path: every atom is inside
+        // the self-cell cutoff, so the full neighbor list should contain both
+        // directions of each pair and no (i, i) self entries.
+        let mut app = App::new();
+        let mut atom = Atom::new();
+        push_atom(&mut atom, 0, [0.50, 0.50, 0.50], 0.5);
+        push_atom(&mut atom, 1, [0.75, 0.50, 0.50], 0.5);
+        push_atom(&mut atom, 2, [0.50, 0.75, 0.50], 0.5);
+        atom.nlocal = 3;
+        atom.natoms = 3;
+
+        let mut domain = crate::Domain::new();
+        domain.sub_domain_low = [0.0, 0.0, 0.0];
+        domain.sub_domain_high = [2.0, 2.0, 2.0];
+        domain.sub_length = [2.0, 2.0, 2.0];
+
+        let mut neighbor = Neighbor::new();
+        neighbor.skin_fraction = 1.0;
+        neighbor.bin_min_size = 1.0;
+        neighbor.newton = false;
+
+        app.add_resource(atom);
+        app.add_resource(neighbor);
+        app.add_resource(domain);
+        app.add_resource(NeighborConfig {
+            newton: false,
+            ..NeighborConfig::default()
+        });
+        app.add_resource(CurrentState(CommState::FullRebuild));
+        app.add_resource(crate::CommResource(Box::new(
+            crate::SingleProcessComm::new(),
+        )));
+        app.add_setup_system(neighbor_setup, ScheduleSetupSet::PostSetup);
+        app.add_update_system(bin_neighbor_list, ParticleSimScheduleSet::Neighbor);
+        app.organize_systems();
+        app.setup();
+        app.run();
+
+        let neigh = app.get_resource_ref::<Neighbor>().unwrap();
+        let mut directed_pairs = Vec::new();
+        for i in 0..3 {
+            let start = neigh.neighbor_offsets[i] as usize;
+            let end = neigh.neighbor_offsets[i + 1] as usize;
+            for &j in &neigh.neighbor_indices[start..end] {
+                directed_pairs.push((i, j as usize));
+            }
+        }
+        directed_pairs.sort();
+        assert_eq!(
+            directed_pairs,
+            vec![(0, 1), (0, 2), (1, 0), (1, 2), (2, 0), (2, 1)]
+        );
     }
 
     #[test]

@@ -93,6 +93,7 @@ pub(super) fn compute_bin_grid(neighbor: &mut Neighbor, domain: &Domain, comm_si
     let cutoff_sq = max_cutoff * max_cutoff;
     neighbor.bin_stencil.clear();
     neighbor.bin_stencil_forward.clear();
+    neighbor.bin_stencil_nonself.clear();
     neighbor.bin_stencil_self = false;
     for dx in -sx..=sx {
         for dy in -sy..=sy {
@@ -106,8 +107,11 @@ pub(super) fn compute_bin_grid(neighbor: &mut Neighbor, domain: &Domain, comm_si
                     neighbor.bin_stencil.push(offset);
                     if offset > 0 {
                         neighbor.bin_stencil_forward.push(offset);
+                        neighbor.bin_stencil_nonself.push(offset);
                     } else if offset == 0 {
                         neighbor.bin_stencil_self = true;
+                    } else {
+                        neighbor.bin_stencil_nonself.push(offset);
                     }
                 }
             }
@@ -196,6 +200,7 @@ fn compute_bin_grid_triclinic(
     let cutoff_sq = max_cutoff * max_cutoff;
     neighbor.bin_stencil.clear();
     neighbor.bin_stencil_forward.clear();
+    neighbor.bin_stencil_nonself.clear();
     neighbor.bin_stencil_self = false;
     for dx in -sx..=sx {
         for dy in -sy..=sy {
@@ -222,8 +227,11 @@ fn compute_bin_grid_triclinic(
                     neighbor.bin_stencil.push(offset);
                     if offset > 0 {
                         neighbor.bin_stencil_forward.push(offset);
+                        neighbor.bin_stencil_nonself.push(offset);
                     } else if offset == 0 {
                         neighbor.bin_stencil_self = true;
+                    } else {
+                        neighbor.bin_stencil_nonself.push(offset);
                     }
                 }
             }
@@ -562,6 +570,7 @@ pub fn bin_neighbor_list(
     // Take stencil to avoid borrow conflict with neighbor_indices
     let stencil_forward = std::mem::take(&mut neighbor.bin_stencil_forward);
     let stencil_full = std::mem::take(&mut neighbor.bin_stencil);
+    let stencil_nonself = std::mem::take(&mut neighbor.bin_stencil_nonself);
 
     let prev_count = neighbor.neighbor_indices.len();
     // Work with local vecs to avoid borrow conflicts through ResMut
@@ -582,17 +591,47 @@ pub fn bin_neighbor_list(
     let mut cap = indices.capacity();
     let mut iptr = indices.as_mut_ptr();
 
-    // Macro: bounds-check against cached capacity, write unchecked via cached ptr.
+    // Reserve for all possible candidates once before distance filtering. This
+    // keeps Vec growth checks out of accepted-neighbor loops; the actual accepted
+    // pair count is always <= this conservative candidate count.
+    let reserve_stencil = if newton {
+        &stencil_forward
+    } else {
+        &stencil_nonself
+    };
+    let mut candidate_capacity = 0usize;
+    for i in 0..nlocal {
+        let my_cell = unsafe { *atom_cell.get_unchecked(i) } as usize;
+        if has_self {
+            let cell_start = unsafe { *bin_start.get_unchecked(my_cell) } as usize;
+            let end = unsafe { *bin_start.get_unchecked(my_cell + 1) } as usize;
+            if newton {
+                let self_start = unsafe { *atom_sorted_idx.get_unchecked(i) } as usize + 1;
+                candidate_capacity += end.saturating_sub(self_start);
+            } else {
+                candidate_capacity += end - cell_start;
+            }
+        }
+        for &offset in reserve_stencil.iter() {
+            let c = (my_cell as i32 + offset) as usize;
+            let start = unsafe { *bin_start.get_unchecked(c) } as usize;
+            let end = unsafe { *bin_start.get_unchecked(c + 1) } as usize;
+            candidate_capacity += end - start;
+        }
+    }
+    if candidate_capacity > cap {
+        indices.reserve(candidate_capacity);
+        cap = indices.capacity();
+        iptr = indices.as_mut_ptr();
+    }
+
+    // Macro: write unchecked via cached ptr. Capacity was reserved before entering
+    // the candidate scans.
     macro_rules! push_index {
         ($val:expr) => {
-            if nidx >= cap {
-                // SAFETY: nidx == current logical length
-                unsafe { indices.set_len(nidx) };
-                indices.reserve(nidx / 2 + 256);
-                cap = indices.capacity();
-                iptr = indices.as_mut_ptr();
-            }
-            // SAFETY: nidx < cap after potential growth
+            debug_assert!(nidx < cap);
+            // SAFETY: the row pre-reserve covered every candidate in this scan,
+            // so every accepted neighbor has spare capacity.
             unsafe { *iptr.add(nidx) = $val };
             nidx += 1;
         };
@@ -613,7 +652,7 @@ pub fn bin_neighbor_list(
         let stencil = if newton {
             &stencil_forward
         } else {
-            &stencil_full
+            &stencil_nonself
         };
         for i in 0..nlocal {
             offsets.push(nidx as u32);
@@ -640,18 +679,29 @@ pub fn bin_neighbor_list(
                         }
                     }
                 } else {
-                    // Full list: scan all atoms in self-cell except i itself
-                    for m in cell_start..end {
-                        let j = unsafe { *sorted_atoms.get_unchecked(m) };
-                        if j as usize == i {
-                            continue;
-                        }
+                    // Full list: scan both sides of i's sorted position. This
+                    // produces the same self-cell candidates without testing
+                    // `j == i` for every atom in the cell.
+                    let self_pos = unsafe { *atom_sorted_idx.get_unchecked(i) } as usize;
+                    for m in cell_start..self_pos {
                         let pj = unsafe { *sorted_pos.get_unchecked(m) };
                         let dx = pj[0] - pi[0];
                         let dy = pj[1] - pi[1];
                         let dz = pj[2] - pi[2];
                         let r2 = dx.mul_add(dx, dy.mul_add(dy, dz * dz));
                         if r2 < cutoff_sq {
+                            let j = unsafe { *sorted_atoms.get_unchecked(m) };
+                            push_index!(j);
+                        }
+                    }
+                    for m in (self_pos + 1)..end {
+                        let pj = unsafe { *sorted_pos.get_unchecked(m) };
+                        let dx = pj[0] - pi[0];
+                        let dy = pj[1] - pi[1];
+                        let dz = pj[2] - pi[2];
+                        let r2 = dx.mul_add(dx, dy.mul_add(dy, dz * dz));
+                        if r2 < cutoff_sq {
+                            let j = unsafe { *sorted_atoms.get_unchecked(m) };
                             push_index!(j);
                         }
                     }
@@ -659,11 +709,6 @@ pub fn bin_neighbor_list(
             }
 
             for &offset in stencil.iter() {
-                // newton=true: stencil_forward has only offset > 0 (skip self cell)
-                // newton=false: stencil_full includes offset <= 0 but self cell (0) handled above
-                if !newton && offset == 0 {
-                    continue;
-                }
                 let c = (my_cell as i32 + offset) as usize;
                 let start = unsafe { *bin_start.get_unchecked(c) } as usize;
                 let end = unsafe { *bin_start.get_unchecked(c + 1) } as usize;
@@ -686,7 +731,7 @@ pub fn bin_neighbor_list(
         let stencil = if newton {
             &stencil_forward
         } else {
-            &stencil_full
+            &stencil_nonself
         };
         for i in 0..nlocal {
             offsets.push(nidx as u32);
@@ -714,11 +759,22 @@ pub fn bin_neighbor_list(
                         }
                     }
                 } else {
-                    for m in cell_start..end {
+                    let self_pos = unsafe { *atom_sorted_idx.get_unchecked(i) } as usize;
+                    for m in cell_start..self_pos {
                         let j = unsafe { *sorted_atoms.get_unchecked(m) } as usize;
-                        if j == i {
-                            continue;
+                        let pj = unsafe { *sorted_pos.get_unchecked(m) };
+                        let dx = pj[0] - pi[0];
+                        let dy = pj[1] - pi[1];
+                        let dz = pj[2] - pi[2];
+                        let r2 = dx.mul_add(dx, dy.mul_add(dy, dz * dz));
+                        let sum_skin =
+                            si as f64 + unsafe { *atoms.cutoff_radius.get_unchecked(j) } as f64;
+                        if r2 < sum_skin * sum_skin * skin_fraction_sq {
+                            push_index!(j as u32);
                         }
+                    }
+                    for m in (self_pos + 1)..end {
+                        let j = unsafe { *sorted_atoms.get_unchecked(m) } as usize;
                         let pj = unsafe { *sorted_pos.get_unchecked(m) };
                         let dx = pj[0] - pi[0];
                         let dy = pj[1] - pi[1];
@@ -734,9 +790,6 @@ pub fn bin_neighbor_list(
             }
 
             for &offset in stencil.iter() {
-                if !newton && offset == 0 {
-                    continue;
-                }
                 let c = (my_cell as i32 + offset) as usize;
                 let start = unsafe { *bin_start.get_unchecked(c) } as usize;
                 let end = unsafe { *bin_start.get_unchecked(c + 1) } as usize;
@@ -764,6 +817,7 @@ pub fn bin_neighbor_list(
     neighbor.neighbor_indices = indices;
     neighbor.bin_stencil_forward = stencil_forward;
     neighbor.bin_stencil = stencil_full;
+    neighbor.bin_stencil_nonself = stencil_nonself;
     neighbor.bin_atom_cell = atom_cell;
     neighbor.bin_count_arr = bin_count_arr;
     neighbor.bin_start = bin_start;

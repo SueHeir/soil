@@ -141,15 +141,14 @@ GRASS    framework: App, Plugin, Scheduler, IO, coupling      (no particles)
 ```
 
 SOIL covers the local-reach particle substrate: particles interact through
-bounded neighbor lists and halo exchange. It also now carries the first
-long-range-particle substrate primitive: `soil_core::Octree`, an ORBIT-style
-spatial tree with near/far partitioning and monopole aggregation. That does not
-make a gravity, electrostatics, or vortex solver part of SOIL; it means the
-shared particle/tree structure is in the substrate, while the kernel and method
-remain above it. In the six-part substrate map, the GRASS ecosystem therefore
-has local-reach particles (SOIL), local-reach meshes (FIELD), and an initial
-ORBIT particle-tree foothold. Global mesh solves remain a separate BEDROCK
-roadmap on the mesh side, not something SOIL should absorb.
+bounded neighbor lists and halo exchange. It also now carries a first long-range
+primitive: `soil_core::Octree`, a spatial tree with near/far partitioning and
+monopole aggregation. That does not make a gravity, electrostatics, or vortex
+solver part of SOIL; it means the shared particle/tree structure lives in the
+substrate, while the kernel and method stay above it. Reaching long-range /
+global solving is a roadmap axis grown *inside* each substrate — SOIL for
+particles, FIELD for meshes — and this tree is an early step on that axis, not a
+finished capability.
 
 ## How the three fit together
 
@@ -232,7 +231,7 @@ tiers you reach for as needed:
 - **[Does the Seam Hold? — A Peridynamics Worked Check](docs/src/substrate/peridynamics-check.md)** —
   the evidence that the tiering is real, not a relabeling.
 - **`cargo run --release --example tree_farfield_proof`** — the
-  ORBIT tree primitive checked against direct O(n^2) sums without adding a
+  far-field tree primitive checked against direct O(n^2) sums without adding a
   force law to the substrate.
 - **`cargo run --release --example orbit_nbody_gravity`** — a
   Barnes-Hut gravity demonstrator that keeps gravity in the example and uses

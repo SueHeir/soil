@@ -17,6 +17,10 @@
 - [Write Your Own Particle Physics](./tutorial/write-your-own-physics.md)
 - [Choosing Field Attributes](./tutorial/field-attributes.md)
 
+# Output
+
+- [`soil_print`: Output and Restart](./output/soil-print.md)
+
 # Reference
 
 - [Substrate Internals](./reference/internals.md)

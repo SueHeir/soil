@@ -50,9 +50,9 @@
 //!   tilt grows as `xy(t) = γ̇·L_y·t` and the gradient-direction edge moves at
 //!   `Δv = γ̇·L_y`. Ghost copies wrapping the sheared y-face pick up that
 //!   streaming-velocity jump.
-//! - It **requires periodic x and y boundaries** — `setup_deform` panics
-//!   otherwise.
-//! - Only `style = "erate"` is supported for `xy` (other styles panic).
+//! - It **requires periodic x and y boundaries**; invalid setup is reported as
+//!   an actionable configuration error.
+//! - Only `style = "erate"` is supported for `xy`.
 //! - On the first shear step a linear streaming profile `v_x = γ̇·(y − y_center)`
 //!   is imposed once so the system starts near steady simple shear.
 //! - The tilt is box-flip-wrapped into `[−Lx/2, Lx/2]` so the ghost/stencil reach
@@ -81,10 +81,14 @@
 #![warn(missing_docs)]
 
 use grass_app::prelude::*;
-use soil_core::{Atom, CommResource, Config, Domain, ParticleSimScheduleSet, Real, ScheduleSetupSet, StageOverrides};
-use soil_core::Neighbor;
 use grass_scheduler::prelude::*;
 use serde::Deserialize;
+use soil_core::Neighbor;
+use soil_core::{
+    Atom, CommResource, Config, Domain, ParticleSimScheduleSet, Real, ScheduleSetupSet,
+    StageOverrides,
+};
+use std::fmt;
 
 // ── TOML config structs ─────────────────────────────────────────────────────
 
@@ -190,6 +194,28 @@ pub enum DeformStyle {
     },
 }
 
+/// User-facing validation error for malformed `[deform]` configuration.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DeformConfigError {
+    message: String,
+}
+
+impl DeformConfigError {
+    fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+}
+
+impl fmt::Display for DeformConfigError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for DeformConfigError {}
+
 /// Per-axis deformation state.
 #[derive(Clone, Debug)]
 pub struct AxisDeform {
@@ -289,64 +315,100 @@ impl Plugin for DeformPlugin {
 /// fields are initialized to zero here and filled in by the setup system once
 /// the current domain bounds are known.
 ///
-/// # Panics
-///
-/// - If `style` is `"erate"` but `rate` is missing.
-/// - If `style` is `"vel"` but `velocity` is missing.
-/// - If `style` is `"final"` but `lo` or `hi` is missing.
-/// - If `style` is an unrecognized string.
-fn parse_axis_def(def: &Option<AxisDeformDef>, axis_name: &str) -> Option<AxisDeform> {
-    let def = def.as_ref()?;
+fn parse_axis_def(
+    def: &Option<AxisDeformDef>,
+    axis_name: &str,
+) -> Result<Option<AxisDeform>, DeformConfigError> {
+    let Some(def) = def.as_ref() else {
+        return Ok(None);
+    };
     let style = match def.style.as_str() {
         "erate" => {
-            let rate = def.rate.unwrap_or_else(|| {
-                panic!("[deform] {axis_name}: style 'erate' requires 'rate' field");
-            });
+            let rate = def.rate.ok_or_else(|| {
+                DeformConfigError::new(format!(
+                    "[deform] {axis_name}: style 'erate' requires a 'rate' field"
+                ))
+            })?;
             DeformStyle::Erate { rate }
         }
         "vel" => {
-            let velocity = def.velocity.unwrap_or_else(|| {
-                panic!("[deform] {axis_name}: style 'vel' requires 'velocity' field");
-            });
+            let velocity = def.velocity.ok_or_else(|| {
+                DeformConfigError::new(format!(
+                    "[deform] {axis_name}: style 'vel' requires a 'velocity' field"
+                ))
+            })?;
             DeformStyle::Vel { velocity }
         }
         "final" => {
-            let lo = def.lo.unwrap_or_else(|| {
-                panic!("[deform] {axis_name}: style 'final' requires 'lo' field");
-            });
-            let hi = def.hi.unwrap_or_else(|| {
-                panic!("[deform] {axis_name}: style 'final' requires 'hi' field");
-            });
+            let lo = def.lo.ok_or_else(|| {
+                DeformConfigError::new(format!(
+                    "[deform] {axis_name}: style 'final' requires a 'lo' field"
+                ))
+            })?;
+            let hi = def.hi.ok_or_else(|| {
+                DeformConfigError::new(format!(
+                    "[deform] {axis_name}: style 'final' requires a 'hi' field"
+                ))
+            })?;
             DeformStyle::Final {
                 target_lo: lo,
                 target_hi: hi,
             }
         }
         other => {
-            panic!("[deform] {axis_name}: unknown style '{other}'. Use 'erate', 'vel', or 'final'.");
+            return Err(DeformConfigError::new(format!(
+                "[deform] {axis_name}: unknown style '{other}'. Use 'erate', 'vel', or 'final'."
+            )));
         }
     };
 
-    Some(AxisDeform {
+    Ok(Some(AxisDeform {
         style,
         lo_0: 0.0,
         hi_0: 0.0,
-    })
+    }))
 }
 
 /// Parse the `[deform] xy = { style = "erate", rate = γ̇ }` shear definition into a
 /// shear-strain rate. Returns `None` if no shear is configured.
-///
-/// # Panics
-/// - If `style` is not `"erate"`, or `rate` is missing.
-fn parse_shear_rate(def: &Option<AxisDeformDef>) -> Option<f64> {
-    let def = def.as_ref()?;
+fn parse_shear_rate(def: &Option<AxisDeformDef>) -> Result<Option<f64>, DeformConfigError> {
+    let Some(def) = def.as_ref() else {
+        return Ok(None);
+    };
     match def.style.as_str() {
-        "erate" => Some(def.rate.unwrap_or_else(|| {
-            panic!("[deform] xy: style 'erate' requires 'rate' field (shear-strain rate γ̇)");
-        })),
-        other => panic!("[deform] xy: unsupported style '{other}'. Lees–Edwards shear uses 'erate'."),
+        "erate" => {
+            let rate = def.rate.ok_or_else(|| {
+                DeformConfigError::new(
+                    "[deform] xy: style 'erate' requires a 'rate' field (shear-strain rate)",
+                )
+            })?;
+            Ok(Some(rate))
+        }
+        other => Err(DeformConfigError::new(format!(
+            "[deform] xy: unsupported style '{other}'. Lees-Edwards shear only supports style 'erate'."
+        ))),
     }
+}
+
+fn validate_deform_config(
+    config: &DeformConfig,
+    domain: &Domain,
+) -> Result<([Option<AxisDeform>; 3], Option<f64>), DeformConfigError> {
+    let axes = [
+        parse_axis_def(&config.x, "x")?,
+        parse_axis_def(&config.y, "y")?,
+        parse_axis_def(&config.z, "z")?,
+    ];
+    let shear_xy_rate = parse_shear_rate(&config.xy)?;
+
+    if shear_xy_rate.is_some() && (!domain.is_periodic(0) || !domain.is_periodic(1)) {
+        return Err(DeformConfigError::new(format!(
+            "[deform] xy shear requires periodic x and y boundaries; got x={:?}, y={:?}",
+            domain.boundary_type[0], domain.boundary_type[1]
+        )));
+    }
+
+    Ok((axes, shear_xy_rate))
 }
 
 // ── Setup system ────────────────────────────────────────────────────────────
@@ -367,22 +429,14 @@ fn setup_deform(
     let config: DeformConfig = stage_overrides.section("deform");
 
     // Parse axis definitions fresh from this stage's config.
-    state.axes = [
-        parse_axis_def(&config.x, "x"),
-        parse_axis_def(&config.y, "y"),
-        parse_axis_def(&config.z, "z"),
-    ];
-    state.shear_xy_rate = parse_shear_rate(&config.xy);
+    let (axes, shear_xy_rate) = validate_deform_config(&config, &domain).unwrap_or_else(|err| {
+        eprintln!("ERROR: {err}");
+        std::process::exit(1);
+    });
+    state.axes = axes;
+    state.shear_xy_rate = shear_xy_rate;
     state.shear_initialized = false;
     state.remap = config.remap;
-
-    // Lees–Edwards shear requires periodic flow (x) and gradient (y) axes.
-    if state.shear_xy_rate.is_some() && (!domain.is_periodic(0) || !domain.is_periodic(1)) {
-        panic!(
-            "[deform] xy shear requires periodic x and y boundaries (got x={:?}, y={:?})",
-            domain.boundary_type[0], domain.boundary_type[1]
-        );
-    }
 
     // Set initial bounds from current domain and reset step counter.
     for (dim, axis) in state.axes.iter_mut().enumerate() {
@@ -427,7 +481,8 @@ fn setup_deform(
             let ly = domain.boundaries_high[1] - domain.boundaries_low[1];
             println!(
                 "Deform xy: Lees-Edwards shear erate={:.6e} (γ̇), Δv=γ̇·Ly={:.6e}",
-                rate, rate * ly
+                rate,
+                rate * ly
             );
         }
     }
@@ -534,10 +589,7 @@ fn apply_deform(
         if new_size <= 0.0 {
             panic!(
                 "[deform] axis {} collapsed at step {}: new_lo={}, new_hi={}",
-                AXIS_NAMES[dim],
-                step,
-                new_lo,
-                new_hi
+                AXIS_NAMES[dim], step, new_lo, new_hi
             );
         }
 
@@ -622,6 +674,7 @@ fn apply_deform(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use soil_core::BoundaryType;
     use soil_core::RunState;
 
     // Local test helper: build `n` atoms laid out along x. Kept inline so SOIL
@@ -1004,7 +1057,7 @@ mod tests {
             lo: None,
             hi: None,
         };
-        let axis = parse_axis_def(&Some(def), "z").unwrap();
+        let axis = parse_axis_def(&Some(def), "z").unwrap().unwrap();
         match axis.style {
             DeformStyle::Erate { rate } => assert!((rate - (-0.001)).abs() < 1e-15),
             _ => panic!("Expected Erate style"),
@@ -1020,7 +1073,7 @@ mod tests {
             lo: None,
             hi: None,
         };
-        let axis = parse_axis_def(&Some(def), "x").unwrap();
+        let axis = parse_axis_def(&Some(def), "x").unwrap().unwrap();
         match axis.style {
             DeformStyle::Vel { velocity } => assert!((velocity - 0.5).abs() < 1e-15),
             _ => panic!("Expected Vel style"),
@@ -1036,7 +1089,7 @@ mod tests {
             lo: Some(0.1),
             hi: Some(0.9),
         };
-        let axis = parse_axis_def(&Some(def), "y").unwrap();
+        let axis = parse_axis_def(&Some(def), "y").unwrap().unwrap();
         match axis.style {
             DeformStyle::Final {
                 target_lo,
@@ -1051,12 +1104,11 @@ mod tests {
 
     #[test]
     fn none_axis_returns_none() {
-        assert!(parse_axis_def(&None, "x").is_none());
+        assert!(parse_axis_def(&None, "x").unwrap().is_none());
     }
 
     #[test]
-    #[should_panic(expected = "requires 'rate' field")]
-    fn erate_missing_rate_panics() {
+    fn erate_missing_rate_reports_validation_error() {
         let def = AxisDeformDef {
             style: "erate".to_string(),
             rate: None,
@@ -1064,12 +1116,60 @@ mod tests {
             lo: None,
             hi: None,
         };
-        parse_axis_def(&Some(def), "z");
+        let err = parse_axis_def(&Some(def), "z").unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "[deform] z: style 'erate' requires a 'rate' field"
+        );
     }
 
     #[test]
-    #[should_panic(expected = "unknown style")]
-    fn unknown_style_panics() {
+    fn vel_missing_velocity_reports_validation_error() {
+        let def = AxisDeformDef {
+            style: "vel".to_string(),
+            rate: None,
+            velocity: None,
+            lo: None,
+            hi: None,
+        };
+        let err = parse_axis_def(&Some(def), "x").unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "[deform] x: style 'vel' requires a 'velocity' field"
+        );
+    }
+
+    #[test]
+    fn final_missing_bounds_report_validation_errors() {
+        let missing_lo = AxisDeformDef {
+            style: "final".to_string(),
+            rate: None,
+            velocity: None,
+            lo: None,
+            hi: Some(1.0),
+        };
+        let err = parse_axis_def(&Some(missing_lo), "y").unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "[deform] y: style 'final' requires a 'lo' field"
+        );
+
+        let missing_hi = AxisDeformDef {
+            style: "final".to_string(),
+            rate: None,
+            velocity: None,
+            lo: Some(0.0),
+            hi: None,
+        };
+        let err = parse_axis_def(&Some(missing_hi), "y").unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "[deform] y: style 'final' requires a 'hi' field"
+        );
+    }
+
+    #[test]
+    fn unknown_axis_style_reports_validation_error() {
         let def = AxisDeformDef {
             style: "wiggle".to_string(),
             rate: None,
@@ -1077,6 +1177,52 @@ mod tests {
             lo: None,
             hi: None,
         };
-        parse_axis_def(&Some(def), "x");
+        let err = parse_axis_def(&Some(def), "x").unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "[deform] x: unknown style 'wiggle'. Use 'erate', 'vel', or 'final'."
+        );
+    }
+
+    #[test]
+    fn xy_unsupported_style_reports_validation_error() {
+        let def = AxisDeformDef {
+            style: "vel".to_string(),
+            rate: None,
+            velocity: Some(0.5),
+            lo: None,
+            hi: None,
+        };
+        let err = parse_shear_rate(&Some(def)).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "[deform] xy: unsupported style 'vel'. Lees-Edwards shear only supports style 'erate'."
+        );
+    }
+
+    #[test]
+    fn xy_non_periodic_boundaries_report_validation_error() {
+        let config = DeformConfig {
+            xy: Some(AxisDeformDef {
+                style: "erate".to_string(),
+                rate: Some(0.5),
+                velocity: None,
+                lo: None,
+                hi: None,
+            }),
+            ..DeformConfig::default()
+        };
+        let mut domain = make_domain([0.0, 0.0, 0.0], [1.0, 1.0, 1.0]);
+        domain.boundary_type = [
+            BoundaryType::Periodic,
+            BoundaryType::Fixed,
+            BoundaryType::Periodic,
+        ];
+
+        let err = validate_deform_config(&config, &domain).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "[deform] xy shear requires periodic x and y boundaries; got x=Periodic, y=Fixed"
+        );
     }
 }

@@ -18,7 +18,7 @@ velocity, linear ramp to target) and a fourth mode that drives the box into a
 triclinic (tilted) state for Lees–Edwards (LEBC) simple shear. It is the
 enabling primitive for triaxial/oedometer compression tests and for the
 homogeneous-shear rheometer (`bench_lebc_shear`) that calibrates constitutive
-models for MUD/SPH de-fluidization.
+models for dev_soil_sph/SPH de-fluidization.
 
 ---
 

@@ -302,6 +302,7 @@ pub fn comm_setup(comm: Res<CommResource>, mut topo: ResMut<CommTopology>, domai
 fn pack_border_atoms(
     atoms: &mut Atom,
     registry: &AtomDataRegistry,
+    neighbor: Option<&Neighbor>,
     dim: usize,
     swap: usize,
     change_pos: [f64; 3],
@@ -351,6 +352,30 @@ fn pack_border_atoms(
     let hi_face = domain.sub_domain_high[dim];
     let fixed_thresh = if swap == 0 { lo_face + ghost_cutoff } else { hi_face - ghost_cutoff };
 
+    if use_fixed_cut {
+        if let Some(neighbor) = neighbor {
+            if neighbor.local_cells_valid
+                && neighbor.sorted_local_cell.len() >= atoms.nlocal as usize
+                && neighbor.bin_total_cells > 0
+                && pack_orthogonal_border_bins(
+                    atoms,
+                    registry,
+                    neighbor,
+                    dim,
+                    swap,
+                    fixed_thresh,
+                    change_pos,
+                    vel_offset,
+                    send_buff,
+                    packed_indices,
+                    scan_end,
+                )
+            {
+                return packed_indices.len() as i32;
+            }
+        }
+    }
+
     for i in 0..scan_end {
         let pos_dim = atoms.pos_component(i, dim);
         let in_skin = if use_fixed_cut {
@@ -369,6 +394,119 @@ fn pack_border_atoms(
         }
     }
     count
+}
+
+#[allow(clippy::too_many_arguments)]
+fn pack_orthogonal_border_bins(
+    atoms: &mut Atom,
+    registry: &AtomDataRegistry,
+    neighbor: &Neighbor,
+    dim: usize,
+    swap: usize,
+    fixed_thresh: f64,
+    change_pos: [f64; 3],
+    vel_offset: [f64; 3],
+    send_buff: &mut Vec<f64>,
+    packed_indices: &mut Vec<usize>,
+    scan_end: usize,
+) -> bool {
+    let nlocal = atoms.nlocal as usize;
+    if nlocal == 0 || scan_end < nlocal || neighbor.bin_size[dim] <= 0.0 {
+        return false;
+    }
+
+    let cells = &neighbor.sorted_local_cell[..nlocal];
+    let [nx, ny, nz] = neighbor.bin_count;
+    if nx <= 0 || ny <= 0 || nz <= 0 {
+        return false;
+    }
+
+    let mut pack_cell = |cell: i32| {
+        let cell = cell as u32;
+        let mut start = lower_bound_u32(cells, cell);
+        while start < nlocal && cells[start] == cell {
+            let i = start;
+            let pos_dim = atoms.pos_component(i, dim);
+            let in_skin = if swap == 0 { pos_dim < fixed_thresh } else { pos_dim >= fixed_thresh };
+            if in_skin {
+                atoms.pack_border(i, change_pos, vel_offset, send_buff);
+                registry.pack_all(i, send_buff);
+                packed_indices.push(i);
+            }
+            start += 1;
+        }
+    };
+
+    let [ox, oy, oz] = neighbor.bin_origin;
+    let [bsx, bsy, bsz] = neighbor.bin_size;
+    let coord_range = |origin: f64, bin_size: f64, n: i32| -> (i32, i32) {
+        if swap == 0 {
+            (0, (((fixed_thresh - origin) / bin_size).ceil() as i32 - 1).clamp(0, n - 1))
+        } else {
+            ((((fixed_thresh - origin) / bin_size).floor() as i32).clamp(0, n - 1), n - 1)
+        }
+    };
+
+    match dim {
+        0 => {
+            let (cx0, cx1) = coord_range(ox, bsx, nx);
+            for cx in cx0..=cx1 {
+                for cy in 0..ny {
+                    for cz in 0..nz {
+                        pack_cell(cx * ny * nz + cy * nz + cz);
+                    }
+                }
+            }
+        }
+        1 => {
+            let (cy0, cy1) = coord_range(oy, bsy, ny);
+            for cx in 0..nx {
+                for cy in cy0..=cy1 {
+                    for cz in 0..nz {
+                        pack_cell(cx * ny * nz + cy * nz + cz);
+                    }
+                }
+            }
+        }
+        _ => {
+            let (cz0, cz1) = coord_range(oz, bsz, nz);
+            for cx in 0..nx {
+                for cy in 0..ny {
+                    for cz in cz0..=cz1 {
+                        pack_cell(cx * ny * nz + cy * nz + cz);
+                    }
+                }
+            }
+        }
+    }
+
+    // Ghosts received in earlier swaps are not part of sorted_local_cell, but they
+    // must still be eligible for multi-hop/corner forwarding.
+    for i in nlocal..scan_end {
+        let pos_dim = atoms.pos_component(i, dim);
+        let in_skin = if swap == 0 { pos_dim < fixed_thresh } else { pos_dim >= fixed_thresh };
+        if in_skin {
+            atoms.pack_border(i, change_pos, vel_offset, send_buff);
+            registry.pack_all(i, send_buff);
+            packed_indices.push(i);
+        }
+    }
+
+    true
+}
+
+fn lower_bound_u32(values: &[u32], target: u32) -> usize {
+    let mut lo = 0;
+    let mut hi = values.len();
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        if values[mid] < target {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    lo
 }
 
 fn unpack_ghost_atoms(atoms: &mut Atom, registry: &AtomDataRegistry, buf: &[f64], count: usize) {
@@ -698,6 +836,7 @@ pub fn borders(
     mut topo: ResMut<CommTopology>,
     mut atoms: ResMut<Atom>,
     domain: Res<Domain>,
+    neighbor: Option<Res<Neighbor>>,
     registry: Res<AtomDataRegistry>,
     mut buffers: ResMut<CommBuffers>,
 ) {
@@ -792,6 +931,7 @@ pub fn borders(
                 let count = pack_border_atoms(
                     &mut atoms,
                     &registry,
+                    neighbor.as_deref(),
                     dim,
                     swap,
                     pbc_shift,
@@ -1308,6 +1448,84 @@ mod tests {
         assert_eq!(pos_to_rank([0, 1, 0], decomp), 2);
         assert_eq!(pos_to_rank([1, 0, 0], decomp), 4);
         assert_eq!(pos_to_rank([1, 1, 1], decomp), 7);
+    }
+
+    #[test]
+    fn lower_bound_u32_finds_first_matching_cell() {
+        let cells = [0, 0, 2, 2, 2, 5];
+        assert_eq!(lower_bound_u32(&cells, 0), 0);
+        assert_eq!(lower_bound_u32(&cells, 2), 2);
+        assert_eq!(lower_bound_u32(&cells, 4), 5);
+        assert_eq!(lower_bound_u32(&cells, 6), 6);
+    }
+
+    fn border_pack_fixture() -> (Atom, Domain, Neighbor, AtomDataRegistry) {
+        let mut atoms = Atom::new();
+        for (tag, x) in [0.2, 0.8, 1.3, 2.9, 3.8].into_iter().enumerate() {
+            atoms.push_test_atom(tag as u32, [x, 0.5, 0.5], 0.25, 1.0);
+        }
+        atoms.push_test_atom(99, [0.4, 0.5, 0.5], 0.25, 1.0);
+        atoms.nlocal = 5;
+        atoms.nghost = 1;
+        atoms.is_ghost[5] = true;
+
+        let mut domain = Domain::new();
+        domain.sub_domain_low = [0.0, 0.0, 0.0];
+        domain.sub_domain_high = [4.0, 4.0, 4.0];
+        domain.sub_length = [4.0, 4.0, 4.0];
+        domain.ghost_cutoff = 1.0;
+
+        let mut neighbor = Neighbor::new();
+        neighbor.local_cells_valid = true;
+        neighbor.sorted_local_cell = vec![0, 0, 1, 2, 3];
+        neighbor.bin_count = [4, 1, 1];
+        neighbor.bin_size = [1.0, 4.0, 4.0];
+        neighbor.bin_origin = [0.0, 0.0, 0.0];
+        neighbor.bin_total_cells = 4;
+
+        (atoms, domain, neighbor, AtomDataRegistry::new())
+    }
+
+    #[test]
+    fn binned_border_pack_matches_linear_scan_order() {
+        let (mut linear_atoms, domain, _neighbor, registry) = border_pack_fixture();
+        let mut linear_buff = Vec::new();
+        let mut linear_indices = Vec::new();
+        pack_border_atoms(
+            &mut linear_atoms,
+            &registry,
+            None,
+            0,
+            0,
+            [0.0; 3],
+            [0.0; 3],
+            &domain,
+            &mut linear_buff,
+            &mut linear_indices,
+            6,
+            domain.ghost_cutoff,
+        );
+
+        let (mut binned_atoms, domain, neighbor, registry) = border_pack_fixture();
+        let mut binned_buff = Vec::new();
+        let mut binned_indices = Vec::new();
+        pack_border_atoms(
+            &mut binned_atoms,
+            &registry,
+            Some(&neighbor),
+            0,
+            0,
+            [0.0; 3],
+            [0.0; 3],
+            &domain,
+            &mut binned_buff,
+            &mut binned_indices,
+            6,
+            domain.ghost_cutoff,
+        );
+
+        assert_eq!(binned_indices, linear_indices);
+        assert_eq!(binned_buff, linear_buff);
     }
 
     /// Mirror of the periodic min-image lo/hi classification used in `exchange`.

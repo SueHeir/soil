@@ -12,7 +12,7 @@ create-missing = false
 [output.html]
 default-theme = "rust"
 git-repository-url = "https://github.com/SueHeir/soil"
-edit-url-template = "https://github.com/SueHeir/soil/edit/master/docs/{path}"
+edit-url-template = "https://github.com/SueHeir/soil/edit/main/docs/{path}"
 
 [output.html.fold]
 enable = true

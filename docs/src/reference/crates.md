@@ -2,12 +2,12 @@
 
 | crate | role |
 |---|---|
-| [`soil_core`](https://github.com/SueHeir/soil/tree/master/crates/soil_core) | base `Atom` + `AtomData` registry, comm, domain decomposition, neighbor, regions, groups |
-| [`soil_derive`](https://github.com/SueHeir/soil/tree/master/crates/soil_derive) | `#[derive(AtomData)]` proc macro |
-| [`soil_verlet`](https://github.com/SueHeir/soil/tree/master/crates/soil_verlet) | velocity-Verlet translational integration |
-| [`soil_print`](https://github.com/SueHeir/soil/tree/master/crates/soil_print) | thermo output, dump files (CSV/binary/LAMMPS/VTP), restart |
-| [`soil_deform`](https://github.com/SueHeir/soil/tree/master/crates/soil_deform) | box deformation (strain rate, velocity, target size) + Lees–Edwards `xy` shear |
-| [`soil_fixes`](https://github.com/SueHeir/soil/tree/master/crates/soil_fixes) | method-agnostic position constraint `pin` (DEM fixes — `freeze`, velocity damping — live in [dirt_fixes](https://github.com/SueHeir/dirt)) |
+| [`soil_core`](https://github.com/SueHeir/soil/tree/main/crates/soil_core) | base `Atom` + `AtomData` registry, comm, domain decomposition, neighbor, regions, groups |
+| [`soil_derive`](https://github.com/SueHeir/soil/tree/main/crates/soil_derive) | `#[derive(AtomData)]` proc macro |
+| [`soil_verlet`](https://github.com/SueHeir/soil/tree/main/crates/soil_verlet) | velocity-Verlet translational integration |
+| [`soil_print`](https://github.com/SueHeir/soil/tree/main/crates/soil_print) | thermo output, dump files (CSV/binary/LAMMPS/VTP), restart |
+| [`soil_deform`](https://github.com/SueHeir/soil/tree/main/crates/soil_deform) | box deformation (strain rate, velocity, target size) + Lees–Edwards `xy` shear |
+| [`soil_fixes`](https://github.com/SueHeir/soil/tree/main/crates/soil_fixes) | method-agnostic position constraint `pin` (DEM fixes — `freeze`, velocity damping — live in [dirt_fixes](https://github.com/SueHeir/dirt)) |
 
 Built on [grass](https://github.com/SueHeir/grass). Consumed by
 [dirt](https://github.com/SueHeir/dirt) (DEM) and intended for other

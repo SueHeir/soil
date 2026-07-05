@@ -133,6 +133,6 @@ DIRT's `bench_lebc_shear` example is the canonical consumer: a homogeneous
 Lees–Edwards shear rheometer that records the virial stress tensor (`σ_xy` for
 shear stress, `p = ⅓ tr σ` for pressure) and the granular temperature, sweeping
 over solid fraction Φ and shear rate γ̇. It is the DEM calibration source for the
-MUD/SPH constitutive models. If you are adding shear rheometry to a new
+dev_soil_sph/SPH constitutive models. If you are adding shear rheometry to a new
 physics tier, that example shows the full pattern: `DeformPlugin` as the driver
 plus a custom `PostFinalIntegration` system as the measurement.

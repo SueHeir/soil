@@ -22,6 +22,14 @@ owner subdomain.
 
 ![exchange multihop gate](exchange_multihop_gate/plots/exchange_multihop_gate.png)
 
+## neighbor_comm_profile
+
+Performance harness that records timing, allocation, and communication counters
+for SOIL border exchange, forward/reverse communication, atom sorting, and
+neighbor-list build phases on checked-in serial and MPI layouts.
+
+![neighbor/comm profile](neighbor_comm_profile/plots/neighbor_comm_profile.png)
+
 ## tree_farfield_proof
 
 Octree near/far partition and far-field proof against brute-force references:

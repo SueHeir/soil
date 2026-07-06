@@ -6,6 +6,12 @@ Working list of candidate optimizations for `soil_core` ghost/halo comm
 change, expected impact, and rough effort. Nothing here is applied yet — this
 is the evaluation pass.
 
+The reproducible profiling harness for the next tuning pass lives in
+`examples/neighbor_comm_profile/`. It records timing, point-to-point message,
+collective, and allocation counters for `borders`, `forward_comm`,
+`reverse_comm`, `sort_atoms_by_bin`, and neighbor-list build on checked-in
+serial and MPI layouts.
+
 Legend: impact **H/M/L**, effort **S(mall)/M(edium)/L(arge)**.
 
 ---

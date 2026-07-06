@@ -50,6 +50,39 @@ fn default_true() -> bool {
 fn default_sort_every() -> usize {
     1000
 }
+fn default_distance_kernel() -> NeighborDistanceKernel {
+    NeighborDistanceKernel::Scalar
+}
+
+/// Distance-filter implementation used by the bin neighbor builder.
+///
+/// `Scalar` is the stable reference path. `Simd` enables a runtime-gated SIMD
+/// kernel where supported, falling back to the scalar kernel otherwise.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum NeighborDistanceKernel {
+    /// Always use scalar distance checks.
+    Scalar,
+    /// Use the SIMD distance kernel when the current target supports it.
+    Simd,
+}
+
+impl NeighborDistanceKernel {
+    /// Returns true when the SIMD path is requested and available at runtime.
+    pub fn simd_available(self) -> bool {
+        matches!(self, NeighborDistanceKernel::Simd) && simd_distance_available()
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+fn simd_distance_available() -> bool {
+    std::arch::is_x86_feature_detected!("avx2")
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+fn simd_distance_available() -> bool {
+    false
+}
 
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
@@ -74,6 +107,9 @@ pub struct NeighborConfig {
     /// false = full neighbor list, no reverse comm.
     #[serde(default = "default_true")]
     pub newton: bool,
+    /// Distance-filter kernel for neighbor construction: `scalar` or `simd`.
+    #[serde(default = "default_distance_kernel")]
+    pub distance_kernel: NeighborDistanceKernel,
 }
 
 impl Default for NeighborConfig {
@@ -85,6 +121,7 @@ impl Default for NeighborConfig {
             check: true,
             sort_every: 1000,
             newton: true,
+            distance_kernel: NeighborDistanceKernel::Scalar,
         }
     }
 }
@@ -199,6 +236,8 @@ pub struct Neighbor {
     /// Newton's third law optimization: `true` = half neighbor list + reverse comm,
     /// `false` = full neighbor list, skip reverse comm.
     pub newton: bool,
+    /// Distance-filter kernel selected for neighbor construction.
+    pub distance_kernel: NeighborDistanceKernel,
 }
 
 impl Default for Neighbor {
@@ -255,6 +294,7 @@ impl Neighbor {
             cached_uniform_cutoff_sq: None,
             cached_max_cutoff: 0.0,
             newton: true,
+            distance_kernel: NeighborDistanceKernel::Scalar,
         }
     }
 }
@@ -291,7 +331,9 @@ check = true
 # Sort atoms by spatial bin every N steps for cache locality (0 = disabled)
 sort_every = 1000
 # Newton's third law optimization (true = half list + reverse comm, false = full list)
-newton = true"#,
+newton = true
+# Neighbor distance kernel: scalar or simd (falls back to scalar if unsupported)
+distance_kernel = "scalar""#,
         )
     }
 
@@ -338,6 +380,7 @@ pub fn neighbor_read_input(
     neighbor.check = config.check;
     neighbor.sort_every = config.sort_every;
     neighbor.newton = config.newton;
+    neighbor.distance_kernel = config.distance_kernel;
     if comm.rank() == 0 {
         let rebuild_str = if config.every == 0 {
             "displacement".to_string()
@@ -347,11 +390,12 @@ pub fn neighbor_read_input(
             format!("every {}", config.every)
         };
         println!(
-            "Neighbor: skin_fraction={} bin_size={} rebuild={} newton={}",
+            "Neighbor: skin_fraction={} bin_size={} rebuild={} newton={} distance_kernel={:?}",
             config.skin_fraction,
             config.bin_size,
             rebuild_str,
-            if config.newton { "on" } else { "off" }
+            if config.newton { "on" } else { "off" },
+            config.distance_kernel
         );
     }
 }

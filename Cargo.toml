@@ -73,6 +73,11 @@ path = "examples/overlap_forward_validate/main.rs"
 required-features = ["mpi_backend", "precision-double"]
 
 [[example]]
+name = "exchange_multihop_gate"
+path = "examples/exchange_multihop_gate/main.rs"
+required-features = ["mpi_backend", "precision-double"]
+
+[[example]]
 name = "tree_farfield_proof"
 path = "examples/tree_farfield_proof/main.rs"
 required-features = ["precision-double"]

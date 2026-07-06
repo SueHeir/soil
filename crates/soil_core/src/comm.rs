@@ -15,8 +15,6 @@
 //! 4. **Reverse comm**: accumulate forces from ghosts back to their owners
 
 use std::process::exit;
-#[cfg(debug_assertions)]
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use grass_app::prelude::*;
 use grass_scheduler::prelude::*;
@@ -1522,7 +1520,7 @@ pub fn exchange(
     buffers.exchange_buffs = atoms_buff;
     buffers.border_recv_buff = recv_buff;
 
-    // ── Single-hop safety check (debug builds only) ──────────────────────────
+    // ── Single-hop safety check ──────────────────────────────────────────────
     // Exchange is intentionally single-hop (one lo/hi swap per dimension): an
     // atom can migrate at most one subdomain per step. With parallel insertion
     // every atom is born inside its owner's subdomain, so a single hop always
@@ -1530,46 +1528,42 @@ pub fn exchange(
     // (which would mean dt/skin is too large) and no insertion placed an atom
     // far from its owner. If, after the pass, any local atom is still outside
     // this subdomain in a decomposed dimension, the single hop did NOT suffice;
-    // warn once so the bug/instability is visible. This is an O(N) post-condition
-    // scan, so it's gated out of release builds (it's a developer assertion, not
-    // production work).
-    #[cfg(debug_assertions)]
-    {
-        let mut lost = 0usize;
-        for i in 0..atoms.len() {
-            let lam = if domain.triclinic {
-                let pr = atoms.pos[i];
-                Some(domain.x2lamda([pr[0] as f64, pr[1] as f64, pr[2] as f64]))
-            } else {
-                None
+    // fail hard so release builds cannot proceed with atoms owned by the wrong
+    // rank and later mis-bin them.
+    let mut lost = 0usize;
+    for i in 0..atoms.len() {
+        let lam = if domain.triclinic {
+            let pr = atoms.pos[i];
+            Some(domain.x2lamda([pr[0] as f64, pr[1] as f64, pr[2] as f64]))
+        } else {
+            None
+        };
+        for dim in 0..3usize {
+            if decomp[dim] == 1 {
+                continue;
+            }
+            let (coord, lo, hi) = match lam {
+                Some(l) => (l[dim], domain.sub_lamda_low[dim], domain.sub_lamda_high[dim]),
+                None => (
+                    atoms.pos[i][dim] as f64,
+                    domain.sub_domain_low[dim],
+                    domain.sub_domain_high[dim],
+                ),
             };
-            for dim in 0..3usize {
-                if decomp[dim] == 1 {
-                    continue;
-                }
-                let (coord, lo, hi) = match lam {
-                    Some(l) => (l[dim], domain.sub_lamda_low[dim], domain.sub_lamda_high[dim]),
-                    None => (atoms.pos[i][dim] as f64, domain.sub_domain_low[dim], domain.sub_domain_high[dim]),
-                };
-                if coord < lo || coord >= hi {
-                    lost += 1;
-                    break;
-                }
+            if coord < lo || coord >= hi {
+                lost += 1;
+                break;
             }
         }
-        if lost > 0 {
-            static WARNED: AtomicBool = AtomicBool::new(false);
-            if !WARNED.swap(true, Ordering::Relaxed) {
-                eprintln!(
-                    "WARNING: single-hop exchange left {} atom(s) outside rank {}'s subdomain. \
-                     An atom moved more than one subdomain in a step (timestep/skin too large) \
-                     or was inserted far from its owner. These atoms will be mis-binned. \
-                     (This warning is emitted once.)",
-                    lost,
-                    comm.rank()
-                );
-            }
-        }
+    }
+    if lost > 0 {
+        panic!(
+            "SOIL exchange left {lost} local atom(s) outside rank {}'s subdomain after one migration pass. \
+             At least one atom moved more than one subdomain in a step, a rebalance/deformation changed ownership by more than one rank, \
+             or insertion placed an atom far from its owner. Reduce timestep/displacement, rebalance more gradually, or reinsert atoms on their owning rank; \
+             multi-hop owner migration is not yet implemented.",
+            comm.rank()
+        );
     }
 }
 

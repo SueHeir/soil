@@ -14,6 +14,14 @@ communication against the default f64 path.
 
 ![f32 forward drift](overlap_forward_validate/plots/f32_forward_drift.png)
 
+## exchange_multihop_gate
+
+MPI release-build validation that a required two-rank atom migration stops with
+a hard, actionable exchange error instead of leaving a local atom outside its
+owner subdomain.
+
+![exchange multihop gate](exchange_multihop_gate/plots/exchange_multihop_gate.png)
+
 ## tree_farfield_proof
 
 Octree near/far partition and far-field proof against brute-force references:

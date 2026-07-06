@@ -6,6 +6,12 @@ Working list of candidate optimizations for `soil_core` ghost/halo comm
 change, expected impact, and rough effort. Nothing here is applied yet — this
 is the evaluation pass.
 
+The reproducible profiling harness for the next tuning pass lives in
+`examples/neighbor_comm_profile/`. It records timing, point-to-point message,
+collective, and allocation counters for `borders`, `forward_comm`,
+`reverse_comm`, `sort_atoms_by_bin`, and neighbor-list build on checked-in
+serial and MPI layouts.
+
 Legend: impact **H/M/L**, effort **S(mall)/M(edium)/L(arge)**.
 
 ---
@@ -64,14 +70,26 @@ comm tests pass); `examples/overlap_forward_validate/sweep.py` (1-, 2-, and
 with tolerance `1e-12` on every layout.
 
 ### C5 — Many small messages: one sendrecv per swap · impact M-H · effort L
-Forward and reverse comm issue a separate `sendrecv` per swap
-(`comm.rs:413`, `comm.rs:633`) — up to `maxneed × 2 × 3` messages/step. At small
-subdomains or with multi-hop ghosts (`maxneed > 1`) MPI latency dominates over
-bandwidth. Aggregate swaps that target the same neighbor rank into one message,
-or pack all three dimensions' forward update into a single exchange round.
-**Partially addressed by C6's round batching:** the two swaps of a round now fly
-concurrently (latency overlap), but they're still distinct messages — true
-same-rank aggregation into fewer messages is still open.
+### ✅ DONE (same-neighbor round aggregation)
+Forward and reverse ghost comm now detect the periodic two-rank case where a
+round's lower/upper swaps both talk to the same neighbor and send `[lo | hi]` in
+one `sendrecv_f64_into`, then split the receive at the recorded per-swap counts.
+The opt-in f32 forward path applies the same aggregation to its rounded base
+payload (and, when present, the f64 extension-field payload). Exchange migration
+uses the same idea for two-rank periodic dimensions: the lo/hi count-first meta
+messages become one `[lo_count, lo_len, hi_count, hi_len]` exchange followed by
+one concatenated `[lo | hi]` payload, preserving the old unpack order.
+
+Instrumentation/correctness: `cargo test -p soil_core comm --features
+precision-double` includes `forward_comm_aggregates_same_neighbor_round` and
+`reverse_comm_aggregates_same_neighbor_round`, which use a counting backend to
+prove each same-neighbor ghost round takes one sendrecv instead of two while
+producing the same ghost positions/velocities and reverse force accumulation;
+`exchange_aggregates_same_neighbor_meta_and_payload` proves same-neighbor
+exchange uses one meta message plus one payload message while preserving lo-then-hi
+unpack order.
+The SOIL validation sweeps below preserve the existing decomposition-invariance
+and exchange gate results.
 
 ### C6 — Fully blocking comm; no compute/comm overlap · impact M-H · effort L
 ### ✅ DONE (per-swap overlap + interior/boundary compute overlap)

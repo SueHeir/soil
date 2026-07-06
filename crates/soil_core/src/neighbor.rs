@@ -717,6 +717,131 @@ mod tests {
         );
     }
 
+    fn full_neighbor_directed_pairs(neighbor: &Neighbor, nlocal: usize) -> Vec<(usize, usize)> {
+        let mut pairs = Vec::new();
+        for i in 0..nlocal {
+            let start = neighbor.neighbor_offsets[i] as usize;
+            let end = neighbor.neighbor_offsets[i + 1] as usize;
+            for &j in &neighbor.neighbor_indices[start..end] {
+                pairs.push((i, j as usize));
+            }
+        }
+        pairs.sort();
+        pairs
+    }
+
+    fn legacy_full_neighbor_directed_pairs(
+        atom: &Atom,
+        neighbor: &Neighbor,
+        nlocal: usize,
+        cutoffs: &[f64],
+    ) -> Vec<(usize, usize)> {
+        let mut pairs = Vec::new();
+        let skin_fraction_sq = neighbor.skin_fraction * neighbor.skin_fraction;
+        for i in 0..nlocal {
+            let my_cell = neighbor.bin_atom_cell[i] as usize;
+            let pi = atom.pos[i];
+            let pi = [pi[0] as f64, pi[1] as f64, pi[2] as f64];
+            for &offset in &neighbor.bin_stencil {
+                let c = (my_cell as i32 + offset) as usize;
+                let start = neighbor.bin_start[c] as usize;
+                let end = neighbor.bin_start[c + 1] as usize;
+                for m in start..end {
+                    let j = neighbor.bin_sorted_atoms[m] as usize;
+                    if offset == 0 && j == i {
+                        continue;
+                    }
+                    let pj = neighbor.bin_sorted_pos[m];
+                    let dx = pj[0] - pi[0];
+                    let dy = pj[1] - pi[1];
+                    let dz = pj[2] - pi[2];
+                    let r2 = dx.mul_add(dx, dy.mul_add(dy, dz * dz));
+                    let sum_skin = cutoffs[i] + cutoffs[j];
+                    if r2 < sum_skin * sum_skin * skin_fraction_sq {
+                        pairs.push((i, j));
+                    }
+                }
+            }
+        }
+        pairs.sort();
+        pairs
+    }
+
+    #[test]
+    fn full_bin_neighbor_list_matches_legacy_self_cell_scan() {
+        // Regression for the newton=false full-list path: production code scans
+        // the self cell separately and uses a stencil with offset 0 removed. This
+        // must produce the same directed pair set as the legacy full-stencil scan
+        // with hot-loop `offset == 0 && j == i` filtering.
+        let n = 12;
+        let skin_fraction = 1.0;
+        let positions = [
+            [0.20, 0.20, 0.20],
+            [0.55, 0.22, 0.20],
+            [0.20, 0.58, 0.20],
+            [0.62, 0.60, 0.20],
+            [1.05, 0.24, 0.20],
+            [1.38, 0.22, 0.20],
+            [0.22, 1.05, 0.20],
+            [0.58, 1.35, 0.20],
+            [1.08, 1.08, 0.20],
+            [1.42, 1.38, 0.20],
+            [2.20, 0.20, 0.20],
+            [2.55, 0.22, 0.20],
+        ];
+        let cutoffs = [
+            0.30, 0.36, 0.28, 0.34, 0.32, 0.27, 0.35, 0.31, 0.29, 0.37, 0.30, 0.33,
+        ];
+
+        let mut app = App::new();
+        let mut atom = Atom::new();
+        for i in 0..n {
+            push_atom(&mut atom, i as u32, positions[i], cutoffs[i]);
+        }
+        atom.nlocal = n as u32;
+        atom.natoms = n as u64;
+
+        let mut domain = crate::Domain::new();
+        domain.sub_domain_low = [0.0, 0.0, 0.0];
+        domain.sub_domain_high = [3.0, 2.0, 2.0];
+        domain.sub_length = [3.0, 2.0, 2.0];
+
+        let mut neighbor = Neighbor::new();
+        neighbor.skin_fraction = skin_fraction;
+        neighbor.bin_min_size = 0.5;
+        neighbor.newton = false;
+
+        app.add_resource(atom);
+        app.add_resource(neighbor);
+        app.add_resource(domain);
+        app.add_resource(NeighborConfig {
+            newton: false,
+            ..NeighborConfig::default()
+        });
+        app.add_resource(CurrentState(CommState::FullRebuild));
+        app.add_resource(crate::CommResource(Box::new(
+            crate::SingleProcessComm::new(),
+        )));
+        app.add_setup_system(neighbor_setup, ScheduleSetupSet::PostSetup);
+        app.add_update_system(bin_neighbor_list, ParticleSimScheduleSet::Neighbor);
+        app.organize_systems();
+        app.setup();
+        app.run();
+
+        let atom = app.get_resource_ref::<Atom>().unwrap();
+        let neighbor = app.get_resource_ref::<Neighbor>().unwrap();
+        let optimized_pairs = full_neighbor_directed_pairs(&neighbor, n);
+        let legacy_pairs = legacy_full_neighbor_directed_pairs(&atom, &neighbor, n, &cutoffs);
+
+        assert_eq!(optimized_pairs, legacy_pairs);
+        assert!(!optimized_pairs.iter().any(|(i, j)| i == j));
+        assert!(
+            optimized_pairs.iter().any(|(i, j)| i > j)
+                && optimized_pairs.iter().any(|(i, j)| i < j),
+            "newton=false full list should contain both pair directions"
+        );
+    }
+
     #[test]
     fn triclinic_bin_neighbor_list_matches_reference() {
         // Same cross-check as above but with a TILTED (triclinic) box. Atoms are

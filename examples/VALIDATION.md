@@ -3,6 +3,14 @@
 Validation examples live under top-level `examples/`, matching the DIRT layout.
 Crate directories contain library code only.
 
+## virial_thermo_crossrank
+
+MPI validation that `VirialStress` pair-force contributions reach the
+`soil_print` thermo columns through a global reduction. The same declarative
+pair-force tensor is checked against the analytic result on 1, 2, and 4 ranks.
+
+![virial thermo cross-rank validation](virial_thermo_crossrank/plots/virial_thermo_crossrank.png)
+
 ## overlap_forward_validate
 
 MPI validation that overlapped forward communication matches the baseline path
@@ -29,6 +37,14 @@ set on 1, 2, and 4 MPI ranks. It checks that polydisperse SOIL neighbor lists
 keep every valid pair while allowing per-atom rebuild budgets.
 
 ![polydisperse neighbor rebuild](polydisperse_neighbor_rebuild/plots/polydisperse_neighbor_rebuild.png)
+
+## neighbor_comm_profile
+
+Performance harness that records timing, allocation, and communication counters
+for SOIL border exchange, forward/reverse communication, atom sorting, and
+neighbor-list build phases on checked-in serial and MPI layouts.
+
+![neighbor/comm profile](neighbor_comm_profile/plots/neighbor_comm_profile.png)
 
 ## tree_farfield_proof
 

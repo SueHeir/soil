@@ -98,6 +98,16 @@ path = "examples/polydisperse_neighbor_rebuild/main.rs"
 required-features = ["mpi_backend", "precision-double"]
 
 [[example]]
+name = "neighbor_comm_profile"
+path = "examples/neighbor_comm_profile/main.rs"
+required-features = ["mpi_backend", "precision-double"]
+
+[[example]]
 name = "orbit_nbody_gravity"
 path = "examples/orbit_nbody_gravity/main.rs"
 required-features = ["precision-double"]
+
+[[example]]
+name = "virial_thermo_crossrank"
+path = "examples/virial_thermo_crossrank/main.rs"
+required-features = ["mpi_backend", "precision-double"]

@@ -139,10 +139,11 @@ scales poorly with rank count. `natoms` changes only on insertion/removal —
 recompute it lazily (when thermo/dump needs it) or only on exchange steps that
 actually moved atoms across ranks.
 
-### C9 — Single-hop safety scan over all atoms every exchange · impact L · effort S
-`exchange` ends with an O(N·3) double loop (`comm.rs:815`) purely as a
-post-condition check that warns once. Gate it behind `cfg!(debug_assertions)` or
-a config flag so production runs don't pay it.
+### C9 — Single-hop safety scan over all atoms every exchange · closed 2026-07-06
+`exchange` now keeps the post-condition check in release builds and turns a
+remaining outside-subdomain atom into a hard, actionable error. This preserves
+correctness for skewed load balancing or large deformation steps while the
+migration implementation remains single-hop.
 
 ### C10 — Ghost comm in f64; could be f32 (ties to GPU port) · impact H(bandwidth) · effort L
 Prototype verdict (2026-07-05): keep f64 forward communication as the default.

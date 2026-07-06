@@ -143,6 +143,12 @@ all columns. This is why field order is a wire format and why columns must never
 be resized out of band: migration is one of only two paths (the other is `zero`)
 that legitimately grows or shrinks a column, and it touches all of them at once.
 
+Exchange is currently one neighbor hop per decomposed dimension. If a release
+run leaves any local atom outside this rank's subdomain after that pass, SOIL
+stops with an actionable error instead of allowing the atom to be binned on the
+wrong rank. Fix the run by reducing per-step displacement, making
+load-balancing/deformation less abrupt, or inserting atoms on their owner rank.
+
 ## Ghost / halo exchange (borders)
 
 After migration, **borders** builds the ghost halo: every local atom within

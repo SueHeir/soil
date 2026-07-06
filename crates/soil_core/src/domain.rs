@@ -6,6 +6,8 @@
 //! - [`decompose_domain`]: uniform Cartesian grid decomposition across MPI ranks
 //! - [`DomainPlugin`]: registers setup, PBC wrapping, and shrink-wrap systems
 
+use std::{fmt, process::exit};
+
 use grass_app::prelude::*;
 use grass_scheduler::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -103,6 +105,31 @@ impl Default for DomainConfig {
         }
     }
 }
+
+/// Validation failures for [`DomainConfig`] that depend on the active runtime.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DomainValidationError {
+    /// Shrink-wrap changes global box bounds dynamically; SOIL does not yet
+    /// support recomputing MPI sub-domain bounds from those changes.
+    ShrinkWrapWithMpi {
+        /// Number of MPI ranks in the active communicator.
+        ranks: i32,
+    },
+}
+
+impl fmt::Display for DomainValidationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            DomainValidationError::ShrinkWrapWithMpi { ranks } => write!(
+                f,
+                "[domain] shrink-wrap boundaries are not supported with MPI rank count {ranks}; \
+                 use fixed or periodic boundaries, or run with one MPI rank"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for DomainValidationError {}
 
 /// Simulation box geometry: global boundaries, sub-domain bounds, and periodicity.
 pub struct Domain {
@@ -308,6 +335,27 @@ pub fn decompose_domain(config: &DomainConfig, comm: &dyn CommBackend) -> Domain
     }
 }
 
+/// Validate a [`DomainConfig`] against the active communicator.
+pub fn validate_domain_config(
+    config: &DomainConfig,
+    comm: &dyn CommBackend,
+) -> Result<(), DomainValidationError> {
+    let has_shrink_wrap = config.boundary_types().contains(&BoundaryType::ShrinkWrap);
+    if comm.size() > 1 && has_shrink_wrap {
+        return Err(DomainValidationError::ShrinkWrapWithMpi { ranks: comm.size() });
+    }
+    Ok(())
+}
+
+/// Validate and compute [`Domain`] from config using uniform Cartesian grid decomposition.
+pub fn try_decompose_domain(
+    config: &DomainConfig,
+    comm: &dyn CommBackend,
+) -> Result<Domain, DomainValidationError> {
+    validate_domain_config(config, comm)?;
+    Ok(decompose_domain(config, comm))
+}
+
 // ── Dynamic load balancing (roadmap step 5) ──────────────────────────────────
 
 /// Equal-count split planes along one axis from a global particle histogram.
@@ -483,11 +531,11 @@ pub fn domain_read_input(
 
     let has_shrink_wrap = boundary_types.contains(&BoundaryType::ShrinkWrap);
 
-    // Shrink-wrap is not yet supported with MPI — fail early to prevent silent wrong results.
-    // MPI support requires correct sub-domain bound updates and global reductions across ranks.
-    if comm.size() > 1 && has_shrink_wrap {
-        panic!("Shrink-wrap boundaries are not yet supported with MPI (nprocs > 1). \
-                Use fixed or periodic boundaries, or run with a single process.");
+    if let Err(err) = validate_domain_config(&config, &**comm) {
+        if comm.rank() == 0 {
+            eprintln!("ERROR: {err}");
+        }
+        exit(1);
     }
 
     if comm.rank() == 0 {
@@ -518,7 +566,7 @@ pub fn domain_read_input(
 /// Returns `true` if any bounds changed. This is extracted as a standalone function
 /// so it can be unit-tested without the ECS resource wrappers.
 ///
-/// **MPI note**: Shrink-wrap is currently single-process only (see the panic in
+/// **MPI note**: Shrink-wrap is currently single-process only (validated in
 /// `domain_read_input`). Future MPI support would need `all_reduce_min/max` for
 /// global extremes and correct sub-domain bound updates per rank.
 pub fn shrink_wrap_update(domain: &mut Domain, positions: &[[f64; 3]], nlocal: usize) -> bool {
@@ -754,6 +802,87 @@ mod tests {
         c
     }
 
+    struct TestComm {
+        size: i32,
+        rank: i32,
+        decomp: [i32; 3],
+        pos: [i32; 3],
+    }
+
+    impl TestComm {
+        fn new(size: i32, rank: i32, decomp: [i32; 3], pos: [i32; 3]) -> Self {
+            Self {
+                size,
+                rank,
+                decomp,
+                pos,
+            }
+        }
+    }
+
+    impl CommBackend for TestComm {
+        fn rank(&self) -> i32 {
+            self.rank
+        }
+
+        fn size(&self) -> i32 {
+            self.size
+        }
+
+        fn processor_decomposition(&self) -> [i32; 3] {
+            self.decomp
+        }
+
+        fn processor_position(&self) -> [i32; 3] {
+            self.pos
+        }
+
+        fn set_processor_grid(&mut self, decomp: [i32; 3], position: [i32; 3]) {
+            self.decomp = decomp;
+            self.pos = position;
+        }
+
+        fn all_reduce_sum_f64(&self, local: f64) -> f64 {
+            local
+        }
+
+        fn all_reduce_min_f64(&self, local: f64) -> f64 {
+            local
+        }
+
+        fn barrier(&self) {}
+
+        fn send_f64(&self, _dest: i32, _buf: &[f64]) {
+            unreachable!("TestComm point-to-point is not used in domain tests");
+        }
+
+        fn recv_f64(&self, _source: i32) -> Vec<f64> {
+            unreachable!("TestComm point-to-point is not used in domain tests");
+        }
+
+        fn recv_f64_any(&self) -> Vec<f64> {
+            unreachable!("TestComm point-to-point is not used in domain tests");
+        }
+
+        fn sendrecv_f64(&self, _dest: i32, _send_buf: &[f64], _source: i32) -> Vec<f64> {
+            unreachable!("TestComm point-to-point is not used in domain tests");
+        }
+
+        fn sendrecv_f64_into(
+            &self,
+            _dest: i32,
+            _send_buf: &[f64],
+            _source: i32,
+            _recv_buf: &mut [f64],
+        ) {
+            unreachable!("TestComm point-to-point is not used in domain tests");
+        }
+
+        fn sendrecv_batch_f64_into(&self, _ops: &mut [crate::SendRecvOp<'_>]) {
+            unreachable!("TestComm point-to-point is not used in domain tests");
+        }
+    }
+
     #[test]
     fn balanced_planes_equalizes_a_skewed_distribution() {
         // 10 bins over [0,10]; all mass piled in the left 3 bins (30,30,40 = 100).
@@ -981,6 +1110,63 @@ mod tests {
         assert!((domain.sub_domain_low[0] - 5.0).abs() < 1e-10);
         assert!((domain.sub_domain_high[0] - 10.0).abs() < 1e-10);
         assert!((domain.sub_length[0] - 5.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn shrink_wrap_multi_rank_is_validation_error() {
+        let config = DomainConfig {
+            boundary_z: BoundaryType::ShrinkWrap,
+            ..Default::default()
+        };
+        let comm = TestComm::new(2, 0, [2, 1, 1], [0, 0, 0]);
+
+        let err = validate_domain_config(&config, &comm).unwrap_err();
+
+        assert_eq!(err, DomainValidationError::ShrinkWrapWithMpi { ranks: 2 });
+        let msg = err.to_string();
+        assert!(msg.contains("shrink-wrap"), "{msg}");
+        assert!(msg.contains("MPI rank count 2"), "{msg}");
+    }
+
+    #[test]
+    fn shrink_wrap_single_rank_setup_is_valid() {
+        let config = DomainConfig {
+            x_low: -1.0,
+            x_high: 3.0,
+            boundary_z: BoundaryType::ShrinkWrap,
+            shrink_wrap_padding: 0.25,
+            ..Default::default()
+        };
+        let comm = make_comm([1, 1, 1], [0, 0, 0]);
+
+        let domain = try_decompose_domain(&config, &comm).unwrap();
+
+        assert_eq!(domain.boundary_type[2], BoundaryType::ShrinkWrap);
+        assert_eq!(domain.shrink_wrap_padding, 0.25);
+        assert_eq!(domain.sub_domain_low, [-1.0, 0.0, 0.0]);
+        assert_eq!(domain.sub_domain_high, [3.0, 1.0, 1.0]);
+    }
+
+    #[test]
+    fn fixed_and_periodic_multi_rank_setup_remains_valid() {
+        let config = DomainConfig {
+            x_low: 0.0,
+            x_high: 12.0,
+            boundary_x: BoundaryType::Periodic,
+            boundary_y: BoundaryType::Fixed,
+            boundary_z: BoundaryType::Periodic,
+            ..Default::default()
+        };
+        let comm = TestComm::new(3, 1, [3, 1, 1], [1, 0, 0]);
+
+        let domain = try_decompose_domain(&config, &comm).unwrap();
+
+        assert_eq!(
+            domain.boundary_type,
+            [BoundaryType::Periodic, BoundaryType::Fixed, BoundaryType::Periodic],
+        );
+        assert_eq!(domain.sub_domain_low, [4.0, 0.0, 0.0]);
+        assert_eq!(domain.sub_domain_high, [8.0, 1.0, 1.0]);
     }
 
     // ── Boundary type tests ────────────────────────────────────────────────

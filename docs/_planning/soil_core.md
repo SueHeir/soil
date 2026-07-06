@@ -246,7 +246,7 @@ boundary_y = "periodic"
 boundary_z = "periodic"
 shrink_wrap_padding = 0.0  # (f64, default 0.0 → auto: uses ghost_cutoff as padding)
 ```
-All values optional (defaults shown). MPI + shrink-wrap panics at startup (`domain.rs:366`). First-stage-only: later stages can deform the box but don't re-read `[domain]` (`domain.rs:333`).
+All values optional (defaults shown). MPI + shrink-wrap fails validation at startup. First-stage-only: later stages can deform the box but don't re-read `[domain]` (`domain.rs:333`).
 
 ### `[neighbor]`
 ```toml
@@ -334,8 +334,8 @@ Migration buffers and restart files serialize fields in declaration order. Reord
 ### 11. Spatial sort and ghost sendlists (`neighbor.rs:869–975`)
 `sort_atoms_by_bin` only permutes during a `FullRebuild` step. Permuting during `CommunicateOnly` would invalidate the saved ghost sendlists (`swap_data.send_indices`, `recv_start`) without rebuilding them — causing reverse comm to accumulate forces onto the wrong owner atoms (`neighbor.rs:861–879`). After a periodic sort, `all_reduce` ensures all ranks agree and transition to `FullRebuild` together.
 
-### 12. Shrink-wrap is single-process only (`domain.rs:365–368`)
-MPI + shrink-wrap panics at startup. MPI support would need `all_reduce_min/max` for global extremes and per-rank subdomain bound updates. Currently no-op with a clear panic message.
+### 12. Shrink-wrap is single-process only
+MPI + shrink-wrap fails validation at startup. MPI support would need `all_reduce_min/max` for global extremes and per-rank subdomain bound updates.
 
 ### 13. Triclinic box: fractional-coordinate classification (`domain.rs:122–141`)
 When `triclinic = true`, atom ownership is determined in fractional (lamda) coordinates where the tilted box maps to the unit cube. PBC wrapping, exchange, and binning all work in lamda space. The tilt `xy` is the only active one today (Lees–Edwards simple shear). Lees–Edwards velocity remap: a y-face crossing subtracts `delta_y · boundary_vel` from the atom's velocity (`domain.rs:559–604`).

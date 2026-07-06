@@ -77,8 +77,8 @@ trait by hand — see [Writing an AtomData Extension](../substrate/writing-atomd
 > generates no `new()` or `Default` — build the struct literal yourself.
 
 For the full semantics and invariants, see
-[The AtomData Contract](../substrate/atomdata-contract.md) and the repository
-[SOIL_ATOMDATA_CONTRACT](../../SOIL_ATOMDATA_CONTRACT.md); for the
+[The AtomData Contract](../substrate/atomdata-contract.md), which includes the
+repository `docs/SOIL_ATOMDATA_CONTRACT.md` source in the rendered book; for the
 peridynamics worked example (and a runnable non-DEM method) that exercises this
 contract, see
 [Does the Seam Hold? — A Peridynamics Worked Check](../substrate/peridynamics-check.md).

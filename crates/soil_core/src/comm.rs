@@ -714,52 +714,97 @@ fn forward_comm_f32(
         pool.resize_with(swaps.len(), SwapScratch::default);
     }
 
-    for (idx, swap) in swaps.iter().enumerate() {
-        let scratch = &mut pool[idx];
-        scratch.send_f32.clear();
-        scratch.send_f32.reserve(swap.send_indices.len() * FORWARD_PACK_SIZE);
-        pack_forward_base_f32_into(swap, &mut scratch.send_f32, atoms);
+    let mut r = 0;
+    while r < swaps.len() {
+        let end = (r + 2).min(swaps.len());
 
-        scratch.send_extra.clear();
-        if extra > 0 {
-            scratch.send_extra.reserve(swap.send_indices.len() * extra);
-            pack_forward_extra_into(swap, &mut scratch.send_extra, registry);
-        }
+        if end == r + 2 && round_aggregatable(&swaps[r], &swaps[r + 1], rank) {
+            let lo = &swaps[r];
+            let hi = &swaps[r + 1];
+            let scratch = &mut pool[r];
 
-        if swap.to_proc == rank {
-            unpack_forward_f32(&scratch.send_f32, &scratch.send_extra, atoms, registry, swap.recv_start, swap.recv_count, extra);
+            scratch.send_f32.clear();
+            scratch.send_f32.reserve((lo.send_indices.len() + hi.send_indices.len()) * FORWARD_PACK_SIZE);
+            pack_forward_base_f32_into(lo, &mut scratch.send_f32, atoms);
+            pack_forward_base_f32_into(hi, &mut scratch.send_f32, atoms);
+
+            scratch.send_bridge.clear();
+            scratch.send_bridge.extend(scratch.send_f32.iter().map(|&x| x as f64));
+            scratch.recv_bridge.resize((lo.recv_count + hi.recv_count) * FORWARD_PACK_SIZE, 0.0);
+            comm.sendrecv_f64_into(lo.to_proc, &scratch.send_bridge, lo.from_proc, &mut scratch.recv_bridge);
+
+            scratch.recv_f32.clear();
+            scratch.recv_f32.extend(scratch.recv_bridge.iter().map(|&x| x as f32));
+
+            if extra > 0 {
+                scratch.send_extra.clear();
+                scratch.send_extra.reserve((lo.send_indices.len() + hi.send_indices.len()) * extra);
+                pack_forward_extra_into(lo, &mut scratch.send_extra, registry);
+                pack_forward_extra_into(hi, &mut scratch.send_extra, registry);
+                scratch.recv_extra.resize((lo.recv_count + hi.recv_count) * extra, 0.0);
+                comm.sendrecv_f64_into(lo.to_proc, &scratch.send_extra, lo.from_proc, &mut scratch.recv_extra);
+            } else {
+                scratch.recv_extra.clear();
+            }
+
+            let lo_base = lo.recv_count * FORWARD_PACK_SIZE;
+            let lo_extra = lo.recv_count * extra;
+            unpack_forward_f32(&scratch.recv_f32[..lo_base], &scratch.recv_extra[..lo_extra], atoms, registry, lo.recv_start, lo.recv_count, extra);
+            unpack_forward_f32(&scratch.recv_f32[lo_base..], &scratch.recv_extra[lo_extra..], atoms, registry, hi.recv_start, hi.recv_count, extra);
+
+            r = end;
             continue;
         }
 
-        let recv_base_len = if swap.from_proc != -1 { swap.recv_count * FORWARD_PACK_SIZE } else { 0 };
-        scratch.send_bridge.clear();
-        scratch.send_bridge.extend(scratch.send_f32.iter().map(|&x| x as f64));
-        scratch.recv_bridge.resize(recv_base_len, 0.0);
-        comm.sendrecv_batch_f64_into(&mut [SendRecvOp {
-            dest: swap.to_proc,
-            send_buf: &scratch.send_bridge,
-            source: swap.from_proc,
-            recv_buf: &mut scratch.recv_bridge,
-        }]);
+        for (idx, swap) in swaps[r..end].iter().enumerate() {
+            let idx = r + idx;
+            let scratch = &mut pool[idx];
+            scratch.send_f32.clear();
+            scratch.send_f32.reserve(swap.send_indices.len() * FORWARD_PACK_SIZE);
+            pack_forward_base_f32_into(swap, &mut scratch.send_f32, atoms);
 
-        if extra > 0 {
-            let recv_extra_len = if swap.from_proc != -1 { swap.recv_count * extra } else { 0 };
-            scratch.recv_extra.resize(recv_extra_len, 0.0);
+            scratch.send_extra.clear();
+            if extra > 0 {
+                scratch.send_extra.reserve(swap.send_indices.len() * extra);
+                pack_forward_extra_into(swap, &mut scratch.send_extra, registry);
+            }
+
+            if swap.to_proc == rank {
+                unpack_forward_f32(&scratch.send_f32, &scratch.send_extra, atoms, registry, swap.recv_start, swap.recv_count, extra);
+                continue;
+            }
+
+            let recv_base_len = if swap.from_proc != -1 { swap.recv_count * FORWARD_PACK_SIZE } else { 0 };
+            scratch.send_bridge.clear();
+            scratch.send_bridge.extend(scratch.send_f32.iter().map(|&x| x as f64));
+            scratch.recv_bridge.resize(recv_base_len, 0.0);
             comm.sendrecv_batch_f64_into(&mut [SendRecvOp {
                 dest: swap.to_proc,
-                send_buf: &scratch.send_extra,
+                send_buf: &scratch.send_bridge,
                 source: swap.from_proc,
-                recv_buf: &mut scratch.recv_extra,
+                recv_buf: &mut scratch.recv_bridge,
             }]);
-        } else {
-            scratch.recv_extra.clear();
-        }
 
-        if swap.from_proc != -1 {
-            scratch.recv_f32.clear();
-            scratch.recv_f32.extend(scratch.recv_bridge.iter().map(|&x| x as f32));
-            unpack_forward_f32(&scratch.recv_f32, &scratch.recv_extra, atoms, registry, swap.recv_start, swap.recv_count, extra);
+            if extra > 0 {
+                let recv_extra_len = if swap.from_proc != -1 { swap.recv_count * extra } else { 0 };
+                scratch.recv_extra.resize(recv_extra_len, 0.0);
+                comm.sendrecv_batch_f64_into(&mut [SendRecvOp {
+                    dest: swap.to_proc,
+                    send_buf: &scratch.send_extra,
+                    source: swap.from_proc,
+                    recv_buf: &mut scratch.recv_extra,
+                }]);
+            } else {
+                scratch.recv_extra.clear();
+            }
+
+            if swap.from_proc != -1 {
+                scratch.recv_f32.clear();
+                scratch.recv_f32.extend(scratch.recv_bridge.iter().map(|&x| x as f32));
+                unpack_forward_f32(&scratch.recv_f32, &scratch.recv_extra, atoms, registry, swap.recv_start, swap.recv_count, extra);
+            }
         }
+        r = end;
     }
 }
 
@@ -1258,8 +1303,19 @@ pub fn reverse_send_force(
     registry: Res<AtomDataRegistry>,
     mut buffers: ResMut<CommBuffers>,
 ) {
-    let rank = comm.rank();
     let mut pool = std::mem::take(&mut buffers.reverse_scratch);
+    reverse_send_force_impl(&**comm, &topo, &mut atoms, &registry, &mut pool);
+    buffers.reverse_scratch = pool;
+}
+
+fn reverse_send_force_impl(
+    comm: &dyn CommBackend,
+    topo: &CommTopology,
+    atoms: &mut Atom,
+    registry: &AtomDataRegistry,
+    pool: &mut Vec<SwapScratch>,
+) {
+    let rank = comm.rank();
 
     // Per-atom stride: force×3 + registry reverse fields. The owner of each
     // returned force is *not* transmitted: ghosts were built from `swap.send_indices`
@@ -1290,15 +1346,15 @@ pub fn reverse_send_force(
                 let scratch = &mut pool[start];
                 scratch.send.clear();
                 scratch.send.reserve((lo.recv_count + hi.recv_count) * per_atom);
-                pack_reverse_into(lo, &mut scratch.send, &atoms, &registry);
-                pack_reverse_into(hi, &mut scratch.send, &atoms, &registry);
+                pack_reverse_into(lo, &mut scratch.send, atoms, registry);
+                pack_reverse_into(hi, &mut scratch.send, atoms, registry);
                 let recv_len = (lo.send_indices.len() + hi.send_indices.len()) * per_atom;
                 scratch.recv.resize(recv_len, 0.0);
                 comm.sendrecv_f64_into(lo.from_proc, &scratch.send, lo.to_proc, &mut scratch.recv);
             }
             let lo_split = lo.send_indices.len() * per_atom;
-            reverse_accumulate(lo, &pool[start].recv[..lo_split], &mut atoms, &registry, per_atom);
-            reverse_accumulate(hi, &pool[start].recv[lo_split..], &mut atoms, &registry, per_atom);
+            reverse_accumulate(lo, &pool[start].recv[..lo_split], atoms, registry, per_atom);
+            reverse_accumulate(hi, &pool[start].recv[lo_split..], atoms, registry, per_atom);
             end = start;
             continue;
         }
@@ -1309,13 +1365,13 @@ pub fn reverse_send_force(
             let round = &mut pool[start..end];
             let (first, rest) = round.split_first_mut().unwrap();
             let mut ops: Vec<SendRecvOp> = Vec::with_capacity(2);
-            if let Some(op) = reverse_prepare_swap(&swaps[start], first, &mut atoms, &registry, rank, per_atom) {
+            if let Some(op) = reverse_prepare_swap(&swaps[start], first, atoms, registry, rank, per_atom) {
                 ops.push(op);
                 jobs[njobs] = start;
                 njobs += 1;
             }
             if end > start + 1 {
-                if let Some(op) = reverse_prepare_swap(&swaps[start + 1], &mut rest[0], &mut atoms, &registry, rank, per_atom) {
+                if let Some(op) = reverse_prepare_swap(&swaps[start + 1], &mut rest[0], atoms, registry, rank, per_atom) {
                     ops.push(op);
                     jobs[njobs] = start + 1;
                     njobs += 1;
@@ -1330,16 +1386,44 @@ pub fn reverse_send_force(
         for &j in &jobs[..njobs] {
             let swap = &swaps[j];
             if swap.to_proc != -1 {
-                reverse_accumulate(swap, &pool[j].recv, &mut atoms, &registry, per_atom);
+                reverse_accumulate(swap, &pool[j].recv, atoms, registry, per_atom);
             }
         }
         end = start;
     }
 
-    buffers.reverse_scratch = pool;
 }
 
 // ── Exchange (MPI only) ──────────────────────────────────────────────────────
+
+fn exchange_same_neighbor(
+    comm: &dyn CommBackend,
+    peer: i32,
+    atoms: &mut Atom,
+    registry: &AtomDataRegistry,
+    lo_buf: &[f64],
+    lo_count: f64,
+    hi_buf: &[f64],
+    hi_count: f64,
+    aggregate: &mut Vec<f64>,
+    recv_buff: &mut Vec<f64>,
+) {
+    let send_meta = [lo_count, lo_buf.len() as f64, hi_count, hi_buf.len() as f64];
+    let mut recv_meta = [0.0f64; 4];
+    comm.sendrecv_f64_into(peer, &send_meta, peer, &mut recv_meta);
+
+    aggregate.clear();
+    aggregate.reserve(lo_buf.len() + hi_buf.len());
+    aggregate.extend_from_slice(lo_buf);
+    aggregate.extend_from_slice(hi_buf);
+
+    let recv_lo_len = recv_meta[1] as usize;
+    let recv_hi_len = recv_meta[3] as usize;
+    recv_buff.resize(recv_lo_len + recv_hi_len, 0.0);
+    comm.sendrecv_f64_into(peer, aggregate, peer, recv_buff);
+    unpack_exchanged(atoms, registry, &recv_buff[..recv_lo_len], recv_meta[0] as usize);
+    unpack_exchanged(atoms, registry, &recv_buff[recv_lo_len..], recv_meta[2] as usize);
+}
 
 #[cfg(feature = "mpi_backend")]
 /// Exchange (migrate) atoms that have crossed a sub-domain boundary to their new
@@ -1357,9 +1441,10 @@ pub fn exchange(
 ) {
     let decomp = comm.processor_decomposition();
 
-    // Reuse persistent exchange buffers (only need 2: lo and hi per dimension)
+    // Reuse persistent exchange buffers: lo, hi, and a same-neighbor aggregate
+    // payload scratch for the periodic two-rank case.
     let mut atoms_buff = std::mem::take(&mut buffers.exchange_buffs);
-    atoms_buff.resize_with(2, Vec::new);
+    atoms_buff.resize_with(3, Vec::new);
     // Reuse the border recv scratch (exchange runs before borders on a rebuild, so
     // they never overlap) for the probe-free count-first receive.
     let mut recv_buff = std::mem::take(&mut buffers.border_recv_buff);
@@ -1451,6 +1536,14 @@ pub fn exchange(
         // probe-free `_into` receive can size its buffer exactly. The explicit
         // payload length (not a per-atom stride) handles variable-length registry
         // data (e.g. tangential contact history).
+
+        // Periodic two-rank decompositions have the same neighbor on both
+        // faces. Send [lo | hi] in one meta/payload pair instead of two pairs.
+        if lo_proc != -1 && lo_proc == hi_proc {
+            let (lo_hi, aggregate) = atoms_buff.split_at_mut(2);
+            exchange_same_neighbor(&**comm, lo_proc, &mut atoms, &registry, &lo_hi[0], lo_count, &lo_hi[1], hi_count, &mut aggregate[0], &mut recv_buff);
+            continue;
+        }
 
         // Send lo, receive from hi
         if lo_proc != -1 && hi_proc != -1 {
@@ -1572,6 +1665,54 @@ pub fn exchange(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[derive(Default)]
+    struct CountingComm {
+        sendrecv_into_calls: AtomicUsize,
+        batch_calls: AtomicUsize,
+    }
+
+    impl CountingComm {
+        fn sendrecv_into_calls(&self) -> usize {
+            self.sendrecv_into_calls.load(Ordering::SeqCst)
+        }
+    }
+
+    impl CommBackend for CountingComm {
+        fn rank(&self) -> i32 { 0 }
+        fn size(&self) -> i32 { 2 }
+        fn processor_decomposition(&self) -> [i32; 3] { [2, 1, 1] }
+        fn processor_position(&self) -> [i32; 3] { [0, 0, 0] }
+        fn set_processor_grid(&mut self, _decomp: [i32; 3], _position: [i32; 3]) {}
+        fn all_reduce_sum_f64(&self, local: f64) -> f64 { local }
+        fn all_reduce_min_f64(&self, local: f64) -> f64 { local }
+        fn barrier(&self) {}
+        fn send_f64(&self, _dest: i32, _buf: &[f64]) {
+            unreachable!("CountingComm only supports sendrecv in comm aggregation tests");
+        }
+        fn recv_f64(&self, _source: i32) -> Vec<f64> {
+            unreachable!("CountingComm only supports sendrecv in comm aggregation tests");
+        }
+        fn recv_f64_any(&self) -> Vec<f64> {
+            unreachable!("CountingComm only supports sendrecv in comm aggregation tests");
+        }
+        fn sendrecv_f64(&self, _dest: i32, _send_buf: &[f64], _source: i32) -> Vec<f64> {
+            unreachable!("CountingComm only supports sendrecv_f64_into in comm aggregation tests");
+        }
+        fn sendrecv_f64_into(&self, _dest: i32, send_buf: &[f64], _source: i32, recv_buf: &mut [f64]) {
+            self.sendrecv_into_calls.fetch_add(1, Ordering::SeqCst);
+            assert_eq!(send_buf.len(), recv_buf.len());
+            recv_buf.copy_from_slice(send_buf);
+        }
+        fn sendrecv_batch_f64_into(&self, ops: &mut [SendRecvOp<'_>]) {
+            self.batch_calls.fetch_add(1, Ordering::SeqCst);
+            for op in ops {
+                assert_eq!(op.send_buf.len(), op.recv_buf.len());
+                op.recv_buf.copy_from_slice(op.send_buf);
+            }
+        }
+    }
 
     #[test]
     fn pos_to_rank_basic() {
@@ -1742,6 +1883,103 @@ mod tests {
         assert_eq!(swap.recv_count, 5);
         assert_eq!(swap.to_proc, 1);
         assert_eq!(swap.from_proc, 2);
+    }
+
+    fn same_neighbor_round_fixture() -> (Atom, CommTopology, AtomDataRegistry) {
+        let mut atoms = Atom::new();
+        atoms.push_test_atom(0, [1.0, 0.0, 0.0], 0.5, 1.0);
+        atoms.push_test_atom(1, [2.0, 0.0, 0.0], 0.5, 1.0);
+        atoms.push_test_atom(2, [0.0, 0.0, 0.0], 0.5, 1.0);
+        atoms.push_test_atom(3, [0.0, 0.0, 0.0], 0.5, 1.0);
+        atoms.vel[0] = [0.1, 0.2, 0.3];
+        atoms.vel[1] = [0.4, 0.5, 0.6];
+        atoms.nlocal = 2;
+        atoms.nghost = 2;
+        atoms.is_ghost[2] = true;
+        atoms.is_ghost[3] = true;
+
+        let topo = CommTopology {
+            swap_directions: [[1, -1, -1], [1, -1, -1]],
+            periodic_swap: [[0.0; 3], [0.0; 3]],
+            swap_data: vec![
+                SwapData {
+                    send_indices: vec![0],
+                    recv_start: 2,
+                    recv_count: 1,
+                    to_proc: 1,
+                    from_proc: 1,
+                    periodic_offset: [10.0, 0.0, 0.0],
+                    vel_offset: [0.0; 3],
+                },
+                SwapData {
+                    send_indices: vec![1],
+                    recv_start: 3,
+                    recv_count: 1,
+                    to_proc: 1,
+                    from_proc: 1,
+                    periodic_offset: [20.0, 0.0, 0.0],
+                    vel_offset: [0.0; 3],
+                },
+            ],
+            maxneed: [1, 0, 0],
+        };
+
+        (atoms, topo, AtomDataRegistry::new())
+    }
+
+    #[test]
+    fn forward_comm_aggregates_same_neighbor_round() {
+        let (mut atoms, topo, registry) = same_neighbor_round_fixture();
+        let comm = CountingComm::default();
+        let mut pool = Vec::new();
+
+        forward_comm(&mut atoms, &registry, &topo, &comm, &mut pool);
+
+        assert_eq!(comm.sendrecv_into_calls(), 1, "two same-neighbor swaps use one message");
+        assert_eq!(atoms.pos[2], [11.0 as Real, 0.0, 0.0]);
+        assert_eq!(atoms.pos[3], [22.0 as Real, 0.0, 0.0]);
+        assert_eq!(atoms.vel[2], [0.1 as Real, 0.2 as Real, 0.3 as Real]);
+        assert_eq!(atoms.vel[3], [0.4 as Real, 0.5 as Real, 0.6 as Real]);
+    }
+
+    #[test]
+    fn reverse_comm_aggregates_same_neighbor_round() {
+        let (mut atoms, topo, registry) = same_neighbor_round_fixture();
+        atoms.force[2] = [1.0 as Accum, 2.0 as Accum, 3.0 as Accum];
+        atoms.force[3] = [4.0 as Accum, 5.0 as Accum, 6.0 as Accum];
+        let comm = CountingComm::default();
+        let mut pool = Vec::new();
+
+        reverse_send_force_impl(&comm, &topo, &mut atoms, &registry, &mut pool);
+
+        assert_eq!(comm.sendrecv_into_calls(), 1, "two same-neighbor reverse swaps use one message");
+        assert_eq!(atoms.force[0], [1.0 as Accum, 2.0 as Accum, 3.0 as Accum]);
+        assert_eq!(atoms.force[1], [4.0 as Accum, 5.0 as Accum, 6.0 as Accum]);
+    }
+
+    #[test]
+    fn exchange_aggregates_same_neighbor_meta_and_payload() {
+        let registry = AtomDataRegistry::new();
+        let mut source = Atom::new();
+        source.push_test_atom(10, [0.1, 0.0, 0.0], 0.5, 1.0);
+        source.push_test_atom(20, [0.9, 0.0, 0.0], 0.5, 1.0);
+
+        let mut lo = Vec::new();
+        let mut hi = Vec::new();
+        source.pack_exchange(0, &mut lo);
+        registry.pack_all(0, &mut lo);
+        source.pack_exchange(1, &mut hi);
+        registry.pack_all(1, &mut hi);
+
+        let mut atoms = Atom::new();
+        let comm = CountingComm::default();
+        let mut aggregate = Vec::new();
+        let mut recv = Vec::new();
+        exchange_same_neighbor(&comm, 1, &mut atoms, &registry, &lo, 1.0, &hi, 1.0, &mut aggregate, &mut recv);
+
+        assert_eq!(comm.sendrecv_into_calls(), 2, "same-neighbor exchange uses one meta message and one payload message");
+        assert_eq!(atoms.len(), 2);
+        assert_eq!(atoms.tag, vec![10, 20], "lo payload is unpacked before hi payload, matching the old path");
     }
 
     /// Build a 2-local + 1-ghost atom set and a single self-send periodic swap

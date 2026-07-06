@@ -216,6 +216,11 @@ impl fmt::Display for DeformConfigError {
 
 impl std::error::Error for DeformConfigError {}
 
+fn exit_deform_error(err: DeformConfigError) -> ! {
+    eprintln!("ERROR: {err}");
+    std::process::exit(1);
+}
+
 /// Per-axis deformation state.
 #[derive(Clone, Debug)]
 pub struct AxisDeform {
@@ -411,6 +416,60 @@ fn validate_deform_config(
     Ok((axes, shear_xy_rate))
 }
 
+fn next_axis_bounds(
+    axis: &AxisDeform,
+    axis_name: &str,
+    dt: f64,
+    step: usize,
+    total_steps: usize,
+) -> Result<(f64, f64), DeformConfigError> {
+    let lo_0 = axis.lo_0;
+    let hi_0 = axis.hi_0;
+    let l0 = hi_0 - lo_0;
+
+    let (new_lo, new_hi) = match &axis.style {
+        DeformStyle::Erate { rate } => {
+            // L(t) = L0 * (1 + rate * dt * step)
+            // Symmetric expansion/contraction about center
+            let scale = 1.0 + rate * dt * step as f64;
+            let new_l = l0 * scale;
+            let center = (lo_0 + hi_0) * 0.5;
+            (center - new_l * 0.5, center + new_l * 0.5)
+        }
+        DeformStyle::Vel { velocity } => {
+            // L(t) = L0 + velocity * dt * step
+            // Symmetric: each face moves by velocity/2 * dt * step
+            let delta = velocity * dt * step as f64;
+            let new_l = l0 + delta;
+            let center = (lo_0 + hi_0) * 0.5;
+            (center - new_l * 0.5, center + new_l * 0.5)
+        }
+        DeformStyle::Final {
+            target_lo,
+            target_hi,
+        } => {
+            // Linear interpolation from initial to target
+            let frac = if total_steps > 0 {
+                (step as f64) / (total_steps as f64)
+            } else {
+                1.0
+            };
+            let frac = frac.min(1.0);
+            let new_lo = lo_0 + (target_lo - lo_0) * frac;
+            let new_hi = hi_0 + (target_hi - hi_0) * frac;
+            (new_lo, new_hi)
+        }
+    };
+
+    if new_hi - new_lo <= 0.0 {
+        return Err(DeformConfigError::new(format!(
+            "[deform] {axis_name}: box would collapse at step {step} (lo={new_lo}, hi={new_hi}); reduce compression rate/velocity or choose final bounds with hi > lo"
+        )));
+    }
+
+    Ok((new_lo, new_hi))
+}
+
 // ── Setup system ────────────────────────────────────────────────────────────
 
 /// Re-read deformation config from stage overrides and initialize state.
@@ -429,10 +488,8 @@ fn setup_deform(
     let config: DeformConfig = stage_overrides.section("deform");
 
     // Parse axis definitions fresh from this stage's config.
-    let (axes, shear_xy_rate) = validate_deform_config(&config, &domain).unwrap_or_else(|err| {
-        eprintln!("ERROR: {err}");
-        std::process::exit(1);
-    });
+    let (axes, shear_xy_rate) =
+        validate_deform_config(&config, &domain).unwrap_or_else(|err| exit_deform_error(err));
     state.axes = axes;
     state.shear_xy_rate = shear_xy_rate;
     state.shear_initialized = false;
@@ -497,10 +554,8 @@ fn setup_deform(
 /// 3. Update domain resource (bounds, size, volume, sub-domain).
 /// 4. Signal neighbor rebuild needed by clearing last-build positions.
 ///
-/// # Panics
-///
-/// Panics if any axis collapses to zero or negative size (e.g., excessive
-/// compression rate).
+/// If any axis collapses to zero or negative size (e.g., excessive compression
+/// rate), the user receives a clear error and the process exits without a panic.
 fn apply_deform(
     mut atoms: ResMut<Atom>,
     mut domain: ResMut<Domain>,
@@ -544,54 +599,10 @@ fn apply_deform(
         let old_hi = domain.boundaries_high[dim];
         let old_size = old_hi - old_lo;
 
-        let lo_0 = axis.lo_0;
-        let hi_0 = axis.hi_0;
-        let l0 = hi_0 - lo_0;
-
-        // Compute new bounds based on style
-        let (new_lo, new_hi) = match &axis.style {
-            DeformStyle::Erate { rate } => {
-                // L(t) = L0 * (1 + rate * dt * step)
-                // Symmetric expansion/contraction about center
-                let scale = 1.0 + rate * dt * step as f64;
-                let new_l = l0 * scale;
-                let center = (lo_0 + hi_0) * 0.5;
-                (center - new_l * 0.5, center + new_l * 0.5)
-            }
-            DeformStyle::Vel { velocity } => {
-                // L(t) = L0 + velocity * dt * step
-                // Symmetric: each face moves by velocity/2 * dt * step
-                let delta = velocity * dt * step as f64;
-                let new_l = l0 + delta;
-                let center = (lo_0 + hi_0) * 0.5;
-                (center - new_l * 0.5, center + new_l * 0.5)
-            }
-            DeformStyle::Final {
-                target_lo,
-                target_hi,
-            } => {
-                // Linear interpolation from initial to target
-                let frac = if total_steps > 0 {
-                    (step as f64) / (total_steps as f64)
-                } else {
-                    1.0
-                };
-                let frac = frac.min(1.0);
-                let new_lo = lo_0 + (target_lo - lo_0) * frac;
-                let new_hi = hi_0 + (target_hi - hi_0) * frac;
-                (new_lo, new_hi)
-            }
-        };
+        let (new_lo, new_hi) = next_axis_bounds(axis, AXIS_NAMES[dim], dt, step, total_steps)
+            .unwrap_or_else(|err| exit_deform_error(err));
 
         let new_size = new_hi - new_lo;
-
-        // Sanity: don't allow box to collapse to zero or negative
-        if new_size <= 0.0 {
-            panic!(
-                "[deform] axis {} collapsed at step {}: new_lo={}, new_hi={}",
-                AXIS_NAMES[dim], step, new_lo, new_hi
-            );
-        }
 
         // Remap atom positions proportionally
         if state.remap && old_size > 0.0 {
@@ -1201,6 +1212,22 @@ mod tests {
     }
 
     #[test]
+    fn xy_erate_missing_rate_reports_validation_error() {
+        let def = AxisDeformDef {
+            style: "erate".to_string(),
+            rate: None,
+            velocity: None,
+            lo: None,
+            hi: None,
+        };
+        let err = parse_shear_rate(&Some(def)).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "[deform] xy: style 'erate' requires a 'rate' field (shear-strain rate)"
+        );
+    }
+
+    #[test]
     fn xy_non_periodic_boundaries_report_validation_error() {
         let config = DeformConfig {
             xy: Some(AxisDeformDef {
@@ -1223,6 +1250,51 @@ mod tests {
         assert_eq!(
             err.to_string(),
             "[deform] xy shear requires periodic x and y boundaries; got x=Periodic, y=Fixed"
+        );
+    }
+
+    #[test]
+    fn erate_box_collapse_reports_validation_error() {
+        let axis = AxisDeform {
+            style: DeformStyle::Erate { rate: -1.0 },
+            lo_0: 0.0,
+            hi_0: 1.0,
+        };
+        let err = next_axis_bounds(&axis, "z", 1.0, 1, 1).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "[deform] z: box would collapse at step 1 (lo=0.5, hi=0.5); reduce compression rate/velocity or choose final bounds with hi > lo"
+        );
+    }
+
+    #[test]
+    fn vel_box_collapse_reports_validation_error() {
+        let axis = AxisDeform {
+            style: DeformStyle::Vel { velocity: -1.0 },
+            lo_0: 0.0,
+            hi_0: 1.0,
+        };
+        let err = next_axis_bounds(&axis, "x", 1.0, 1, 1).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "[deform] x: box would collapse at step 1 (lo=0.5, hi=0.5); reduce compression rate/velocity or choose final bounds with hi > lo"
+        );
+    }
+
+    #[test]
+    fn final_box_collapse_reports_validation_error() {
+        let axis = AxisDeform {
+            style: DeformStyle::Final {
+                target_lo: 1.0,
+                target_hi: 0.0,
+            },
+            lo_0: 0.0,
+            hi_0: 1.0,
+        };
+        let err = next_axis_bounds(&axis, "y", 1.0, 1, 1).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "[deform] y: box would collapse at step 1 (lo=1, hi=0); reduce compression rate/velocity or choose final bounds with hi > lo"
         );
     }
 }

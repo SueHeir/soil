@@ -13,7 +13,7 @@
 //! Neighbor lists are rebuilt based on configurable criteria:
 //!
 //! - **Displacement-based** (`every = 0`): rebuilds when any atom moves more than
-//!   `(skin_fraction - 1) * min_cutoff_radius` since the last build.
+//!   `(skin_fraction - 1) * cutoff_radius_i` since the last build.
 //! - **Periodic** (`every = N`): rebuilds every N steps.
 //! - **Hybrid** (`every = N, check = true`): rebuilds every N steps OR on displacement,
 //!   whichever comes first (like LAMMPS `neigh_modify every N check yes`).
@@ -111,6 +111,9 @@ pub struct Neighbor {
     pub bin_count: [i32; 3],
     /// Saved atom positions from the last neighbor build, for displacement checking.
     pub last_build_pos: Vec<[f64; 3]>,
+    /// Saved local atom cutoff radii from the last neighbor build. Displacement
+    /// budgets are tied to the radius used to build the current list.
+    pub last_build_radius: Vec<f64>,
     /// Number of timesteps since the last neighbor list rebuild.
     pub steps_since_build: usize,
     /// Total atom count (local + ghost) at the last neighbor build.
@@ -142,7 +145,7 @@ pub struct Neighbor {
     /// Communication cutoff for ghost atoms: `pair_cutoff + 2 * displacement_buffer`.
     pub ghost_cutoff: f64,
     /// Smallest cutoff radius among local atoms, cached at rebuild time for
-    /// displacement threshold computation.
+    /// diagnostics and uniform-cutoff fast-path setup.
     pub cached_min_skin: f64,
     /// Reorder atoms by spatial bin every N steps for cache locality (0 = disabled).
     pub sort_every: usize,
@@ -171,6 +174,9 @@ pub struct Neighbor {
     pub sort_perm: Vec<usize>,
     /// Scratch positions used while building the spatial-sort permutation.
     pub sort_pos_scratch: Vec<[f64; 3]>,
+    /// Scratch cutoff radii used while applying the same spatial-sort permutation
+    /// to the saved rebuild state.
+    pub sort_radius_scratch: Vec<f64>,
     /// Cycle-visited scratch reused while applying the spatial-sort permutation
     /// to `Atom` fields and all registered `AtomData` extension columns.
     pub sort_permutation_visited: Vec<bool>,
@@ -215,6 +221,7 @@ impl Neighbor {
             bin_size: [1.0; 3],
             bin_count: [1, 1, 1],
             last_build_pos: Vec::new(),
+            last_build_radius: Vec::new(),
             steps_since_build: 0,
             last_build_total: 0,
             pbc_box: [0.0; 3],
@@ -241,6 +248,7 @@ impl Neighbor {
             sort_counts: Vec::new(),
             sort_perm: Vec::new(),
             sort_pos_scratch: Vec::new(),
+            sort_radius_scratch: Vec::new(),
             sort_permutation_visited: Vec::new(),
             sorted_local_cell: Vec::new(),
             local_cells_valid: false,
@@ -379,17 +387,11 @@ pub fn neighbor_setup(
     // Add displacement buffer to ghost_cutoff so atoms don't drift in/out of the
     // ghost zone between neighbor rebuilds. Without this padding, ghost count
     // fluctuates every step, forcing unnecessary neighbor rebuilds.
-    // Max per-atom displacement before rebuild = (skin_fraction - 1) * min_skin.
-    // Two atoms can each move this far, so buffer = 2 * displacement.
-    let local_min_skin = atoms
-        .cutoff_radius
-        .iter()
-        .map(|&c| c as f64)
-        .fold(f64::MAX, f64::min);
-    let min_skin = comm.all_reduce_min_f64(local_min_skin);
-    // Guard against f64::MAX when cutoff_radius is empty (rate-based insertion)
-    let displacement_buffer = if min_skin < f64::MAX * 0.5 {
-        (neighbor.skin_fraction - 1.0) * min_skin
+    // Max per-atom displacement before rebuild = (skin_fraction - 1) * radius_i.
+    // Two largest atoms can each move by the largest budget, so pad the globally
+    // largest skinned pair cutoff by 2 * max_budget.
+    let displacement_buffer = if max_skin > 0.0 {
+        (neighbor.skin_fraction - 1.0) * max_skin
     } else {
         0.0
     };

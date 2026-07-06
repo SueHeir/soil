@@ -93,6 +93,11 @@ path = "examples/neighbor_hot_path/main.rs"
 required-features = ["precision-double"]
 
 [[example]]
+name = "polydisperse_neighbor_rebuild"
+path = "examples/polydisperse_neighbor_rebuild/main.rs"
+required-features = ["mpi_backend", "precision-double"]
+
+[[example]]
 name = "orbit_nbody_gravity"
 path = "examples/orbit_nbody_gravity/main.rs"
 required-features = ["precision-double"]

@@ -1,0 +1,23 @@
+[comm]
+processors_x = 4
+processors_y = 1
+processors_z = 1
+
+[domain]
+x_low = 0.0
+x_high = 11.2
+y_low = 0.0
+y_high = 5.6
+z_low = 0.0
+z_high = 4.2
+boundary_x = "fixed"
+boundary_y = "fixed"
+boundary_z = "fixed"
+
+[neighbor]
+skin_fraction = 1.40
+bin_size = 1.4
+every = 0
+check = true
+sort_every = 0
+newton = true

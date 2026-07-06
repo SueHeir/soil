@@ -127,9 +127,9 @@ its position; for a triclinic (tilted) box, ownership is decided in fractional
 (lamda) coordinates, where the tilted box maps to the unit cube.
 
 Two boundary modes have single-process restrictions worth knowing: **shrink-wrap**
-boundaries (the box auto-sizes to the atoms) panic at startup under MPI, and
-`soil_deform` likewise assumes a single rank. Both would need global reductions
-and per-rank subdomain updates to go multi-rank.
+boundaries (the box auto-sizes to the atoms) fail validation at startup under
+MPI, and `soil_deform` likewise assumes a single rank. Both would need global
+reductions and per-rank subdomain updates to go multi-rank.
 
 ## Atom migration (Exchange)
 

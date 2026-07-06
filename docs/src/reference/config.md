@@ -60,7 +60,8 @@ boundary_y = "periodic"
 boundary_z = "fixed"
 ```
 
-**Shrink-wrap is single-process only** — combining it with MPI panics at startup.
+**Shrink-wrap is single-process only** — combining it with MPI fails validation
+at startup and reports the active MPI rank count.
 The triclinic (tilted) box and its `xy` tilt are not set here; they are driven at
 runtime by `soil_deform`'s Lees–Edwards shear, which writes `domain.tilt`,
 `domain.triclinic`, and `domain.boundary_vel` (see

@@ -1,0 +1,48 @@
+# Same declarative pair-force virial case as cfg_n1, with two zero-work ranks.
+
+[run]
+steps = 1
+thermo = 1
+
+[comm]
+processors_x = 4
+processors_y = 1
+processors_z = 1
+
+[domain]
+x_low = 0.0
+x_high = 4.0
+y_low = 0.0
+y_high = 4.0
+z_low = 0.0
+z_high = 4.0
+boundary_x = "periodic"
+boundary_y = "periodic"
+boundary_z = "periodic"
+
+[thermo]
+columns = [
+  "step",
+  "virial_xx",
+  "virial_yy",
+  "virial_zz",
+  "virial_xy",
+  "virial_xz",
+  "virial_yz",
+]
+
+[[virial_case.pair]]
+dx = 1.0
+dy = 2.0
+dz = 3.0
+fx = 4.0
+fy = -5.0
+fz = 6.0
+
+[[virial_case.pair]]
+dx = -2.0
+dy = 1.0
+dz = 0.5
+fx = 3.0
+fy = 7.0
+fz = -11.0

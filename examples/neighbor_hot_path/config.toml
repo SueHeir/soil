@@ -1,0 +1,17 @@
+warmup = 8
+iterations = 40
+
+[[cases]]
+name = "uniform_18"
+layout = "uniform"
+ncell = 18
+spacing = 0.92
+radius = 0.50
+
+[[cases]]
+name = "polydisperse_18"
+layout = "polydisperse"
+ncell = 18
+spacing = 0.94
+radius = 0.50
+radius_jitter = 0.18

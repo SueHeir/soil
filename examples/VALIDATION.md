@@ -38,6 +38,14 @@ neighbor-list build phases on checked-in serial and MPI layouts.
 
 ![neighbor/comm profile](neighbor_comm_profile/plots/neighbor_comm_profile.png)
 
+## neighbor_hot_path
+
+Validation and microbenchmark for the neighbor distance kernel. Checked-in
+uniform and polydisperse layouts compare SIMD-requested neighbor pairs against
+the scalar pair set, then report per-build timing.
+
+![neighbor distance kernel validation](neighbor_hot_path/plots/neighbor_hot_path.png)
+
 ## tree_farfield_proof
 
 Octree near/far partition and far-field proof against brute-force references:

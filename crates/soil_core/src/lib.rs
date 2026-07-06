@@ -101,7 +101,7 @@ pub use atom::*;
 pub use bond::*;
 pub use comm::*;
 pub use domain::*;
-pub use group::{group_includes, Group, GroupDef, GroupPlugin, GroupRegistry};
+pub use group::{group_includes, Group, GroupDef, GroupLookupError, GroupPlugin, GroupRegistry};
 pub use input::{load_toml, print_banner, Config, Input, InputPlugin};
 pub use region::{Axis, Region, SurfaceResult};
 

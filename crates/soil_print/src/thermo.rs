@@ -152,6 +152,7 @@ pub fn setup_thermo(
     scheduler_manager: Res<SchedulerManager>,
     comm: Res<CommResource>,
     run_state: Res<RunState>,
+    groups: Res<GroupRegistry>,
     mut thermo: ResMut<Thermo>,
     mut virial: Option<ResMut<VirialStress>>,
 ) {
@@ -179,6 +180,12 @@ pub fn setup_thermo(
             .clone()
             .unwrap_or_else(default_columns);
         thermo.columns = col_names.iter().map(|s| parse_thermo_column(s)).collect();
+    }
+
+    for col in thermo.columns.iter() {
+        if let Some(ref gname) = col.group_name {
+            groups.validate_name(gname, &format!("thermo column '{}'", col.raw));
+        }
     }
 
     if comm.rank() == 0 {

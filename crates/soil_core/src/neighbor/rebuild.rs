@@ -10,11 +10,13 @@ use crate::{Atom, CommResource, CommState};
 pub(super) fn save_build_positions(atoms: &Atom, neighbor: &mut Neighbor) {
     let nlocal = atoms.nlocal as usize;
     neighbor.last_build_pos.resize(nlocal, [0.0; 3]);
+    neighbor.last_build_radius.resize(nlocal, 0.0);
     // atoms.pos is `Real` (f32 under mixed/single); snapshot is kept in f64 for the
     // displacement check, so widen on copy rather than bulk copy_from_slice.
     for i in 0..nlocal {
         let p = atoms.pos[i];
         neighbor.last_build_pos[i] = [p[0] as f64, p[1] as f64, p[2] as f64];
+        neighbor.last_build_radius[i] = atoms.cutoff_radius[i] as f64;
     }
     neighbor.last_build_total = atoms.len();
     neighbor.steps_since_build = 0;
@@ -34,15 +36,7 @@ pub(super) fn save_build_positions(atoms: &Atom, neighbor: &mut Neighbor) {
 
 /// Helper: check displacement threshold
 fn displacement_exceeded(atoms: &Atom, neighbor: &Neighbor) -> bool {
-    let min_r = neighbor.cached_min_skin;
-    // Per-atom displacement budget: the pair skin margin is
-    //   (skin_fraction - 1) * (r_i + r_j).
-    // Each atom's share is half:
-    //   (skin_fraction - 1) * (r_i + r_j) / 2.
-    // Using min_r as worst case for each radius:
-    //   threshold = (skin_fraction - 1) * min_r
-    let per_atom_skin = (neighbor.skin_fraction - 1.0) * min_r;
-    let threshold_sq = per_atom_skin * per_atom_skin;
+    let budget_fraction = (neighbor.skin_fraction - 1.0).max(0.0);
     // Minimum-image convention for periodic axes: when an atom wraps across a
     // periodic boundary, the raw displacement is ~box_size, but the physical
     // displacement is small. forward_comm recomputes per-atom periodic offsets
@@ -69,7 +63,12 @@ fn displacement_exceeded(atoms: &Atom, neighbor: &Neighbor) -> bool {
             dx -= bx * (dx * ibx).round();
             dy -= by * (dy * iby).round();
             dz -= bz * (dz * ibz).round();
-            if dx.mul_add(dx, dy.mul_add(dy, dz * dz)) > threshold_sq {
+            let radius = unsafe { *neighbor.last_build_radius.get_unchecked(idx) };
+            if (atoms.cutoff_radius[idx] as f64 - radius).abs() > 1e-15 {
+                return true;
+            }
+            let budget = budget_fraction * radius;
+            if dx.mul_add(dx, dy.mul_add(dy, dz * dz)) > budget * budget {
                 return true;
             }
         }
@@ -105,7 +104,12 @@ fn displacement_exceeded(atoms: &Atom, neighbor: &Neighbor) -> bool {
                 dz += bz;
             }
         }
-        if dx * dx + dy * dy + dz * dz > threshold_sq {
+        let radius = neighbor.last_build_radius[idx];
+        if (atoms.cutoff_radius[idx] as f64 - radius).abs() > 1e-15 {
+            return true;
+        }
+        let budget = budget_fraction * radius;
+        if dx * dx + dy * dy + dz * dz > budget * budget {
             return true;
         }
     }
@@ -117,7 +121,10 @@ fn displacement_exceeded(atoms: &Atom, neighbor: &Neighbor) -> bool {
 fn needs_rebuild(atoms: &Atom, neighbor: &Neighbor, comm_state: &CurrentState<CommState>) -> bool {
     let nlocal = atoms.nlocal as usize;
     // Always rebuild on first call or local atom count change
-    if neighbor.last_build_pos.len() != nlocal || nlocal == 0 {
+    if neighbor.last_build_pos.len() != nlocal
+        || neighbor.last_build_radius.len() != nlocal
+        || nlocal == 0
+    {
         return true;
     }
     // If state is FullRebuild, a full rebuild was requested (first step,
@@ -135,6 +142,65 @@ fn needs_rebuild(atoms: &Atom, neighbor: &Neighbor, comm_state: &CurrentState<Co
     } else {
         // Every N steps only (no displacement check)
         neighbor.steps_since_build >= neighbor.every
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Real;
+
+    fn atom_with_radii(radii: &[f64]) -> Atom {
+        let mut atoms = Atom::new();
+        for (i, &r) in radii.iter().enumerate() {
+            atoms.push_test_atom(i as u32, [i as f64, 0.0, 0.0], r, 1.0);
+        }
+        atoms.nlocal = radii.len() as u32;
+        atoms.natoms = radii.len() as u64;
+        atoms
+    }
+
+    #[test]
+    fn polydisperse_displacement_budget_is_per_atom_radius() {
+        let mut atoms = atom_with_radii(&[0.1, 1.0]);
+        let mut neighbor = Neighbor::new();
+        neighbor.skin_fraction = 1.5;
+        save_build_positions(&atoms, &mut neighbor);
+
+        atoms.pos[1][0] += 0.20 as Real;
+        assert!(
+            !displacement_exceeded(&atoms, &neighbor),
+            "large atom should not rebuild at the small atom's displacement budget"
+        );
+
+        atoms.pos[0][0] += 0.051 as Real;
+        assert!(
+            displacement_exceeded(&atoms, &neighbor),
+            "small atom should still rebuild when its own budget is exceeded"
+        );
+    }
+
+    #[test]
+    fn radius_change_forces_rebuild() {
+        let mut atoms = atom_with_radii(&[0.5]);
+        let mut neighbor = Neighbor::new();
+        neighbor.skin_fraction = 1.2;
+        save_build_positions(&atoms, &mut neighbor);
+
+        atoms.cutoff_radius[0] = 0.6 as Real;
+        assert!(displacement_exceeded(&atoms, &neighbor));
+    }
+
+    #[test]
+    fn rebuild_policy_keeps_large_atom_valid_without_early_rebuild() {
+        let mut atoms = atom_with_radii(&[0.1, 1.0]);
+        let mut neighbor = Neighbor::new();
+        neighbor.skin_fraction = 1.5;
+        save_build_positions(&atoms, &mut neighbor);
+        atoms.pos[1][0] += 0.20 as Real;
+
+        let state = CurrentState(CommState::CommunicateOnly);
+        assert!(!needs_rebuild(&atoms, &neighbor, &state));
     }
 }
 

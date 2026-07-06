@@ -30,6 +30,14 @@ owner subdomain.
 
 ![exchange multihop gate](exchange_multihop_gate/plots/exchange_multihop_gate.png)
 
+## polydisperse_neighbor_rebuild
+
+Mixed-radius neighbor-list validation against an independent brute-force pair
+set on 1, 2, and 4 MPI ranks. It checks that polydisperse SOIL neighbor lists
+keep every valid pair while allowing per-atom rebuild budgets.
+
+![polydisperse neighbor rebuild](polydisperse_neighbor_rebuild/plots/polydisperse_neighbor_rebuild.png)
+
 ## neighbor_comm_profile
 
 Performance harness that records timing, allocation, and communication counters

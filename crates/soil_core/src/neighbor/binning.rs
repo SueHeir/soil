@@ -293,6 +293,7 @@ pub fn sort_atoms_by_bin(
             let global_did_sort = comm.all_reduce_sum_f64(0.0);
             if global_did_sort > 0.0 {
                 neighbor.last_build_pos.clear();
+                neighbor.last_build_radius.clear();
                 comm_state.0 = CommState::FullRebuild;
             }
         }
@@ -336,6 +337,7 @@ pub fn sort_atoms_by_bin(
     let mut counts = std::mem::take(&mut neighbor.sort_counts);
     let mut perm = std::mem::take(&mut neighbor.sort_perm);
     let mut pos_scratch = std::mem::take(&mut neighbor.sort_pos_scratch);
+    let mut radius_scratch = std::mem::take(&mut neighbor.sort_radius_scratch);
     let mut sorted_local_cell = std::mem::take(&mut neighbor.sorted_local_cell);
     cell.clear();
     cell.resize(nlocal, 0u32);
@@ -385,11 +387,7 @@ pub fn sort_atoms_by_bin(
     neighbor.local_cells_valid = true;
 
     if !already_sorted {
-        atoms.apply_permutation_with_scratch(
-            &perm,
-            nlocal,
-            &mut neighbor.sort_permutation_visited,
-        );
+        atoms.apply_permutation_with_scratch(&perm, nlocal, &mut neighbor.sort_permutation_visited);
         registry.apply_permutation_all_with_scratch(
             &perm,
             nlocal,
@@ -403,6 +401,13 @@ pub fn sort_atoms_by_bin(
             pos_scratch.extend_from_slice(&neighbor.last_build_pos[..nlocal]);
             for (new_i, &old_i) in perm.iter().enumerate() {
                 neighbor.last_build_pos[new_i] = pos_scratch[old_i];
+            }
+        }
+        if neighbor.last_build_radius.len() >= nlocal {
+            radius_scratch.clear();
+            radius_scratch.extend_from_slice(&neighbor.last_build_radius[..nlocal]);
+            for (new_i, &old_i) in perm.iter().enumerate() {
+                neighbor.last_build_radius[new_i] = radius_scratch[old_i];
             }
         }
 
@@ -420,6 +425,7 @@ pub fn sort_atoms_by_bin(
     neighbor.sort_counts = counts;
     neighbor.sort_perm = perm;
     neighbor.sort_pos_scratch = pos_scratch;
+    neighbor.sort_radius_scratch = radius_scratch;
     neighbor.sorted_local_cell = sorted_local_cell;
 
     // After permutation, swap_data.send_indices are stale (they reference pre-sort
@@ -434,6 +440,7 @@ pub fn sort_atoms_by_bin(
         let global_did_sort = comm.all_reduce_sum_f64(local_did_sort);
         if global_did_sort > 0.0 {
             neighbor.last_build_pos.clear();
+            neighbor.last_build_radius.clear();
             comm_state.0 = CommState::FullRebuild;
         }
     }

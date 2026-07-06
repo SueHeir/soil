@@ -22,6 +22,14 @@ interaction-count scaling.
 
 ![tree far-field proof](tree_farfield_proof/plots/tree_farfield_proof.png)
 
+## orbit_nbody_gravity
+
+ORBIT octree gravity demonstration checked against the analytic two-body
+Kepler period, a max-energy-drift tolerance, and a theta `4.0` negative
+control.
+
+![ORBIT N-body gravity validation](orbit_nbody_gravity/plots/orbit_nbody_gravity.png)
+
 ## dsmc_thermal_relaxation
 
 Homogeneous Maxwell-molecule DSMC thermal-relaxation check against the BGK

@@ -50,13 +50,19 @@ restart-file layout. **Reordering, inserting, or removing a field is a format
 break:** old restart files and in-flight migration buffers will deserialize into
 the wrong columns. Treat the field list as a versioned wire format.
 
-For reference, the derive macro generates:
+For reference, the derive macro generates the full `AtomData` implementation:
 
-- `pack` / `unpack` — serialize **all** fields for atom migration.
+- `as_any` / `as_any_mut` — let the registry downcast back to your concrete
+  extension type.
+- `pack` / `unpack` — serialize **all** fields for atom migration and restart.
 - `truncate` / `swap_remove` — resize all field vectors together.
-- `apply_permutation` — reorder all field vectors by a permutation.
-- `pack_forward` / `unpack_forward` — communicate `#[forward]` fields (overwrite).
-- `pack_reverse` / `unpack_reverse` — communicate `#[reverse]` fields (accumulate).
+- `apply_permutation` / `apply_permutation_with_scratch` — reorder all field
+  vectors by a permutation, reusing caller-owned scratch when the substrate has
+  it.
+- `pack_forward` / `unpack_forward` / `forward_comm_size` — communicate
+  `#[forward]` fields (overwrite) and report their per-atom `f64` count.
+- `pack_reverse` / `unpack_reverse` / `reverse_comm_size` — communicate
+  `#[reverse]` fields (accumulate) and report their per-atom `f64` count.
 - `zero` — zero out `#[zero]` fields for `n` atoms.
 
 If you need an *irregular* layout that the derive can't express, implement the
@@ -71,6 +77,8 @@ trait by hand — see [Writing an AtomData Extension](../substrate/writing-atomd
 > generates no `new()` or `Default` — build the struct literal yourself.
 
 For the full semantics and invariants, see
-[The AtomData Contract](../substrate/atomdata-contract.md); for the peridynamics
-worked example (and a runnable non-DEM method) that proves the seam holds, see
+[The AtomData Contract](../substrate/atomdata-contract.md), which includes the
+repository `docs/SOIL_ATOMDATA_CONTRACT.md` source in the rendered book; for the
+peridynamics worked example (and a runnable non-DEM method) that exercises this
+contract, see
 [Does the Seam Hold? — A Peridynamics Worked Check](../substrate/peridynamics-check.md).

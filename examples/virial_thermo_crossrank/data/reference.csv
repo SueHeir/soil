@@ -1,0 +1,7 @@
+component,analytic
+virial_xx,-2.0
+virial_yy,-3.0
+virial_zz,12.5
+virial_xy,-19.0
+virial_xz,28.0
+virial_yz,1.0

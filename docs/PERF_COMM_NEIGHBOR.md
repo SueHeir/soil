@@ -1,10 +1,9 @@
 # Performance review — communication & neighboring
 
-Working list of candidate optimizations for `soil_core` ghost/halo comm
-(`comm.rs`), atom migration (`exchange`), and neighbor-list construction
-(`neighbor.rs`). Each item: location, current behavior, problem, proposed
-change, expected impact, and rough effort. Nothing here is applied yet — this
-is the evaluation pass.
+Working status list for `soil_core` ghost/halo comm (`comm.rs`), atom migration
+(`exchange`), and neighbor-list construction (`neighbor.rs`). Some items below
+are implemented; open items keep their original impact/effort estimates and
+describe the remaining work.
 
 The reproducible profiling harness for the next tuning pass lives in
 `examples/neighbor_comm_profile/`. It records timing, point-to-point message,
@@ -39,11 +38,14 @@ passed 9/9, and every final per-rank CSV from the branch matched the pre-change
 `origin/main` run exactly (`max|Δ|=0`) for both baseline and overlap modes.
 
 ### C2 — Fresh `Vec<usize>` allocated per swap in the rebuild · impact M-H · effort S
-`pack_border_atoms` allocates `packed_indices = Vec::new()` (`comm.rs:277`) every
-swap and moves it into `SwapData.send_indices`. That's 6+ heap allocations per
-full rebuild, growing from empty. Since `topo.swap_data` already persists across
-rebuilds, reuse the existing `send_indices` Vecs (clear + refill, keeping
-capacity) instead of `swap_data.clear()` + fresh Vecs at `comm.rs:494`.
+### ✅ DONE
+`borders` now refills each swap's `send_indices` in place across full rebuilds:
+it walks/extends the persistent `topo.swap_data`, temporarily takes the existing
+`send_indices` buffer, lets `pack_border_atoms` clear and refill it, then assigns
+the buffer back to the same `SwapData` entry. Stale swap entries are only
+truncated after the rebuild. This keeps the per-swap `Vec` capacities instead of
+freeing and regrowing the usual face-swap sendlists every rebuild
+(`comm.rs:1071-1074`, `comm.rs:1107-1121`, `comm.rs:1202-1217`).
 
 ### C3 — Dead per-atom branch in the forward-comm hot path · impact M · effort S
 ### ✅ DONE
@@ -151,11 +153,12 @@ recv-only branches (600 firings) is **byte-identical** to the pre-change baselin
 binary — no behavior change, transport only.
 
 ### C8 — `all_reduce_sum_f64` collective on every full rebuild · impact L-M · effort S
-`borders` calls `all_reduce_sum_f64` every rebuild (`comm.rs:468`) only to set
-`atoms.natoms` for reporting. A global collective is a synchronization point that
-scales poorly with rank count. `natoms` changes only on insertion/removal —
-recompute it lazily (when thermo/dump needs it) or only on exchange steps that
-actually moved atoms across ranks.
+### ✅ DONE
+`borders` no longer refreshes `atoms.natoms` with an `all_reduce_sum_f64` during
+every full ghost rebuild. The code documents `natoms` as reporting-only and
+leaves the global-count refresh to reporting paths that already run collectives
+on their own cadence, while `borders` only resets `nlocal`/`nghost`
+(`comm.rs:1044-1049`).
 
 ### C9 — Single-hop safety scan over all atoms every exchange · closed 2026-07-06
 `exchange` now keeps the post-condition check in release builds and turns a
@@ -192,51 +195,74 @@ transport in `grass_mpi`; only then can this become a bandwidth optimization.
 > Already in place (good): cell/bin list with precomputed stencil (O(N)), CSR
 > output, counting-sort binning, uniform-cutoff fast path, `mul_add` FMA in the
 > distance test, optional half list (`newton`), spatial atom sort, and
-> displacement-based rebuild triggering. The items below are the remaining edges.
+> displacement-based rebuild triggering. The items below separate closed
+> follow-up work from the still-open edges.
 
 ### N1 — `sort_atoms_by_bin` allocates + O(N log N) sorts every rebuild · impact H · effort M
-`neighbor.rs:733-747` builds a fresh `Vec<(u32,usize)>` and a fresh `perm` Vec,
-then `sort_unstable_by_key`, plus `last_build_pos.clone()` at `:759` — every
-full-rebuild step. The build right below already does an O(N) counting sort that
-produces the same bin order. Make the scratch Vecs persistent (`mem::take` like
-the other buffers) and replace the comparison sort with a counting sort.
+### ✅ DONE
+`sort_atoms_by_bin` now uses an O(N) stable counting sort by bin cell, with
+persistent scratch buffers on `Neighbor` (`sort_cell`, `sort_counts`,
+`sort_perm`, `sort_pos_scratch`, and `sort_radius_scratch`). It takes those
+buffers with `mem::take`, clears/resizes them, histograms cells, prefix-sums
+counts, scatters into `perm`, applies the permutation, and returns the scratch
+for reuse. There is no comparison-sort `Vec<(cell, index)>` rebuild path left
+(`neighbor.rs:204-216`; `neighbor/binning.rs:578-676`).
 
 ### N2 — Sort and build recompute the identical bin assignment · impact H · effort M
-`sort_atoms_by_bin` (`:733`) computes each local atom's cell, then
-`bin_neighbor_list` (`:837`) recomputes the cell for all atoms from scratch.
-Have the sort write local cells into the persistent `bin_atom_cell` buffer so the
-build only bins ghosts (`nlocal..total`). Roughly halves the per-atom binning
-arithmetic on rebuild.
+### ✅ DONE
+`sort_atoms_by_bin` publishes post-permutation local cell ids in
+`Neighbor::sorted_local_cell` and sets `local_cells_valid` for the matching full
+rebuild. `bin_neighbor_list` consumes that cache when it matches `nlocal`,
+histograms those local cells directly, and starts the explicit position-to-cell
+binning loop at `nlocal`, so only ghosts are recomputed on that path. The cache is
+then returned and invalidated after use (`neighbor.rs:220-229`;
+`neighbor/binning.rs:625-634`, `neighbor/binning.rs:743-784`).
 
 ### N3 — `displacement_exceeded` has loop-invariant PBC branches · impact M · effort M
-`neighbor.rs:583-600` runs every step (when `every==0`/`check`) with three
-per-atom `if px/py/pz` branches and a data-dependent wrap that blocks
-vectorization. Monomorphize over the PBC flags (or split all-periodic vs general,
-mirroring `pbc()` at `domain.rs:424`) and use branchless min-image in the
-all-periodic path.
+### ✅ DONE
+`displacement_exceeded` now splits the fully periodic case from the mixed/general
+case. The common all-periodic path uses straight-line nearest-image math
+(`d -= box * round(d / box)`) and an FMA distance reduction with no per-axis PBC
+branches inside the loop; the general path keeps the explicit per-axis boundary
+checks for mixed/non-periodic domains (`neighbor/rebuild.rs:38-117`).
 
 ### N4 — Rebuild threshold uses global-min skin (polydisperse) · impact M(poly)/L(mono) · effort M
-`cached_min_skin` (`:551`, used `:572`) makes the smallest particle set the
-displacement budget for **every** atom, so large particles trigger rebuilds
-sooner than needed. Use a per-atom / per-type budget (e.g. `(sf-1)·r_i`). Matters
-when the size ratio is large.
+### ✅ DONE
+Rebuild displacement checks now save each local atom's cutoff radius at build
+time and compare each atom against its own `(skin_fraction - 1) * radius` budget.
+Changing a cutoff radius still forces a rebuild, and the regression test covers
+the polydisperse case where a large atom may move farther than a small atom
+without tripping the small atom's budget (`neighbor/rebuild.rs:10-19`,
+`neighbor/rebuild.rs:66-72`, `neighbor/rebuild.rs:163-180`).
 
 ### N5 — `push_index!` capacity check branches per accepted neighbor · impact M · effort S
-`neighbor.rs:910-922` tests `nidx >= indices.capacity()` on every accepted
-neighbor in the innermost loop. Reserve a provably-sufficient bound once
-(stencil-cells × max atoms-per-cell, or last build × growth) and drop the in-loop
-check, or hoist `capacity()` into a local updated only on growth.
+### ✅ DONE
+Neighbor index emission now goes through `NeighborIndexWriter`, a raw-pointer
+writer with a debug capacity assertion instead of a per-accepted-neighbor
+`Vec::push` growth branch. Before distance filtering, the builder computes a
+conservative candidate count over the selected stencil/self-cell ranges and
+reserves once if needed, then writes accepted neighbors through the cached
+writer until setting the final Vec length (`neighbor/binning.rs:9-25`,
+`neighbor/binning.rs:837-887`, `neighbor/binning.rs:1065-1068`).
 
 ### N6 — Full-list self-cell `j == i` branch in inner loop · impact M(full)/0(half) · effort S
-For `newton=false`, the self-cell scan carries an `if j == i { continue; }`
-(`:964`, `:1027`) per candidate. Split the scan into `[start..i]` and `[i+1..end]`
-to drop the branch. Also build a `stencil_full_no_self` to drop the
-`offset == 0` test (`:980`, `:1042`).
+### ✅ DONE
+The bin stencil now carries a separate `bin_stencil_nonself` plus a
+`bin_stencil_self` flag, so the full-list path iterates non-self neighbor cells
+without checking `offset == 0` in the inner stencil loop. For the self cell,
+`newton=false` scans `[cell_start, self_pos)` and `(self_pos, end)` separately,
+dropping the per-candidate `j == i` branch in both uniform and polydisperse paths
+(`neighbor.rs:168-173`; `neighbor/binning.rs:337-362`,
+`neighbor/binning.rs:931-957`, `neighbor/binning.rs:1013-1041`).
 
 ### N7 — Two position streams in the distance test · impact M-L · effort S
-`pi` is read from `atoms.pos[i]` (`:940`) while neighbors come from the
-cache-friendly `sorted_pos`. Since locals are bin-sorted after `sort_atoms_by_bin`,
-read `pi` from `sorted_pos` too so the kernel walks a single sequential stream.
+`pi` is still read from `atoms.pos[i]` in both the uniform and polydisperse
+distance loops, while neighbors come from the cache-friendly `sorted_pos` stream
+inside the range appenders. Since locals are bin-sorted after
+`sort_atoms_by_bin`, read `pi` from `sorted_pos` too so the kernel walks a single
+sequential stream (`neighbor/binning.rs:909-910`, `neighbor/binning.rs:990-991`;
+range appenders consume `sorted_pos` at `neighbor/binning.rs:29-47` and
+`neighbor/binning.rs:117-140`).
 
 ### N8 — Per-field scratch alloc in `apply_permutation` · impact L-M · effort M
 ### ✅ DONE
@@ -250,29 +276,29 @@ entry points still work by creating a single visited buffer per call, but the
 hot spatial-sort path reuses the persistent scratch.
 
 ### N9 — Redundant min/max fold of `cutoff_radius` each rebuild · impact L · effort S
-`save_build_positions` (`:545-561`) re-folds min/max over `cutoff_radius` every
-rebuild even for monodisperse systems. Cache a `cutoff_is_uniform` flag at setup
-and skip the fold unless a plugin signals a radius change.
+`save_build_positions` still re-folds min/max over `cutoff_radius` every rebuild
+to update `cached_min_skin` and `cached_uniform_cutoff_sq`. Cache a
+`cutoff_is_uniform` flag at setup and skip the fold unless a plugin signals a
+radius change (`neighbor/rebuild.rs:10-34`).
 
 ### N10 — SIMD distance kernel (strategic) · impact H · effort L
-The inner distance loops are scalar `mul_add` (`:949-959`); auto-vectorization is
-blocked by the conditional gather (`if r2 < cutoff_sq { push }`). A manual
-`std::simd` path computing 4–8 `r²` lanes then compressing passing indices is the
-largest remaining win on the build itself — and the same restructuring feeds the
-GPU neighbor kernel ([[gpu-port]]).
+### ✅ DONE (runtime-gated AVX2 path)
+The neighbor builder has a runtime-gated SIMD distance kernel. `NeighborConfig`
+accepts `distance_kernel = "simd"`, `NeighborDistanceKernel::simd_available`
+enables it only when supported, and `neighbor/binning.rs` dispatches uniform and
+polydisperse range checks through AVX2 helpers on x86_64 with scalar fallback.
+The GPU-port-adjacent work that remains is broader kernel/backend design, not
+the original scalar-only distance-loop item (`neighbor.rs:59-73`,
+`neighbor/binning.rs:50-114`, `neighbor/binning.rs:887-888`).
 
 ---
 
 ## Suggested order (cheap-and-safe first)
 
-1. **C3** (delete dead forward-comm branch) — S, pure win, hottest path.
-2. **C9 / C8** (gate debug scan, defer the collective) — S.
-3. **N5 / N6 / N1** (drop inner-loop branches, kill rebuild allocations) — S/M.
-4. **C2 / N8** (pool the per-swap / per-field allocations) — S/M.
-5. **N2 / N3 / C1** (share bin assignment, monomorphize disp check, bin-restrict border scan) — M.
-6. **Strategic:** C5/C6 (message aggregation + non-blocking overlap), C10/N10
-   (f32 comm + SIMD kernel) — L, co-design with the GPU port.
+1. **N7** (read the owner position from the sorted-position stream) — S.
+2. **N9** (avoid the min/max cutoff fold when radii are known unchanged) — S.
+3. **Strategic:** C10 (true f32 point-to-point transport) — L, co-design with
+   `grass_mpi` and the GPU port.
 
-All findings are static-analysis only; none have been benchmarked yet. Next pass
-should add a microbenchmark / profiling harness to confirm the hot spots before
-implementing.
+Closed items above cite the current source locations. Open items remain planning
+notes until they have implementation and validation evidence.

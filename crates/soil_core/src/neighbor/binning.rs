@@ -906,8 +906,8 @@ pub fn bin_neighbor_list(
         for i in 0..nlocal {
             offsets.push(writer.len as u32);
             let my_cell = unsafe { *atom_cell.get_unchecked(i) } as usize;
-            let pi = unsafe { *atoms.pos.get_unchecked(i) };
-            let pi = [pi[0] as f64, pi[1] as f64, pi[2] as f64];
+            let self_pos = unsafe { *atom_sorted_idx.get_unchecked(i) } as usize;
+            let pi = unsafe { *sorted_pos.get_unchecked(self_pos) };
 
             if has_self {
                 let cell_start = unsafe { *bin_start.get_unchecked(my_cell) } as usize;
@@ -932,7 +932,6 @@ pub fn bin_neighbor_list(
                     // Full list: scan both sides of i's sorted position. This
                     // produces the same self-cell candidates without testing
                     // `j == i` for every atom in the cell.
-                    let self_pos = unsafe { *atom_sorted_idx.get_unchecked(i) } as usize;
                     unsafe {
                         append_uniform_range(
                             cell_start,
@@ -987,8 +986,8 @@ pub fn bin_neighbor_list(
         for i in 0..nlocal {
             offsets.push(writer.len as u32);
             let my_cell = unsafe { *atom_cell.get_unchecked(i) } as usize;
-            let pi = unsafe { *atoms.pos.get_unchecked(i) };
-            let pi = [pi[0] as f64, pi[1] as f64, pi[2] as f64];
+            let self_pos = unsafe { *atom_sorted_idx.get_unchecked(i) } as usize;
+            let pi = unsafe { *sorted_pos.get_unchecked(self_pos) };
             let si = unsafe { *atoms.cutoff_radius.get_unchecked(i) } as f64;
 
             if has_self {
@@ -1011,7 +1010,6 @@ pub fn bin_neighbor_list(
                         );
                     }
                 } else {
-                    let self_pos = unsafe { *atom_sorted_idx.get_unchecked(i) } as usize;
                     unsafe {
                         append_polydisperse_range(
                             cell_start,

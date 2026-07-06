@@ -1,6 +1,11 @@
 use super::*;
 use crate::restart::{write_restart_inner, RestartData};
-use crate::thermo::{capitalize, default_columns, parse_thermo_column};
+use crate::thermo::{capitalize, default_columns, parse_thermo_column, print_thermo, setup_thermo};
+use grass_scheduler::Scheduler;
+use soil_core::{
+    CommResource, Neighbor, ParticleSimScheduleSet, RunConfig, RunState, ScheduleSetupSet,
+    SingleProcessComm,
+};
 use std::fs::{self, File};
 
 #[test]
@@ -66,6 +71,25 @@ fn test_column_width_long_header() {
     // "Virial_xx/long_group_name" is 25 chars > 12
     assert!(col.width >= 12);
     assert_eq!(col.width, col.header.len());
+}
+
+#[test]
+fn thermo_systems_do_not_require_group_registry_without_group_columns() {
+    let mut scheduler = Scheduler::default();
+    scheduler.add_scheduler_manager();
+    scheduler.add_resource(RunConfig::default());
+    scheduler.add_resource(ThermoConfig {
+        columns: Some(vec!["step".into(), "atoms".into(), "ke".into()]),
+    });
+    scheduler.add_resource(CommResource(Box::new(SingleProcessComm::new())));
+    scheduler.add_resource(RunState::new());
+    scheduler.add_resource(Thermo::new());
+    scheduler.add_resource(Atom::new());
+    scheduler.add_resource(Neighbor::new());
+
+    scheduler.add_setup_system(setup_thermo, ScheduleSetupSet::PostSetup);
+    scheduler.add_update_system(print_thermo, ParticleSimScheduleSet::PostFinalIntegration);
+    scheduler.organize_systems();
 }
 
 // ── Substrate restart + migration round-trip determinism ──────────────────

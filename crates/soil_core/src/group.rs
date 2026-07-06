@@ -1,10 +1,12 @@
 //! Atom groups: named subsets selected by type and/or spatial region.
 
+use std::{error::Error, fmt};
+
 use grass_app::prelude::*;
 use grass_scheduler::prelude::*;
 use serde::Deserialize;
 
-use crate::{Atom, Config, Region, ParticleSimScheduleSet, ScheduleSetupSet, StageOverrides};
+use crate::{Atom, Config, ParticleSimScheduleSet, Region, ScheduleSetupSet, StageOverrides};
 
 // ── Config ──────────────────────────────────────────────────────────────────
 
@@ -37,6 +39,7 @@ impl GroupDef {
 // ── Group ───────────────────────────────────────────────────────────────────
 
 /// A named group with a boolean mask over local atoms.
+#[derive(Debug)]
 pub struct Group {
     /// Group name (matches [`GroupDef::name`]).
     pub name: String,
@@ -56,12 +59,41 @@ pub struct GroupRegistry {
     pub groups: Vec<Group>,
 }
 
+/// Error returned when a named group lookup fails.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GroupLookupError {
+    /// Requested group name.
+    pub name: String,
+    /// Group names present in the registry when the lookup was attempted.
+    pub available: Vec<String>,
+}
+
+impl GroupLookupError {
+    fn new(name: &str, available: Vec<String>) -> Self {
+        Self {
+            name: name.to_string(),
+            available,
+        }
+    }
+}
+
+impl fmt::Display for GroupLookupError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "group '{}' not found", self.name)?;
+        if self.available.is_empty() {
+            write!(f, "; no groups are currently registered")
+        } else {
+            write!(f, "; available groups: {}", self.available.join(", "))
+        }
+    }
+}
+
+impl Error for GroupLookupError {}
+
 impl GroupRegistry {
     /// Create an empty registry (the "all" group is added during setup).
     pub fn new() -> Self {
-        GroupRegistry {
-            groups: Vec::new(),
-        }
+        GroupRegistry { groups: Vec::new() }
     }
 
     /// Look up a group by name.
@@ -69,34 +101,39 @@ impl GroupRegistry {
         self.groups.iter().find(|g| g.name == name)
     }
 
+    /// Return the names of all registered groups.
+    pub fn available_group_names(&self) -> Vec<String> {
+        self.groups.iter().map(|g| g.name.clone()).collect()
+    }
+
+    /// Look up a group by name, returning available-group diagnostics if it is missing.
+    pub fn try_get(&self, name: &str) -> Result<&Group, GroupLookupError> {
+        self.get(name)
+            .ok_or_else(|| GroupLookupError::new(name, self.available_group_names()))
+    }
+
     /// Look up a group by name, panicking with a helpful message if not found.
     pub fn expect(&self, name: &str) -> &Group {
-        self.get(name).unwrap_or_else(|| {
-            let available: Vec<&str> = self.groups.iter().map(|g| g.name.as_str()).collect();
-            panic!(
-                "Group '{}' not found. Available groups: {:?}",
-                name, available
-            );
-        })
+        self.try_get(name).unwrap_or_else(|err| panic!("{err}"))
     }
 
     /// Validate that a group name exists. Prints an error and exits if not found.
     pub fn validate_name(&self, name: &str, context: &str) {
-        if self.get(name).is_none() {
-            let available: Vec<&str> = self.groups.iter().map(|g| g.name.as_str()).collect();
-            eprintln!(
-                "ERROR: {}: group '{}' not found. Available groups: {:?}",
-                context, name, available
-            );
+        if let Err(err) = self.try_get(name) {
+            eprintln!("ERROR: {context}: {err}");
             std::process::exit(1);
         }
     }
 
     /// Return the mask for a named group, or `None` if no group is specified (meaning "all atoms").
-    pub fn mask_for(&self, group_name: &Option<String>) -> Option<&[bool]> {
+    pub fn mask_for(
+        &self,
+        group_name: &Option<String>,
+    ) -> Result<Option<&[bool]>, GroupLookupError> {
         group_name
             .as_ref()
-            .map(|gname| self.expect(gname).mask.as_slice())
+            .map(|gname| self.try_get(gname).map(|group| group.mask.as_slice()))
+            .transpose()
     }
 }
 
@@ -246,7 +283,10 @@ pub fn setup_groups(
             if let Some(existing) = groups.groups.iter_mut().find(|g| g.name == def.name) {
                 // Replace definition, clear mask to force rebuild
                 if comm.rank() == 0 {
-                    println!("Stage {}: redefining group '{}': {:?}", index, def.name, def);
+                    println!(
+                        "Stage {}: redefining group '{}': {:?}",
+                        index, def.name, def
+                    );
                 }
                 existing.def = def;
                 existing.mask.clear();
@@ -392,10 +432,7 @@ mod tests {
 
     #[test]
     fn test_empty_group() {
-        let atom = make_atom(
-            &[(0.0, 0.0, 1.0), (0.0, 0.0, 3.0)],
-            &[0, 0],
-        );
+        let atom = make_atom(&[(0.0, 0.0, 1.0), (0.0, 0.0, 3.0)], &[0, 0]);
         let def = make_group_def("empty", Some(vec![99]), None);
         let mut registry = GroupRegistry::new();
         registry.groups.push(Group {
@@ -408,6 +445,57 @@ mod tests {
         let g = registry.expect("empty");
         assert_eq!(g.count, 0);
         assert!(g.mask.iter().all(|&m| !m));
+    }
+
+    #[test]
+    fn missing_group_lookup_reports_available_groups() {
+        let mut registry = GroupRegistry::new();
+        registry.groups.push(Group {
+            name: "mobile".to_string(),
+            def: make_group_def("mobile", None, None),
+            mask: vec![true, false],
+            count: 1,
+        });
+        registry.groups.push(Group {
+            name: "wall".to_string(),
+            def: make_group_def("wall", None, None),
+            mask: vec![false, true],
+            count: 1,
+        });
+
+        let err = registry.try_get("moblie").unwrap_err();
+        assert_eq!(err.name, "moblie");
+        assert_eq!(
+            err.available,
+            vec!["mobile".to_string(), "wall".to_string()]
+        );
+        assert_eq!(
+            err.to_string(),
+            "group 'moblie' not found; available groups: mobile, wall"
+        );
+    }
+
+    #[test]
+    fn mask_for_returns_error_for_misspelled_group() {
+        let mut registry = GroupRegistry::new();
+        registry.groups.push(Group {
+            name: "mobile".to_string(),
+            def: make_group_def("mobile", None, None),
+            mask: vec![true, false],
+            count: 1,
+        });
+
+        assert_eq!(registry.mask_for(&None).unwrap(), None);
+        assert_eq!(
+            registry.mask_for(&Some("mobile".to_string())).unwrap(),
+            Some(&[true, false][..])
+        );
+
+        let err = registry.mask_for(&Some("moblie".to_string())).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "group 'moblie' not found; available groups: mobile"
+        );
     }
 
     #[test]
@@ -548,17 +636,12 @@ type = [2]
 dynamic = true
 "#;
         let table: toml::Table = toml_str.parse().unwrap();
-        let defs: Vec<GroupDef> = table
-            .get("group")
-            .unwrap()
-            .clone()
-            .try_into()
-            .unwrap();
+        let defs: Vec<GroupDef> = table.get("group").unwrap().clone().try_into().unwrap();
 
         assert_eq!(defs.len(), 4);
         assert!(!defs[0].is_dynamic()); // type-only, no explicit → false
-        assert!(defs[1].is_dynamic());  // region, no explicit → true
+        assert!(defs[1].is_dynamic()); // region, no explicit → true
         assert!(!defs[2].is_dynamic()); // region, explicit false
-        assert!(defs[3].is_dynamic());  // type, explicit true
+        assert!(defs[3].is_dynamic()); // type, explicit true
     }
 }

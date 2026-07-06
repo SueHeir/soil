@@ -85,7 +85,8 @@ use grass_scheduler::prelude::*;
 use serde::Deserialize;
 
 use soil_core::{
-    Atom, CommResource, Config, GroupRegistry, ParticleSimScheduleSet, Real, ScheduleSetupSet,
+    Atom, CommResource, Config, GroupLookupError, GroupRegistry, ParticleSimScheduleSet, Real,
+    ScheduleSetupSet,
 };
 
 /// Pins atoms in a group at their starting positions — a **hard translational
@@ -189,7 +190,10 @@ fn setup_pins(registry: Res<PinRegistry>, comm: Res<CommResource>, groups: Res<G
         return;
     }
     for f in &registry.pins {
-        println!("Fix pin: group='{}' (hard translational constraint)", f.group);
+        println!(
+            "Fix pin: group='{}' (hard translational constraint)",
+            f.group
+        );
     }
 }
 
@@ -199,11 +203,16 @@ fn setup_pins(registry: Res<PinRegistry>, comm: Res<CommResource>, groups: Res<G
 /// zeroing velocity and force. Position is captured **lazily** on the first
 /// call where the group mask has been populated. Keyed by global atom tag, so
 /// pinned atoms stay correctly attached even after MPI migration.
-fn apply_pin_impl(atoms: &mut Atom, registry: &PinRegistry, groups: &GroupRegistry, state: &mut PinState) {
+fn apply_pin_impl(
+    atoms: &mut Atom,
+    registry: &PinRegistry,
+    groups: &GroupRegistry,
+    state: &mut PinState,
+) -> Result<(), GroupLookupError> {
     let nlocal = atoms.nlocal as usize;
 
     for def in &registry.pins {
-        let group = groups.expect(&def.group);
+        let group = groups.try_get(&def.group)?;
         if group.mask.is_empty() {
             continue;
         }
@@ -231,6 +240,8 @@ fn apply_pin_impl(atoms: &mut Atom, registry: &PinRegistry, groups: &GroupRegist
             }
         }
     }
+
+    Ok(())
 }
 
 /// Pre-integration pin enforcement — keeps the Verlet drift step from moving
@@ -241,7 +252,9 @@ fn apply_pin_pre(
     groups: Res<GroupRegistry>,
     mut state: ResMut<PinState>,
 ) {
-    apply_pin_impl(&mut atoms, &registry, &groups, &mut state);
+    if let Err(err) = apply_pin_impl(&mut atoms, &registry, &groups, &mut state) {
+        eprintln!("ERROR: fix pin: {err}");
+    }
 }
 
 /// Post-force pin enforcement — also does the lazy position capture on the
@@ -253,7 +266,9 @@ fn apply_pin_post(
     groups: Res<GroupRegistry>,
     mut state: ResMut<PinState>,
 ) {
-    apply_pin_impl(&mut atoms, &registry, &groups, &mut state);
+    if let Err(err) = apply_pin_impl(&mut atoms, &registry, &groups, &mut state) {
+        eprintln!("ERROR: fix pin: {err}");
+    }
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────
@@ -293,7 +308,9 @@ mod tests {
 
     fn make_pin_registry(group: &str) -> PinRegistry {
         PinRegistry {
-            pins: vec![PinDef { group: group.to_string() }],
+            pins: vec![PinDef {
+                group: group.to_string(),
+            }],
         }
     }
 
@@ -383,8 +400,16 @@ mod tests {
 
         let a = app.get_resource_ref::<Atom>().unwrap();
         assert_eq!(a.tag[1], 10, "A's tag preserved");
-        assert_eq!(a.pos[1], [7.0, 0.0, 0.0], "pin restored A by tag, not index");
-        assert_eq!(a.pos[0], [999.0, 0.0, 0.0], "B untouched (not in pin group)");
+        assert_eq!(
+            a.pos[1],
+            [7.0, 0.0, 0.0],
+            "pin restored A by tag, not index"
+        );
+        assert_eq!(
+            a.pos[0],
+            [999.0, 0.0, 0.0],
+            "B untouched (not in pin group)"
+        );
     }
 
     #[test]
@@ -406,8 +431,28 @@ mod tests {
         app.run();
 
         let s = app.get_resource_ref::<PinState>().unwrap();
-        assert!(s.captured.is_empty(), "no group captured when mask is empty");
+        assert!(
+            s.captured.is_empty(),
+            "no group captured when mask is empty"
+        );
         let a = app.get_resource_ref::<Atom>().unwrap();
         assert_eq!(a.pos[0], [1.0, 0.0, 0.0], "pos untouched when mask empty");
+    }
+
+    #[test]
+    fn pin_misspelled_group_returns_clean_error() {
+        let mut atoms = make_atoms(1);
+        let groups = make_group_registry("anchor", vec![true]);
+        let registry = make_pin_registry("anchro");
+        let mut state = PinState::default();
+
+        let err = apply_pin_impl(&mut atoms, &registry, &groups, &mut state).unwrap_err();
+        assert_eq!(err.name, "anchro");
+        assert_eq!(err.available, vec!["anchor".to_string()]);
+        assert_eq!(
+            err.to_string(),
+            "group 'anchro' not found; available groups: anchor"
+        );
+        assert!(state.captured.is_empty());
     }
 }

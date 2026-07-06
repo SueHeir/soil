@@ -152,6 +152,7 @@ pub fn setup_thermo(
     scheduler_manager: Res<SchedulerManager>,
     comm: Res<CommResource>,
     run_state: Res<RunState>,
+    groups: Option<Res<GroupRegistry>>,
     mut thermo: ResMut<Thermo>,
     mut virial: Option<ResMut<VirialStress>>,
 ) {
@@ -181,6 +182,23 @@ pub fn setup_thermo(
         thermo.columns = col_names.iter().map(|s| parse_thermo_column(s)).collect();
     }
 
+    for col in thermo.columns.iter() {
+        if let Some(ref gname) = col.group_name {
+            match groups.as_ref() {
+                Some(groups) => {
+                    groups.validate_name(gname, &format!("thermo column '{}'", col.raw))
+                }
+                None => {
+                    eprintln!(
+                        "ERROR: thermo column '{}': group '{}' not found; no groups are currently registered",
+                        col.raw, gname
+                    );
+                    std::process::exit(1);
+                }
+            }
+        }
+    }
+
     if comm.rank() == 0 {
         println!();
         let header: String = thermo
@@ -206,7 +224,7 @@ pub fn print_thermo(
     run_state: Res<RunState>,
     comm: Res<CommResource>,
     neighbor: Res<Neighbor>,
-    groups: Res<GroupRegistry>,
+    groups: Option<Res<GroupRegistry>>,
     mut thermo: ResMut<Thermo>,
 ) {
     let step = run_state.total_cycle;
@@ -234,7 +252,7 @@ pub fn print_thermo(
             if group_ke.contains_key(gname) {
                 continue;
             }
-            if let Some(group) = groups.get(gname) {
+            if let Some(group) = groups.as_ref().and_then(|groups| groups.get(gname)) {
                 let local_ke = compute_ke(&atoms, Some(&group.mask));
                 let local_count = group.count as f64;
                 group_ke.insert(gname.clone(), comm.all_reduce_sum_f64(local_ke));

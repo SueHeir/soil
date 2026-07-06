@@ -185,7 +185,7 @@ TOML-deserializable spatial primitives (tagged with `type =`):
 - `Union { regions }` — OR
 - `Intersect { regions }` — AND
 
-Methods: `contains(pos)`, `random_point_inside(rng)`, `closest_point_on_surface(pos) -> SurfaceResult`.
+Methods: `contains(pos)`, `random_point_inside(rng) -> Result<[f64; 3], RegionSampleError>`, `closest_point_on_surface(pos) -> SurfaceResult`.
 
 `SurfaceResult { point, normal, distance }` — signed distance (negative = inside) and outward normal (`region.rs:22`).
 

@@ -103,7 +103,7 @@ pub use comm::*;
 pub use domain::*;
 pub use group::{group_includes, Group, GroupDef, GroupPlugin, GroupRegistry};
 pub use input::{load_toml, print_banner, Config, Input, InputPlugin};
-pub use region::{Axis, Region, SurfaceResult};
+pub use region::{Axis, Region, RegionSampleError, SurfaceResult};
 
 // Multi-stage run machinery now lives in grass_io. Re-exported so
 // existing SOIL downstream code keeps writing `soil_core::RunPlugin`

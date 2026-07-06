@@ -19,14 +19,27 @@ On top of that base atom, the substrate is responsible for:
   when it crosses a subdomain boundary.
 - **Neighbor-list construction** — binning and building the pair lists physics
   iterates over.
+- **Method-agnostic topology and exclusions** — storing per-atom bond adjacency
+  and 1-2/1-3 pair-exclusion queries through
+  [`BondStore` / `BondPlugin`](https://github.com/SueHeir/soil/blob/main/crates/soil_core/src/bond.rs).
+- **Generic virial accumulation** — providing the
+  [`VirialStress` / `VirialStressPlugin`](https://github.com/SueHeir/soil/blob/main/crates/soil_core/src/virial.rs)
+  resource that force plugins can zero, fill, and publish through output.
 
-It knows nothing about contact forces, bonds, damage, or any specific physics.
+It knows nothing about contact force laws, bond force laws, damage evolution, or
+any specific physics. A downstream physics tier decides what a bond means, which
+coefficients it uses, and how forces or damage are computed; SOIL only keeps the
+topology/exclusion data in step with atom migration, ghosts, and restarts.
+
+Likewise, `VirialStress` is an accumulation and output contract, not a stress
+model. Force plugins opt in, add pair contributions using SOIL's sign
+convention, and let `soil_print` expose the six tensor components.
 
 ## The crates
 
 | crate | role |
 |---|---|
-| `soil_core` | base `Atom` + `AtomData` registry, comm, domain decomposition, neighbor, regions, groups |
+| `soil_core` | base `Atom` + `AtomData` registry, comm, domain decomposition, neighbor, regions, groups, method-agnostic bond topology, virial accumulator |
 | `soil_derive` | `#[derive(AtomData)]` proc macro |
 | `soil_verlet` | velocity-Verlet translational integration |
 | `soil_print` | thermo output, dump files (CSV/binary/VTP), restart |

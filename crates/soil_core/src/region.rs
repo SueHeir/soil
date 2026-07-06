@@ -2,6 +2,9 @@
 
 use rand::Rng;
 use serde::Deserialize;
+use std::fmt;
+
+const REGION_SAMPLE_ATTEMPT_LIMIT: usize = 10_000;
 
 /// Axis for cylinder orientation.
 #[derive(Deserialize, Clone, Debug)]
@@ -31,6 +34,64 @@ pub struct SurfaceResult {
     /// (positive = outside, negative = inside).
     pub distance: f64,
 }
+
+/// Error returned when a region cannot produce a bounded random sample.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RegionSampleError {
+    /// Plane regions are half-spaces with no finite volume to sample uniformly.
+    UnboundedPlane,
+    /// A union with no child regions has no interior to sample.
+    EmptyUnion,
+    /// An intersection with no child regions has no meaningful finite interior.
+    EmptyIntersect,
+    /// A primitive has zero, negative, non-finite, or otherwise invalid dimensions.
+    DegenerateDimensions {
+        /// Region variant whose dimensions are invalid.
+        region: &'static str,
+        /// Human-readable detail about the invalid dimension.
+        detail: String,
+    },
+    /// Rejection sampling could not find an accepted point within the bounded attempt limit.
+    RejectionLimitExceeded {
+        /// Region variant being sampled.
+        region: &'static str,
+        /// Number of candidate points tried before returning the error.
+        attempts: usize,
+    },
+}
+
+impl fmt::Display for RegionSampleError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            RegionSampleError::UnboundedPlane => {
+                write!(f, "cannot sample a Plane region because it is unbounded; use a bounded region or intersect it with one")
+            }
+            RegionSampleError::EmptyUnion => {
+                write!(
+                    f,
+                    "cannot sample an empty Union region; add at least one child region"
+                )
+            }
+            RegionSampleError::EmptyIntersect => {
+                write!(
+                    f,
+                    "cannot sample an empty Intersect region; add at least one child region"
+                )
+            }
+            RegionSampleError::DegenerateDimensions { region, detail } => {
+                write!(
+                    f,
+                    "cannot sample {region} region with degenerate dimensions: {detail}"
+                )
+            }
+            RegionSampleError::RejectionLimitExceeded { region, attempts } => {
+                write!(f, "could not sample {region} region after {attempts} attempts; the intersection may be empty or have very low acceptance")
+            }
+        }
+    }
+}
+
+impl std::error::Error for RegionSampleError {}
 
 /// A spatial region primitive. Deserialized from TOML with `type` tag.
 ///
@@ -167,10 +228,7 @@ impl Region {
                 let r_at = rad_lo + t * (rad_hi - rad_lo);
                 r0 * r0 + r1 * r1 <= r_at * r_at
             }
-            Region::Plane {
-                point,
-                normal,
-            } => {
+            Region::Plane { point, normal } => {
                 let dx = pos[0] - point[0];
                 let dy = pos[1] - point[1];
                 let dz = pos[2] - point[2];
@@ -181,31 +239,36 @@ impl Region {
         }
     }
 
-    /// Generate a uniformly random point inside the region.
-    ///
-    /// # Panics
-    /// Panics for `Plane` (infinite, no bounded volume).
-    pub fn random_point_inside(&self, rng: &mut impl Rng) -> [f64; 3] {
+    /// Generate a uniformly random point inside the region when bounded sampling is possible.
+    pub fn random_point_inside(&self, rng: &mut impl Rng) -> Result<[f64; 3], RegionSampleError> {
         match self {
-            Region::Block { min, max } => [
-                rng.random_range(min[0]..max[0]),
-                rng.random_range(min[1]..max[1]),
-                rng.random_range(min[2]..max[2]),
-            ],
+            Region::Block { min, max } => {
+                validate_block(min, max)?;
+                Ok([
+                    rng.random_range(min[0]..max[0]),
+                    rng.random_range(min[1]..max[1]),
+                    rng.random_range(min[2]..max[2]),
+                ])
+            }
             Region::Sphere { center, radius } => {
+                validate_sphere(center, *radius)?;
                 // Rejection sampling for uniform distribution in sphere
-                loop {
+                for _ in 0..REGION_SAMPLE_ATTEMPT_LIMIT {
                     let x = rng.random_range(-1.0..1.0);
                     let y = rng.random_range(-1.0..1.0);
                     let z = rng.random_range(-1.0..1.0);
                     if x * x + y * y + z * z <= 1.0 {
-                        return [
+                        return Ok([
                             center[0] + x * radius,
                             center[1] + y * radius,
                             center[2] + z * radius,
-                        ];
+                        ]);
                     }
                 }
+                Err(RegionSampleError::RejectionLimitExceeded {
+                    region: "Sphere",
+                    attempts: REGION_SAMPLE_ATTEMPT_LIMIT,
+                })
             }
             Region::Cylinder {
                 center,
@@ -214,21 +277,26 @@ impl Region {
                 lo,
                 hi,
             } => {
+                validate_cylinder(center, *radius, *lo, *hi)?;
                 // Rejection sampling for uniform distribution in cylinder cross-section
-                loop {
+                for _ in 0..REGION_SAMPLE_ATTEMPT_LIMIT {
                     let u = rng.random_range(-1.0..1.0);
                     let v = rng.random_range(-1.0..1.0);
                     if u * u + v * v <= 1.0 {
                         let axial = rng.random_range(*lo..*hi);
                         let r0 = center[0] + u * radius;
                         let r1 = center[1] + v * radius;
-                        return match axis {
+                        return Ok(match axis {
                             Axis::X => [axial, r0, r1],
                             Axis::Y => [r0, axial, r1],
                             Axis::Z => [r0, r1, axial],
-                        };
+                        });
                     }
                 }
+                Err(RegionSampleError::RejectionLimitExceeded {
+                    region: "Cylinder",
+                    attempts: REGION_SAMPLE_ATTEMPT_LIMIT,
+                })
             }
             Region::Cone {
                 center,
@@ -238,9 +306,10 @@ impl Region {
                 lo,
                 hi,
             } => {
+                validate_cone(center, *rad_lo, *rad_hi, *lo, *hi)?;
                 // Rejection sampling
                 let max_r = rad_lo.max(*rad_hi);
-                loop {
+                for _ in 0..REGION_SAMPLE_ATTEMPT_LIMIT {
                     let u = rng.random_range(-1.0..1.0) * max_r;
                     let v = rng.random_range(-1.0..1.0) * max_r;
                     let axial = rng.random_range(*lo..*hi);
@@ -253,36 +322,58 @@ impl Region {
                     if u * u + v * v <= r_at * r_at {
                         let r0 = center[0] + u;
                         let r1 = center[1] + v;
-                        return match axis {
+                        return Ok(match axis {
                             Axis::X => [axial, r0, r1],
                             Axis::Y => [r0, axial, r1],
                             Axis::Z => [r0, r1, axial],
-                        };
+                        });
                     }
                 }
+                Err(RegionSampleError::RejectionLimitExceeded {
+                    region: "Cone",
+                    attempts: REGION_SAMPLE_ATTEMPT_LIMIT,
+                })
             }
-            Region::Plane { .. } => {
-                panic!("Cannot generate random point inside a Plane region (unbounded)");
-            }
+            Region::Plane { .. } => Err(RegionSampleError::UnboundedPlane),
             Region::Union { regions } => {
                 if regions.is_empty() {
-                    panic!("Cannot generate random point inside empty Union");
+                    return Err(RegionSampleError::EmptyUnion);
                 }
                 // Pick a random child region and sample from it
-                let idx = rng.random_range(0..regions.len());
-                regions[idx].random_point_inside(rng)
+                let start = rng.random_range(0..regions.len());
+                for offset in 0..regions.len() {
+                    let idx = (start + offset) % regions.len();
+                    return regions[idx].random_point_inside(rng);
+                }
+                Err(RegionSampleError::EmptyUnion)
             }
             Region::Intersect { regions } => {
                 if regions.is_empty() {
-                    panic!("Cannot generate random point inside empty Intersect");
+                    return Err(RegionSampleError::EmptyIntersect);
                 }
                 // Rejection sampling: sample from first child, accept if in all
-                loop {
-                    let pt = regions[0].random_point_inside(rng);
-                    if regions.iter().all(|r| r.contains(&pt)) {
-                        return pt;
+                let mut saw_unbounded = false;
+                for _ in 0..REGION_SAMPLE_ATTEMPT_LIMIT {
+                    for region in regions {
+                        match region.random_point_inside(rng) {
+                            Ok(pt) => {
+                                if regions.iter().all(|r| r.contains(&pt)) {
+                                    return Ok(pt);
+                                }
+                                break;
+                            }
+                            Err(RegionSampleError::UnboundedPlane) => saw_unbounded = true,
+                            Err(err) => return Err(err),
+                        }
                     }
                 }
+                if saw_unbounded && regions.iter().all(|r| matches!(r, Region::Plane { .. })) {
+                    return Err(RegionSampleError::UnboundedPlane);
+                }
+                Err(RegionSampleError::RejectionLimitExceeded {
+                    region: "Intersect",
+                    attempts: REGION_SAMPLE_ATTEMPT_LIMIT,
+                })
             }
         }
     }
@@ -293,20 +384,28 @@ impl Region {
         match self {
             Region::Block { min, max } => closest_point_block(pos, min, max),
             Region::Sphere { center, radius } => closest_point_sphere(pos, center, *radius),
-            Region::Cylinder { center, radius, axis, lo, hi } => {
-                closest_point_cylinder(pos, center, *radius, axis, *lo, *hi)
-            }
-            Region::Cone { center, axis, rad_lo, rad_hi, lo, hi } => {
-                closest_point_cone(pos, center, axis, *rad_lo, *rad_hi, *lo, *hi)
-            }
+            Region::Cylinder {
+                center,
+                radius,
+                axis,
+                lo,
+                hi,
+            } => closest_point_cylinder(pos, center, *radius, axis, *lo, *hi),
+            Region::Cone {
+                center,
+                axis,
+                rad_lo,
+                rad_hi,
+                lo,
+                hi,
+            } => closest_point_cone(pos, center, axis, *rad_lo, *rad_hi, *lo, *hi),
             Region::Plane { point, normal } => closest_point_plane(pos, point, normal),
             Region::Union { regions } => {
                 // Closest surface among all children: minimum absolute distance
                 let mut best: Option<SurfaceResult> = None;
                 for r in regions {
                     let sr = r.closest_point_on_surface(pos);
-                    if best.is_none() || sr.distance.abs() < best.as_ref().unwrap().distance.abs()
-                    {
+                    if best.is_none() || sr.distance.abs() < best.as_ref().unwrap().distance.abs() {
                         best = Some(sr);
                     }
                 }
@@ -321,8 +420,7 @@ impl Region {
                 let mut best: Option<SurfaceResult> = None;
                 for r in regions {
                     let sr = r.closest_point_on_surface(pos);
-                    if best.is_none() || sr.distance.abs() < best.as_ref().unwrap().distance.abs()
-                    {
+                    if best.is_none() || sr.distance.abs() < best.as_ref().unwrap().distance.abs() {
                         best = Some(sr);
                     }
                 }
@@ -330,6 +428,110 @@ impl Region {
             }
         }
     }
+}
+
+fn all_finite(values: &[f64]) -> bool {
+    values.iter().all(|value| value.is_finite())
+}
+
+fn validate_block(min: &[f64; 3], max: &[f64; 3]) -> Result<(), RegionSampleError> {
+    if !all_finite(min) || !all_finite(max) {
+        return Err(RegionSampleError::DegenerateDimensions {
+            region: "Block",
+            detail: "min and max coordinates must be finite".to_string(),
+        });
+    }
+    for axis in 0..3 {
+        if min[axis] >= max[axis] {
+            return Err(RegionSampleError::DegenerateDimensions {
+                region: "Block",
+                detail: format!("min[{axis}] must be less than max[{axis}]"),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_sphere(center: &[f64; 3], radius: f64) -> Result<(), RegionSampleError> {
+    if !all_finite(center) || !radius.is_finite() {
+        return Err(RegionSampleError::DegenerateDimensions {
+            region: "Sphere",
+            detail: "center coordinates and radius must be finite".to_string(),
+        });
+    }
+    if radius <= 0.0 {
+        return Err(RegionSampleError::DegenerateDimensions {
+            region: "Sphere",
+            detail: "radius must be positive".to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_cylinder(
+    center: &[f64; 2],
+    radius: f64,
+    lo: f64,
+    hi: f64,
+) -> Result<(), RegionSampleError> {
+    if !all_finite(center) || !radius.is_finite() || !lo.is_finite() || !hi.is_finite() {
+        return Err(RegionSampleError::DegenerateDimensions {
+            region: "Cylinder",
+            detail: "center, radius, lo, and hi must be finite".to_string(),
+        });
+    }
+    if radius <= 0.0 {
+        return Err(RegionSampleError::DegenerateDimensions {
+            region: "Cylinder",
+            detail: "radius must be positive".to_string(),
+        });
+    }
+    if lo >= hi {
+        return Err(RegionSampleError::DegenerateDimensions {
+            region: "Cylinder",
+            detail: "lo must be less than hi".to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_cone(
+    center: &[f64; 2],
+    rad_lo: f64,
+    rad_hi: f64,
+    lo: f64,
+    hi: f64,
+) -> Result<(), RegionSampleError> {
+    if !all_finite(center)
+        || !rad_lo.is_finite()
+        || !rad_hi.is_finite()
+        || !lo.is_finite()
+        || !hi.is_finite()
+    {
+        return Err(RegionSampleError::DegenerateDimensions {
+            region: "Cone",
+            detail: "center, radii, lo, and hi must be finite".to_string(),
+        });
+    }
+    if rad_lo < 0.0 || rad_hi < 0.0 {
+        return Err(RegionSampleError::DegenerateDimensions {
+            region: "Cone",
+            detail: "radii must be non-negative".to_string(),
+        });
+    }
+    if rad_lo == 0.0 && rad_hi == 0.0 {
+        return Err(RegionSampleError::DegenerateDimensions {
+            region: "Cone",
+            detail: "at least one radius must be positive".to_string(),
+        });
+    }
+    if lo >= hi {
+        return Err(RegionSampleError::DegenerateDimensions {
+            region: "Cone",
+            detail: "lo must be less than hi".to_string(),
+        });
+    }
+    Ok(())
 }
 
 // ── Surface-distance helpers ─────────────────────────────────────────────────
@@ -435,7 +637,11 @@ fn closest_point_sphere(pos: &[f64; 3], center: &[f64; 3], radius: f64) -> Surfa
     let nz = dz * inv;
 
     SurfaceResult {
-        point: [center[0] + nx * radius, center[1] + ny * radius, center[2] + nz * radius],
+        point: [
+            center[0] + nx * radius,
+            center[1] + ny * radius,
+            center[2] + nz * radius,
+        ],
         normal: [nx, ny, nz],
         distance: dist - radius,
     }
@@ -454,7 +660,13 @@ fn decompose_axis(pos: &[f64; 3], center: &[f64; 2], axis: &Axis) -> (f64, f64, 
 
 /// Helper: compose a 3D point from (axial, r0_world, r1_world) for a given axis.
 #[inline]
-fn compose_axis(axial: f64, r0_world: f64, r1_world: f64, center: &[f64; 2], axis: &Axis) -> [f64; 3] {
+fn compose_axis(
+    axial: f64,
+    r0_world: f64,
+    r1_world: f64,
+    center: &[f64; 2],
+    axis: &Axis,
+) -> [f64; 3] {
     match axis {
         Axis::X => [axial, center[0] + r0_world, center[1] + r1_world],
         Axis::Y => [center[0] + r0_world, axial, center[1] + r1_world],
@@ -513,7 +725,8 @@ fn closest_point_cylinder(
             // Outside axial range: Euclidean distance to nearest rim
             let da = if axial < lo { lo - axial } else { axial - hi };
             let dr = radial_dist - radius;
-            curved_dist = (dr * dr + da * da).sqrt() * if dr < 0.0 && da == 0.0 { -1.0 } else { 1.0 };
+            curved_dist =
+                (dr * dr + da * da).sqrt() * if dr < 0.0 && da == 0.0 { -1.0 } else { 1.0 };
         }
     }
 
@@ -522,7 +735,11 @@ fn closest_point_cylinder(
     let lo_normal;
     let lo_dist;
     {
-        let cap_r = if radial_dist <= radius { radial_dist } else { radius };
+        let cap_r = if radial_dist <= radius {
+            radial_dist
+        } else {
+            radius
+        };
         let (c0, c1) = if radial_dist < 1e-30 {
             (0.0, 0.0)
         } else {
@@ -536,7 +753,11 @@ fn closest_point_cylinder(
         let dz = pos[2] - lo_point[2];
         let d = (dx * dx + dy * dy + dz * dz).sqrt();
         lo_dist = if axial < lo || (axial_inside && radial_dist <= radius) {
-            if axial <= lo { lo - axial } else { d }
+            if axial <= lo {
+                lo - axial
+            } else {
+                d
+            }
         } else {
             d
         };
@@ -547,7 +768,11 @@ fn closest_point_cylinder(
     let hi_normal;
     let hi_dist;
     {
-        let cap_r = if radial_dist <= radius { radial_dist } else { radius };
+        let cap_r = if radial_dist <= radius {
+            radial_dist
+        } else {
+            radius
+        };
         let (c0, c1) = if radial_dist < 1e-30 {
             (0.0, 0.0)
         } else {
@@ -561,7 +786,11 @@ fn closest_point_cylinder(
         let dz = pos[2] - hi_point[2];
         let d = (dx * dx + dy * dy + dz * dz).sqrt();
         hi_dist = if axial > hi || (axial_inside && radial_dist <= radius) {
-            if axial >= hi { axial - hi } else { d }
+            if axial >= hi {
+                axial - hi
+            } else {
+                d
+            }
         } else {
             d
         };
@@ -820,6 +1049,7 @@ fn closest_point_plane(pos: &[f64; 3], point: &[f64; 3], normal: &[f64; 3]) -> S
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rand::{rngs::StdRng, SeedableRng};
 
     #[test]
     fn test_block_contains() {
@@ -906,7 +1136,7 @@ mod tests {
         };
         let mut rng = rand::rng();
         for _ in 0..200 {
-            let p = r.random_point_inside(&mut rng);
+            let p = r.random_point_inside(&mut rng).unwrap();
             assert!(r.contains(&p), "random point {:?} not in cone", p);
         }
     }
@@ -932,7 +1162,7 @@ hi = 0.01"#;
         };
         let mut rng = rand::rng();
         for _ in 0..100 {
-            let p = r.random_point_inside(&mut rng);
+            let p = r.random_point_inside(&mut rng).unwrap();
             assert!(r.contains(&p), "random point {:?} not in block", p);
         }
     }
@@ -945,20 +1175,122 @@ hi = 0.01"#;
         };
         let mut rng = rand::rng();
         for _ in 0..100 {
-            let p = r.random_point_inside(&mut rng);
+            let p = r.random_point_inside(&mut rng).unwrap();
             assert!(r.contains(&p), "random point {:?} not in sphere", p);
         }
     }
 
     #[test]
-    #[should_panic(expected = "Cannot generate random point inside a Plane")]
-    fn test_plane_random_panics() {
+    fn test_plane_random_returns_error() {
         let r = Region::Plane {
             point: [0.0, 0.0, 0.0],
             normal: [0.0, 0.0, 1.0],
         };
         let mut rng = rand::rng();
-        r.random_point_inside(&mut rng);
+        assert_eq!(
+            r.random_point_inside(&mut rng),
+            Err(RegionSampleError::UnboundedPlane)
+        );
+    }
+
+    #[test]
+    fn test_empty_union_random_returns_error() {
+        let r = Region::Union {
+            regions: Vec::new(),
+        };
+        let mut rng = rand::rng();
+        assert_eq!(
+            r.random_point_inside(&mut rng),
+            Err(RegionSampleError::EmptyUnion)
+        );
+    }
+
+    #[test]
+    fn test_empty_intersect_random_returns_error() {
+        let r = Region::Intersect {
+            regions: Vec::new(),
+        };
+        let mut rng = rand::rng();
+        assert_eq!(
+            r.random_point_inside(&mut rng),
+            Err(RegionSampleError::EmptyIntersect)
+        );
+    }
+
+    #[test]
+    fn test_degenerate_block_random_returns_error() {
+        let r = Region::Block {
+            min: [0.0, 0.0, 0.0],
+            max: [1.0, 0.0, 1.0],
+        };
+        let mut rng = rand::rng();
+        let err = r.random_point_inside(&mut rng).unwrap_err();
+        assert!(matches!(
+            err,
+            RegionSampleError::DegenerateDimensions {
+                region: "Block",
+                ..
+            }
+        ));
+        assert!(err.to_string().contains("min[1] must be less than max[1]"));
+    }
+
+    #[test]
+    fn test_disjoint_intersect_random_returns_bounded_error() {
+        let r = Region::Intersect {
+            regions: vec![
+                Region::Block {
+                    min: [0.0, 0.0, 0.0],
+                    max: [1.0, 1.0, 1.0],
+                },
+                Region::Block {
+                    min: [2.0, 2.0, 2.0],
+                    max: [3.0, 3.0, 3.0],
+                },
+            ],
+        };
+        let mut rng = StdRng::seed_from_u64(7);
+        assert_eq!(
+            r.random_point_inside(&mut rng),
+            Err(RegionSampleError::RejectionLimitExceeded {
+                region: "Intersect",
+                attempts: REGION_SAMPLE_ATTEMPT_LIMIT,
+            })
+        );
+    }
+
+    #[test]
+    fn test_valid_plane_constrained_intersect_random_point() {
+        let r = Region::Intersect {
+            regions: vec![
+                Region::Plane {
+                    point: [0.0, 0.0, 0.25],
+                    normal: [0.0, 0.0, 1.0],
+                },
+                Region::Union {
+                    regions: vec![
+                        Region::Block {
+                            min: [0.0, 0.0, 0.0],
+                            max: [1.0, 1.0, 1.0],
+                        },
+                        Region::Block {
+                            min: [2.0, 0.0, 0.0],
+                            max: [3.0, 1.0, 1.0],
+                        },
+                    ],
+                },
+            ],
+        };
+        let mut rng = StdRng::seed_from_u64(11);
+        for _ in 0..100 {
+            let p = r.random_point_inside(&mut rng).unwrap();
+            assert!(
+                r.contains(&p),
+                "random point {:?} not in composite region",
+                p
+            );
+            assert!(p[2] >= 0.25);
+        }
     }
 
     #[test]
@@ -1014,7 +1346,7 @@ hi = 0.01"#;
         };
         let mut rng = rand::rng();
         for _ in 0..200 {
-            let p = r.random_point_inside(&mut rng);
+            let p = r.random_point_inside(&mut rng).unwrap();
             assert!(r.contains(&p), "random point {:?} not in X-cylinder", p);
         }
     }
@@ -1030,7 +1362,7 @@ hi = 0.01"#;
         };
         let mut rng = rand::rng();
         for _ in 0..200 {
-            let p = r.random_point_inside(&mut rng);
+            let p = r.random_point_inside(&mut rng).unwrap();
             assert!(r.contains(&p), "random point {:?} not in Y-cylinder", p);
         }
     }
@@ -1039,8 +1371,14 @@ hi = 0.01"#;
     fn test_union_or_logic() {
         let r = Region::Union {
             regions: vec![
-                Region::Sphere { center: [0.0, 0.0, 0.0], radius: 1.0 },
-                Region::Sphere { center: [3.0, 0.0, 0.0], radius: 1.0 },
+                Region::Sphere {
+                    center: [0.0, 0.0, 0.0],
+                    radius: 1.0,
+                },
+                Region::Sphere {
+                    center: [3.0, 0.0, 0.0],
+                    radius: 1.0,
+                },
             ],
         };
         // In first sphere
@@ -1055,8 +1393,14 @@ hi = 0.01"#;
     fn test_intersect_and_logic() {
         let r = Region::Intersect {
             regions: vec![
-                Region::Sphere { center: [0.0, 0.0, 0.0], radius: 2.0 },
-                Region::Sphere { center: [1.0, 0.0, 0.0], radius: 2.0 },
+                Region::Sphere {
+                    center: [0.0, 0.0, 0.0],
+                    radius: 2.0,
+                },
+                Region::Sphere {
+                    center: [1.0, 0.0, 0.0],
+                    radius: 2.0,
+                },
             ],
         };
         // In both spheres
@@ -1071,13 +1415,19 @@ hi = 0.01"#;
     fn test_union_random_point() {
         let r = Region::Union {
             regions: vec![
-                Region::Block { min: [0.0, 0.0, 0.0], max: [1.0, 1.0, 1.0] },
-                Region::Block { min: [5.0, 5.0, 5.0], max: [6.0, 6.0, 6.0] },
+                Region::Block {
+                    min: [0.0, 0.0, 0.0],
+                    max: [1.0, 1.0, 1.0],
+                },
+                Region::Block {
+                    min: [5.0, 5.0, 5.0],
+                    max: [6.0, 6.0, 6.0],
+                },
             ],
         };
         let mut rng = rand::rng();
         for _ in 0..100 {
-            let p = r.random_point_inside(&mut rng);
+            let p = r.random_point_inside(&mut rng).unwrap();
             assert!(r.contains(&p), "random point {:?} not in union", p);
         }
     }
@@ -1086,13 +1436,19 @@ hi = 0.01"#;
     fn test_intersect_random_point() {
         let r = Region::Intersect {
             regions: vec![
-                Region::Block { min: [0.0, 0.0, 0.0], max: [2.0, 2.0, 2.0] },
-                Region::Block { min: [1.0, 1.0, 1.0], max: [3.0, 3.0, 3.0] },
+                Region::Block {
+                    min: [0.0, 0.0, 0.0],
+                    max: [2.0, 2.0, 2.0],
+                },
+                Region::Block {
+                    min: [1.0, 1.0, 1.0],
+                    max: [3.0, 3.0, 3.0],
+                },
             ],
         };
         let mut rng = rand::rng();
         for _ in 0..100 {
-            let p = r.random_point_inside(&mut rng);
+            let p = r.random_point_inside(&mut rng).unwrap();
             assert!(r.contains(&p), "random point {:?} not in intersect", p);
             // Should be in the overlap: [1,1,1] to [2,2,2]
             assert!(p[0] >= 1.0 && p[0] <= 2.0);
@@ -1122,11 +1478,14 @@ regions = [
     #[test]
     fn test_block_boundary_points_are_inside() {
         // All faces, edges, and corners of a block should be "inside" (inclusive)
-        let r = Region::Block { min: [0.0, 0.0, 0.0], max: [1.0, 1.0, 1.0] };
+        let r = Region::Block {
+            min: [0.0, 0.0, 0.0],
+            max: [1.0, 1.0, 1.0],
+        };
         // Faces
         assert!(r.contains(&[0.5, 0.5, 0.0])); // bottom face
         assert!(r.contains(&[0.5, 0.5, 1.0])); // top face
-        // Edges
+                                               // Edges
         assert!(r.contains(&[0.0, 0.5, 0.0]));
         assert!(r.contains(&[1.0, 0.5, 1.0]));
         // Corners
@@ -1137,7 +1496,10 @@ regions = [
 
     #[test]
     fn test_sphere_boundary_on_surface() {
-        let r = Region::Sphere { center: [0.0, 0.0, 0.0], radius: 1.0 };
+        let r = Region::Sphere {
+            center: [0.0, 0.0, 0.0],
+            radius: 1.0,
+        };
         // Points exactly on the surface should be inside (<=)
         assert!(r.contains(&[1.0, 0.0, 0.0]));
         assert!(r.contains(&[0.0, 1.0, 0.0]));
@@ -1149,7 +1511,10 @@ regions = [
     #[test]
     fn test_zero_volume_block() {
         // Degenerate block with zero volume (min == max)
-        let r = Region::Block { min: [1.0, 2.0, 3.0], max: [1.0, 2.0, 3.0] };
+        let r = Region::Block {
+            min: [1.0, 2.0, 3.0],
+            max: [1.0, 2.0, 3.0],
+        };
         // Only the exact point should be inside
         assert!(r.contains(&[1.0, 2.0, 3.0]));
         assert!(!r.contains(&[1.0 + 1e-15, 2.0, 3.0]));
@@ -1158,7 +1523,10 @@ regions = [
     #[test]
     fn test_zero_radius_sphere() {
         // Degenerate sphere with zero radius
-        let r = Region::Sphere { center: [0.0, 0.0, 0.0], radius: 0.0 };
+        let r = Region::Sphere {
+            center: [0.0, 0.0, 0.0],
+            radius: 0.0,
+        };
         assert!(r.contains(&[0.0, 0.0, 0.0]));
         assert!(!r.contains(&[1e-15, 0.0, 0.0]));
     }
@@ -1170,14 +1538,26 @@ regions = [
             regions: vec![
                 Region::Intersect {
                     regions: vec![
-                        Region::Block { min: [0.0, 0.0, 0.0], max: [2.0, 2.0, 2.0] },
-                        Region::Sphere { center: [0.0, 0.0, 0.0], radius: 1.5 },
+                        Region::Block {
+                            min: [0.0, 0.0, 0.0],
+                            max: [2.0, 2.0, 2.0],
+                        },
+                        Region::Sphere {
+                            center: [0.0, 0.0, 0.0],
+                            radius: 1.5,
+                        },
                     ],
                 },
                 Region::Intersect {
                     regions: vec![
-                        Region::Block { min: [3.0, 3.0, 3.0], max: [5.0, 5.0, 5.0] },
-                        Region::Sphere { center: [4.0, 4.0, 4.0], radius: 2.0 },
+                        Region::Block {
+                            min: [3.0, 3.0, 3.0],
+                            max: [5.0, 5.0, 5.0],
+                        },
+                        Region::Sphere {
+                            center: [4.0, 4.0, 4.0],
+                            radius: 2.0,
+                        },
                     ],
                 },
             ],
@@ -1195,8 +1575,14 @@ regions = [
         // Two overlapping spheres — point in overlap should be inside
         let r = Region::Union {
             regions: vec![
-                Region::Sphere { center: [0.0, 0.0, 0.0], radius: 2.0 },
-                Region::Sphere { center: [1.0, 0.0, 0.0], radius: 2.0 },
+                Region::Sphere {
+                    center: [0.0, 0.0, 0.0],
+                    radius: 2.0,
+                },
+                Region::Sphere {
+                    center: [1.0, 0.0, 0.0],
+                    radius: 2.0,
+                },
             ],
         };
         // In overlap region
@@ -1212,8 +1598,14 @@ regions = [
         // Two non-overlapping blocks — intersect should contain nothing
         let r = Region::Intersect {
             regions: vec![
-                Region::Block { min: [0.0, 0.0, 0.0], max: [1.0, 1.0, 1.0] },
-                Region::Block { min: [2.0, 2.0, 2.0], max: [3.0, 3.0, 3.0] },
+                Region::Block {
+                    min: [0.0, 0.0, 0.0],
+                    max: [1.0, 1.0, 1.0],
+                },
+                Region::Block {
+                    min: [2.0, 2.0, 2.0],
+                    max: [3.0, 3.0, 3.0],
+                },
             ],
         };
         assert!(!r.contains(&[0.5, 0.5, 0.5]));
@@ -1364,8 +1756,14 @@ radius = 5.0"#;
     fn test_union_surface() {
         let r = Region::Union {
             regions: vec![
-                Region::Sphere { center: [0.0, 0.0, 0.0], radius: 1.0 },
-                Region::Sphere { center: [5.0, 0.0, 0.0], radius: 1.0 },
+                Region::Sphere {
+                    center: [0.0, 0.0, 0.0],
+                    radius: 1.0,
+                },
+                Region::Sphere {
+                    center: [5.0, 0.0, 0.0],
+                    radius: 1.0,
+                },
             ],
         };
         // Closer to first sphere

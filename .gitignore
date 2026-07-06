@@ -17,3 +17,6 @@ schedule.png
 
 # mdBook rendered output (source lives in docs/src)
 docs/book/
+
+# local knowledge-graph tooling output
+graphify-out/

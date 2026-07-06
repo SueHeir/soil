@@ -5,7 +5,7 @@ name: docs-coverage
 # (`-D warnings`) so no public item can merge without a doc comment.
 #
 # Runner note: SOIL depends on the GRASS framework via a git dependency
-# (`ssh://git@192.168.0.170:2222/SueHeir/grass.git`), so the runner must be
+# (`https://github.com/SueHeir/grass.git`), so the runner must be
 # able to fetch that repo (the same SSH access the dev environment uses). The
 # default feature set links libmpi, hence the OpenMPI install below.
 

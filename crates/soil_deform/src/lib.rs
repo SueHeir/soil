@@ -470,6 +470,45 @@ fn next_axis_bounds(
     Ok((new_lo, new_hi))
 }
 
+fn needs_stage_total_steps(state: &DeformState) -> bool {
+    state.axes.iter().flatten().any(|axis| {
+        matches!(
+            axis.style,
+            DeformStyle::Final {
+                target_lo: _,
+                target_hi: _
+            }
+        )
+    })
+}
+
+fn current_stage_total_steps(
+    run_state: Option<&soil_core::RunState>,
+    scheduler_manager: Option<&SchedulerManager>,
+) -> Result<usize, DeformConfigError> {
+    let run_state = run_state.ok_or_else(|| {
+        DeformConfigError::new(
+            "[deform] final style requires RunState to determine the current stage's total steps; add RunPlugin before DeformPlugin",
+        )
+    })?;
+    let scheduler_manager = scheduler_manager.ok_or_else(|| {
+        DeformConfigError::new(
+            "[deform] final style requires SchedulerManager to determine the current run stage; use the grass scheduler/RunPlugin",
+        )
+    })?;
+    let stage_idx = scheduler_manager.index;
+
+    let count_len = run_state.cycle_count.len();
+    let total_len = run_state.cycle_remaining.len();
+    if stage_idx >= count_len || stage_idx >= total_len {
+        return Err(DeformConfigError::new(format!(
+            "[deform] final style cannot determine total steps for current stage {stage_idx}: RunState has cycle_count len {count_len} and cycle_remaining len {total_len}; ensure RunPlugin initialized this stage before deformation"
+        )));
+    }
+
+    Ok(run_state.cycle_remaining[stage_idx] as usize)
+}
+
 // ── Setup system ────────────────────────────────────────────────────────────
 
 /// Re-read deformation config from stage overrides and initialize state.
@@ -561,7 +600,8 @@ fn apply_deform(
     mut domain: ResMut<Domain>,
     mut state: ResMut<DeformState>,
     mut neighbor: ResMut<Neighbor>,
-    run_state: Res<soil_core::RunState>,
+    run_state: Option<Res<soil_core::RunState>>,
+    scheduler_manager: Option<Res<SchedulerManager>>,
 ) {
     if !state.initialized || !state.has_any() {
         return;
@@ -573,18 +613,14 @@ fn apply_deform(
     let nlocal = atoms.nlocal as usize;
 
     // Total steps for the current stage, needed by "final" style to compute
-    // interpolation fraction.  RunState tracks per-stage progress as parallel
-    // vectors: `cycle_count[i]` = steps completed so far in stage i,
-    // `cycle_remaining[i]` = steps left. Their sum is the stage's total steps.
-    let total_steps = if !run_state.cycle_remaining.is_empty() {
-        let stage_idx = run_state.cycle_count.len().saturating_sub(1);
-        if stage_idx < run_state.cycle_remaining.len() {
-            (run_state.cycle_count[stage_idx] + run_state.cycle_remaining[stage_idx]) as usize
-        } else {
-            1
-        }
+    // interpolation fraction. RunState stores the configured stage step count in
+    // `cycle_remaining[current_stage]`; validate that the scheduler stage has a
+    // matching entry rather than silently treating missing data as a one-step run.
+    let total_steps = if needs_stage_total_steps(&state) {
+        current_stage_total_steps(run_state.as_deref(), scheduler_manager.as_deref())
+            .unwrap_or_else(|err| exit_deform_error(err))
     } else {
-        1
+        0
     };
 
     let mut box_changed = false;
@@ -725,6 +761,21 @@ mod tests {
         rs
     }
 
+    fn make_multi_stage_run_state(stage_steps: &[u32]) -> RunState {
+        let mut rs = RunState::new();
+        for &steps in stage_steps {
+            rs.cycle_count.push(0);
+            rs.cycle_remaining.push(steps);
+        }
+        rs
+    }
+
+    fn make_scheduler_manager(index: usize) -> SchedulerManager {
+        let mut scheduler_manager = SchedulerManager::new();
+        scheduler_manager.index = index;
+        scheduler_manager
+    }
+
     #[test]
     fn erate_shrinks_box_symmetrically() {
         let domain = make_domain([0.0, 0.0, 0.0], [1.0, 1.0, 1.0]);
@@ -849,6 +900,7 @@ mod tests {
         app.add_resource(state);
         app.add_resource(neighbor);
         app.add_resource(run_state);
+        app.add_resource(make_scheduler_manager(0));
         app.add_update_system(apply_deform, ParticleSimScheduleSet::PreInitialIntegration);
         app.organize_systems();
 
@@ -863,6 +915,129 @@ mod tests {
         // new_hi = 1.0 + (0.9 - 1.0) * 1.0 = 0.9
         assert!((d.boundaries_low[1] - 0.1).abs() < 1e-10);
         assert!((d.boundaries_high[1] - 0.9).abs() < 1e-10);
+    }
+
+    #[test]
+    fn final_uses_current_stage_total_steps_in_multi_stage_run_state() {
+        let mut atoms = make_atoms(0);
+        atoms.dt = 0.001;
+        let domain = make_domain([0.0, 0.0, 0.0], [1.0, 1.0, 1.0]);
+        let neighbor = make_neighbor();
+        let run_state = make_multi_stage_run_state(&[3, 0, 4]);
+
+        let state = DeformState {
+            axes: [
+                Some(AxisDeform {
+                    style: DeformStyle::Final {
+                        target_lo: -0.5,
+                        target_hi: 1.5,
+                    },
+                    lo_0: 0.0,
+                    hi_0: 1.0,
+                }),
+                None,
+                None,
+            ],
+            remap: true,
+            shear_xy_rate: None,
+            shear_initialized: false,
+            step: 0,
+            initialized: true,
+        };
+
+        let mut app = App::new();
+        app.add_resource(atoms);
+        app.add_resource(domain);
+        app.add_resource(state);
+        app.add_resource(neighbor);
+        app.add_resource(run_state);
+        app.add_resource(make_scheduler_manager(2));
+        app.add_update_system(apply_deform, ParticleSimScheduleSet::PreInitialIntegration);
+        app.organize_systems();
+
+        for _ in 0..2 {
+            app.run();
+        }
+
+        {
+            let d = app.get_resource_ref::<Domain>().unwrap();
+            assert!((d.boundaries_low[0] - (-0.25)).abs() < 1e-12);
+            assert!((d.boundaries_high[0] - 1.25).abs() < 1e-12);
+        }
+
+        for _ in 0..2 {
+            app.run();
+        }
+
+        let d = app.get_resource_ref::<Domain>().unwrap();
+        assert!((d.boundaries_low[0] - (-0.5)).abs() < 1e-12);
+        assert!((d.boundaries_high[0] - 1.5).abs() < 1e-12);
+    }
+
+    #[test]
+    fn final_zero_step_stage_uses_zero_total_without_one_step_fallback() {
+        let mut atoms = make_atoms(0);
+        atoms.dt = 0.001;
+        let domain = make_domain([0.0, 0.0, 0.0], [1.0, 1.0, 1.0]);
+        let neighbor = make_neighbor();
+        let run_state = make_multi_stage_run_state(&[5, 0]);
+
+        let state = DeformState {
+            axes: [
+                None,
+                Some(AxisDeform {
+                    style: DeformStyle::Final {
+                        target_lo: 0.2,
+                        target_hi: 0.8,
+                    },
+                    lo_0: 0.0,
+                    hi_0: 1.0,
+                }),
+                None,
+            ],
+            remap: true,
+            shear_xy_rate: None,
+            shear_initialized: false,
+            step: 0,
+            initialized: true,
+        };
+
+        let mut app = App::new();
+        app.add_resource(atoms);
+        app.add_resource(domain);
+        app.add_resource(state);
+        app.add_resource(neighbor);
+        app.add_resource(run_state);
+        app.add_resource(make_scheduler_manager(1));
+        app.add_update_system(apply_deform, ParticleSimScheduleSet::PreInitialIntegration);
+        app.organize_systems();
+        app.run();
+
+        let d = app.get_resource_ref::<Domain>().unwrap();
+        assert!((d.boundaries_low[1] - 0.2).abs() < 1e-12);
+        assert!((d.boundaries_high[1] - 0.8).abs() < 1e-12);
+    }
+
+    #[test]
+    fn final_missing_run_state_reports_validation_error() {
+        let scheduler_manager = make_scheduler_manager(0);
+        let err = current_stage_total_steps(None, Some(&scheduler_manager)).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "[deform] final style requires RunState to determine the current stage's total steps; add RunPlugin before DeformPlugin"
+        );
+    }
+
+    #[test]
+    fn final_stale_run_state_stage_index_reports_validation_error() {
+        let run_state = make_run_state(4);
+        let scheduler_manager = make_scheduler_manager(1);
+        let err =
+            current_stage_total_steps(Some(&run_state), Some(&scheduler_manager)).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "[deform] final style cannot determine total steps for current stage 1: RunState has cycle_count len 1 and cycle_remaining len 1; ensure RunPlugin initialized this stage before deformation"
+        );
     }
 
     #[test]

@@ -398,6 +398,7 @@ fn parse_shear_rate(def: &Option<AxisDeformDef>) -> Result<Option<f64>, DeformCo
 fn validate_deform_config(
     config: &DeformConfig,
     domain: &Domain,
+    mpi_ranks: i32,
 ) -> Result<([Option<AxisDeform>; 3], Option<f64>), DeformConfigError> {
     let axes = [
         parse_axis_def(&config.x, "x")?,
@@ -405,6 +406,13 @@ fn validate_deform_config(
         parse_axis_def(&config.z, "z")?,
     ];
     let shear_xy_rate = parse_shear_rate(&config.xy)?;
+    let has_active_deform = axes.iter().any(|axis| axis.is_some()) || shear_xy_rate.is_some();
+
+    if has_active_deform && mpi_ranks > 1 {
+        return Err(DeformConfigError::new(format!(
+            "soil_deform does not support active [deform] with MPI rank count {mpi_ranks}: deformation currently performs an unsupported subdomain-bound update by setting each rank's sub_domain_low/sub_domain_high to the global box. Run with one MPI rank or disable [deform] until MPI subdomain deformation is implemented."
+        )));
+    }
 
     if shear_xy_rate.is_some() && (!domain.is_periodic(0) || !domain.is_periodic(1)) {
         return Err(DeformConfigError::new(format!(
@@ -527,8 +535,8 @@ fn setup_deform(
     let config: DeformConfig = stage_overrides.section("deform");
 
     // Parse axis definitions fresh from this stage's config.
-    let (axes, shear_xy_rate) =
-        validate_deform_config(&config, &domain).unwrap_or_else(|err| exit_deform_error(err));
+    let (axes, shear_xy_rate) = validate_deform_config(&config, &domain, comm.size())
+        .unwrap_or_else(|err| exit_deform_error(err));
     state.axes = axes;
     state.shear_xy_rate = shear_xy_rate;
     state.shear_initialized = false;
@@ -1421,11 +1429,43 @@ mod tests {
             BoundaryType::Periodic,
         ];
 
-        let err = validate_deform_config(&config, &domain).unwrap_err();
+        let err = validate_deform_config(&config, &domain, 1).unwrap_err();
         assert_eq!(
             err.to_string(),
             "[deform] xy shear requires periodic x and y boundaries; got x=Periodic, y=Fixed"
         );
+    }
+
+    #[test]
+    fn active_deform_with_mpi_reports_subdomain_validation_error() {
+        let config = DeformConfig {
+            z: Some(AxisDeformDef {
+                style: "erate".to_string(),
+                rate: Some(-0.001),
+                velocity: None,
+                lo: None,
+                hi: None,
+            }),
+            ..DeformConfig::default()
+        };
+        let domain = make_domain([0.0, 0.0, 0.0], [1.0, 1.0, 1.0]);
+
+        let err = validate_deform_config(&config, &domain, 2).unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("soil_deform"));
+        assert!(message.contains("MPI rank count 2"));
+        assert!(message.contains("unsupported subdomain-bound update"));
+        assert!(message.contains("sub_domain_low/sub_domain_high"));
+    }
+
+    #[test]
+    fn no_deform_with_mpi_is_accepted() {
+        let config = DeformConfig::default();
+        let domain = make_domain([0.0, 0.0, 0.0], [1.0, 1.0, 1.0]);
+
+        let (axes, shear_xy_rate) = validate_deform_config(&config, &domain, 4).unwrap();
+        assert!(axes.iter().all(|axis| axis.is_none()));
+        assert!(shear_xy_rate.is_none());
     }
 
     #[test]

@@ -5,18 +5,21 @@ methods. It is the tree and partitioning surface only: positions go in, atom or
 tree-node indices come out, and a physics tier decides what to do with those
 indices.
 
-The public Rust API lives in rustdoc:
+The public Rust API is rustdoc-commented in `crates/soil_core/src/tree.rs`.
+Because `soil_core` is not published on docs.rs, the mdBook links below point to
+the checked reference sections rather than to broken public rustdoc URLs:
 
-- [`Octree`](https://docs.rs/soil_core/latest/soil_core/tree/struct.Octree.html)
-- [`OctreeNode`](https://docs.rs/soil_core/latest/soil_core/tree/struct.OctreeNode.html)
-- [`Monopole`](https://docs.rs/soil_core/latest/soil_core/tree/struct.Monopole.html)
+- [`Octree`](#what-soil-provides)
+- [`OctreeNode`](#far-field-partition)
+- [`Monopole`](#monopoles)
 
 SOIL also re-exports these at the crate root as `soil_core::Octree`,
 `soil_core::OctreeNode`, and `soil_core::Monopole`.
 
 ## What SOIL provides
 
-Use [`Octree::build`](https://docs.rs/soil_core/latest/soil_core/tree/struct.Octree.html#method.build)
+<a id="build"></a>
+Use [`Octree::build`](#build)
 when you want SOIL to choose a root cube that encloses the input points:
 
 ```rust,ignore
@@ -26,7 +29,8 @@ let positions: Vec<[f64; 3]> = load_positions();
 let tree = Octree::build(&positions, 16, 24);
 ```
 
-Use [`Octree::build_in_box`](https://docs.rs/soil_core/latest/soil_core/tree/struct.Octree.html#method.build_in_box)
+<a id="build_in_box"></a>
+Use [`Octree::build_in_box`](#build_in_box)
 when the caller already owns the enclosing box:
 
 ```rust,ignore
@@ -45,7 +49,8 @@ methods.
 
 ## Near Pairs
 
-[`Octree::near_pairs`](https://docs.rs/soil_core/latest/soil_core/tree/struct.Octree.html#method.near_pairs)
+<a id="near_pairs"></a>
+[`Octree::near_pairs`](#near_pairs)
 returns every unordered pair `(i, j)` with `i < j` whose points are within a
 cutoff:
 
@@ -68,7 +73,8 @@ when a long-range method is assembling its own near/far split.
 
 ## Far-Field Partition
 
-[`Octree::far_field_partition`](https://docs.rs/soil_core/latest/soil_core/tree/struct.Octree.html#method.far_field_partition)
+<a id="far_field_partition"></a>
+[`Octree::far_field_partition`](#far_field_partition)
 walks the tree for one target point and partitions every source into exactly one
 of two outputs:
 
@@ -102,8 +108,9 @@ its own kernel.
 
 ## Monopoles
 
-[`Octree::monopoles`](https://docs.rs/soil_core/latest/soil_core/tree/struct.Octree.html#method.monopoles)
-computes a [`Monopole`](https://docs.rs/soil_core/latest/soil_core/tree/struct.Monopole.html)
+<a id="monopoles_method"></a>
+[`Octree::monopoles`](#monopoles_method)
+computes a [`Monopole`](#monopoles)
 for every tree node from caller-supplied per-atom weights:
 
 ```rust,ignore
@@ -120,6 +127,22 @@ The aggregate is only `sum(w_i)` and the weight-averaged center. SOIL does not
 assign a physical meaning to the weight. It may be mass, charge magnitude,
 particle volume, an SPH weight, or another non-negative quantity chosen by the
 consumer.
+
+## API Link Targets
+
+These mdBook anchors mirror the public `soil_core::tree` rustdoc names and are
+kept here so hosted docs do not depend on an unpublished docs.rs crate.
+
+| API | Reference |
+|---|---|
+| `Octree` | [What SOIL provides](#what-soil-provides) |
+| `OctreeNode` | [Far-field partition node ids](#far-field-partition) |
+| `Monopole` | [Monopoles](#monopoles) |
+| `Octree::build` | [build](#build) |
+| `Octree::build_in_box` | [build_in_box](#build_in_box) |
+| `Octree::near_pairs` | [near_pairs](#near_pairs) |
+| `Octree::far_field_partition` | [far_field_partition](#far_field_partition) |
+| `Octree::monopoles` | [monopoles](#monopoles_method) |
 
 ## Choosing The Parameters
 

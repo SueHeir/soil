@@ -203,14 +203,14 @@ globally consistent full-rebuild step.
 ## Octree near/far partitioning
 
 For long-range particle methods, `soil_core` also exposes
-[`soil_core::tree::Octree`](https://docs.rs/soil_core/latest/soil_core/tree/struct.Octree.html).
+[`soil_core::tree::Octree`](../substrate/octree-near-far.md#what-soil-provides).
 This is separate from the timestep neighbor list above: it is a method-agnostic
 tree over caller-supplied positions, with
-[`near_pairs`](https://docs.rs/soil_core/latest/soil_core/tree/struct.Octree.html#method.near_pairs)
+[`near_pairs`](../substrate/octree-near-far.md#near_pairs)
 for cutoff pair queries,
-[`far_field_partition`](https://docs.rs/soil_core/latest/soil_core/tree/struct.Octree.html#method.far_field_partition)
+[`far_field_partition`](../substrate/octree-near-far.md#far_field_partition)
 for one-target near/far walks, and
-[`monopoles`](https://docs.rs/soil_core/latest/soil_core/tree/struct.Octree.html#method.monopoles)
+[`monopoles`](../substrate/octree-near-far.md#monopoles_method)
 for caller-weighted node aggregates.
 
 The tree is still substrate-level machinery. It owns no force law, potential,

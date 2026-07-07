@@ -11,6 +11,7 @@
 - [Time Integration](./substrate/integration.md)
 - [Fixes](./substrate/fixes.md)
 - [Box Deformation](./substrate/deformation.md)
+- [Octree Near/Far Partition](./substrate/octree-near-far.md)
 
 # Tutorial
 

@@ -200,6 +200,24 @@ The rebuild policy follows LAMMPS `neigh_modify`: displacement-based when
 (`sort_every`) reorders atoms for cache locality and, as above, only fires on a
 globally consistent full-rebuild step.
 
+## Octree near/far partitioning
+
+For long-range particle methods, `soil_core` also exposes
+[`soil_core::tree::Octree`](../substrate/octree-near-far.md#what-soil-provides).
+This is separate from the timestep neighbor list above: it is a method-agnostic
+tree over caller-supplied positions, with
+[`near_pairs`](../substrate/octree-near-far.md#near_pairs)
+for cutoff pair queries,
+[`far_field_partition`](../substrate/octree-near-far.md#far_field_partition)
+for one-target near/far walks, and
+[`monopoles`](../substrate/octree-near-far.md#monopoles_method)
+for caller-weighted node aggregates.
+
+The tree is still substrate-level machinery. It owns no force law, potential,
+kernel, time integration, or energy check. The full user-facing reference is
+[Octree Near/Far Partition](../substrate/octree-near-far.md); the checked
+consumers are `examples/tree_farfield_proof` and `examples/orbit_nbody_gravity`.
+
 ## Regions and groups
 
 A **region** is a TOML-declared spatial primitive — `block`, `sphere`,

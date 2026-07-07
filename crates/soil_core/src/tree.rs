@@ -451,11 +451,11 @@ impl Octree {
     ///
     /// Returned vector is indexed by node id (same order as [`nodes`](Self::nodes)).
     /// This is the aggregate a treecode multiplies into the far half of
-    /// [`far_field_partition`]. Weights are treated as opaque scalars; for a
-    /// signed quantity (e.g. charge) pass magnitudes for the acceptance geometry
-    /// and carry the sign in the caller's kernel, or expand about the geometric
-    /// centre. Cost is O(#nodes) via a single post-order sweep (children precede
-    /// parents in node order).
+    /// [`far_field_partition`](Self::far_field_partition). Weights are treated as
+    /// opaque scalars; for a signed quantity (e.g. charge) pass magnitudes for
+    /// the acceptance geometry and carry the sign in the caller's kernel, or
+    /// expand about the geometric centre. Cost is O(#nodes) via a single
+    /// post-order sweep (children precede parents in node order).
     pub fn monopoles(&self, positions: &[[f64; 3]], weights: &[f64]) -> Vec<Monopole> {
         // Accumulate Σw and Σw·x per node; leaves sum their atoms, internals sum
         // their children. Node ids increase from leaves to root, so one forward

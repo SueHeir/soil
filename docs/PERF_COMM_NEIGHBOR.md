@@ -244,6 +244,16 @@ conservative candidate count over the selected stencil/self-cell ranges and
 reserves once if needed, then writes accepted neighbors through the cached
 writer until setting the final Vec length (`neighbor/binning.rs:9-25`,
 `neighbor/binning.rs:837-887`, `neighbor/binning.rs:1065-1068`).
+The bound is intentionally the number of candidate bin entries before the
+distance predicate, so every accepted neighbor is already covered for both half
+and full lists. Impact is a branch-trim in the accepted-neighbor emission path:
+the remaining cost is one extra candidate-counting pass per full rebuild, while
+the hot write path has no per-accepted-pair growth test beyond a debug assertion.
+Validated on the N5 branch with `cargo test -p soil_core` and the existing
+`examples/neighbor_comm_profile/sweep.py` neighbor/comm harness; the refreshed
+profile captured `neighbor_build` with zero allocation calls and mean build
+times of `0.456 ms` serial, `0.497 ms` rank 0, and `0.492 ms` rank 1 for the
+checked-in layouts.
 
 ### N6 — Full-list self-cell `j == i` branch in inner loop · impact M(full)/0(half) · effort S
 ### ✅ DONE

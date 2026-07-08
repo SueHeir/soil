@@ -8,6 +8,7 @@
 - [The AtomData Contract](./substrate/atomdata-contract.md)
 - [Does the Seam Hold? — A Peridynamics Worked Check](./substrate/peridynamics-check.md)
 - [Writing an AtomData Extension](./substrate/writing-atomdata.md)
+- [Testing Substrate-Based Physics](./substrate/testing-substrate-authors.md)
 - [Time Integration](./substrate/integration.md)
 - [Fixes](./substrate/fixes.md)
 - [Box Deformation](./substrate/deformation.md)

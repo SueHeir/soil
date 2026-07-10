@@ -17,6 +17,6 @@ precision-single = ["soil_core/precision-single"]
 
 [dependencies]
 soil_core = { path = "../soil_core", version = "0.1.3", default-features = false }
-grass_app = { git = "ssh://git@192.168.0.170:2222/SueHeir/grass.git", branch = "main" }
-grass_scheduler = { git = "ssh://git@192.168.0.170:2222/SueHeir/grass.git", branch = "main" }
-serde = { version = "1", features = ["derive"] }
+grass_app.workspace = true
+grass_scheduler.workspace = true
+serde.workspace = true

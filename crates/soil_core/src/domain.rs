@@ -18,6 +18,30 @@ use crate::{
 };
 use grass_scheduler::prelude::CurrentState;
 
+/// Type-level label for [`domain_read_input`].
+pub struct DomainReadInputSystem;
+impl SystemLabel for DomainReadInputSystem {
+    const NAME: &'static str = "domain_read_input";
+}
+/// Stable scheduler key for [`domain_read_input`].
+pub const DOMAIN_READ_INPUT: SystemKey<DomainReadInputSystem> = SystemKey::new();
+
+/// Type-level label for [`shrink_wrap`].
+pub struct ShrinkWrapSystem;
+impl SystemLabel for ShrinkWrapSystem {
+    const NAME: &'static str = "shrink_wrap";
+}
+/// Stable scheduler key for [`shrink_wrap`].
+pub const SHRINK_WRAP: SystemKey<ShrinkWrapSystem> = SystemKey::new();
+
+/// Type-level label for [`pbc`].
+pub struct PbcSystem;
+impl SystemLabel for PbcSystem {
+    const NAME: &'static str = "pbc";
+}
+/// Stable scheduler key for [`pbc`].
+pub const PBC: SystemKey<PbcSystem> = SystemKey::new();
+
 fn default_one_f64() -> f64 {
     1.0
 }
@@ -526,16 +550,18 @@ fn install_domain(app: &mut App) {
     app.add_resource(Domain::new())
         .add_setup_system(
             domain_read_input
-                .label("domain_read_input")
+                .label(DOMAIN_READ_INPUT)
                 .run_if(first_stage_only()),
             ScheduleSetupSet::Setup,
         )
         .add_update_system(
-            shrink_wrap.label("shrink_wrap").before("pbc"),
+            shrink_wrap.label(SHRINK_WRAP).before(PBC),
             ParticleSimScheduleSet::PreExchange,
         )
         .add_update_system(
-            pbc.label("pbc").run_if(in_state(CommState::FullRebuild)),
+            pbc.requires(SHRINK_WRAP)
+                .label(PBC)
+                .run_if(in_state(CommState::FullRebuild)),
             ParticleSimScheduleSet::PreExchange,
         );
 }

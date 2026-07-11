@@ -119,7 +119,8 @@ pub use region::{Axis, Region, RegionSampleError, SurfaceResult};
 // / `Res<RunConfig>` etc. unchanged.
 pub use grass_io::{
     run_read_input, set_stage_name, update_cycle, validate_stages, FirstStageOnlyConfigs,
-    RunConfig, RunPlugin, RunSchedule, RunState, StageConfig, StageOverrides, RUN_NAMESPACE,
+    RunConfig, RunPlugin, RunSchedule, RunState, StageConfig, StageOverrides, UpdateCycleSystem,
+    RUN_NAMESPACE, UPDATE_CYCLE,
 };
 // `deep_merge` is also re-exported in case downstream code uses it.
 pub use grass_io::deep_merge;

@@ -187,7 +187,7 @@ pub fn check_stage_end_save(
         return;
     }
 
-    // check_stage_end_save runs .before("update_cycle"), so the cycle counter
+    // check_stage_end_save runs before UPDATE_CYCLE, so the cycle counter
     // hasn't been incremented for the current step yet.  After update_cycle runs,
     // count will be count+1, which equals remaining on the final step.
     let count = run_state.cycle_count[index];

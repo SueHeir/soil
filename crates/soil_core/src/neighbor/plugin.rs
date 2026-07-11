@@ -8,6 +8,30 @@ use crate::{
     Atom, CommResource, CommState, Config, Domain, ParticleSimScheduleSet, ScheduleSetupSet,
 };
 
+/// Type-level label for [`neighbor_setup`].
+pub struct NeighborSetupSystem;
+impl SystemLabel for NeighborSetupSystem {
+    const NAME: &'static str = "neighbor_setup";
+}
+/// Stable scheduler key for [`neighbor_setup`].
+pub const NEIGHBOR_SETUP: SystemKey<NeighborSetupSystem> = SystemKey::new();
+
+/// Type-level label for [`decide_rebuild`].
+pub struct DecideRebuildSystem;
+impl SystemLabel for DecideRebuildSystem {
+    const NAME: &'static str = "decide_rebuild";
+}
+/// Stable scheduler key for [`decide_rebuild`].
+pub const DECIDE_REBUILD: SystemKey<DecideRebuildSystem> = SystemKey::new();
+
+/// Type-level label for [`sort_atoms_by_bin`].
+pub struct SortAtomsSystem;
+impl SystemLabel for SortAtomsSystem {
+    const NAME: &'static str = "sort_atoms";
+}
+/// Stable scheduler key for [`sort_atoms_by_bin`].
+pub const SORT_ATOMS: SystemKey<SortAtomsSystem> = SystemKey::new();
+
 /// # Systems registered
 ///
 /// - **Setup**: [`neighbor_read_input`] (reads `[neighbor]` config) and
@@ -49,19 +73,19 @@ distance_kernel = "scalar""#,
             .add_resource(CurrentState(CommState::FullRebuild))
             .add_setup_system(neighbor_read_input, ScheduleSetupSet::Setup)
             .add_setup_system(
-                neighbor_setup.label("neighbor_setup"),
+                neighbor_setup.label(NEIGHBOR_SETUP),
                 ScheduleSetupSet::PostSetup,
             );
 
         app.add_update_system(
             decide_rebuild
-                .label("decide_rebuild")
+                .label(DECIDE_REBUILD)
                 .before(crate::remove_ghost_atoms)
                 .run_if(in_state(CommState::CommunicateOnly)),
             ParticleSimScheduleSet::PostInitialIntegration,
         );
         app.add_update_system(
-            sort_atoms_by_bin.label("sort_atoms").before(crate::borders),
+            sort_atoms_by_bin.label(SORT_ATOMS).before(crate::BORDERS),
             ParticleSimScheduleSet::PreNeighbor,
         );
         app.add_update_system(

@@ -28,6 +28,30 @@ use crate::{
     ParticleStore, Real, ScheduleSetupSet,
 };
 
+/// Type-level label for [`borders`].
+pub struct BordersSystem;
+impl SystemLabel for BordersSystem {
+    const NAME: &'static str = "borders";
+}
+/// Stable scheduler key for [`borders`].
+pub const BORDERS: SystemKey<BordersSystem> = SystemKey::new();
+
+/// Type-level label for [`reverse_send_force`].
+pub struct ReverseSendForceSystem;
+impl SystemLabel for ReverseSendForceSystem {
+    const NAME: &'static str = "reverse_send_force";
+}
+/// Stable scheduler key for [`reverse_send_force`].
+pub const REVERSE_SEND_FORCE: SystemKey<ReverseSendForceSystem> = SystemKey::new();
+
+/// Type-level label for [`exchange`].
+pub struct ExchangeSystem;
+impl SystemLabel for ExchangeSystem {
+    const NAME: &'static str = "exchange";
+}
+/// Stable scheduler key for [`exchange`].
+pub const EXCHANGE: SystemKey<ExchangeSystem> = SystemKey::new();
+
 // ── CommConfig ──────────────────────────────────────────────────────────────
 
 fn default_one_i32() -> i32 {
@@ -254,7 +278,10 @@ forward_precision = "f64""#,
             ScheduleSetupSet::PostSetup,
         )
         .add_update_system(
-            borders.run_if(in_state(CommState::FullRebuild)),
+            borders
+                .label(BORDERS)
+                .requires(crate::SORT_ATOMS)
+                .run_if(in_state(CommState::FullRebuild)),
             ParticleSimScheduleSet::PreNeighbor,
         )
         .add_update_system(
@@ -263,7 +290,7 @@ forward_precision = "f64""#,
         )
         .add_update_system(
             reverse_send_force
-                .label("reverse_send_force")
+                .label(REVERSE_SEND_FORCE)
                 .run_if(newton_on),
             ParticleSimScheduleSet::PostForce,
         );
@@ -271,7 +298,7 @@ forward_precision = "f64""#,
         #[cfg(feature = "mpi_backend")]
         app.add_update_system(
             exchange
-                .label("exchange")
+                .label(EXCHANGE)
                 .run_if(in_state(CommState::FullRebuild)),
             ParticleSimScheduleSet::Exchange,
         );

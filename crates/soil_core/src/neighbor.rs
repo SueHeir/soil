@@ -17,7 +17,10 @@ mod state;
 pub use config::{NeighborConfig, NeighborDistanceKernel};
 pub use csr::PairIter;
 pub use pair_list::bin_neighbor_list;
-pub use plugin::{neighbor_read_input, neighbor_setup, NeighborPlugin};
+pub use plugin::{
+    neighbor_read_input, neighbor_setup, DecideRebuildSystem, NeighborPlugin, NeighborSetupSystem,
+    SortAtomsSystem, DECIDE_REBUILD, NEIGHBOR_SETUP, SORT_ATOMS,
+};
 pub use rebuild::decide_rebuild;
 pub use sorting::sort_atoms_by_bin;
 pub use state::{classify_boundary_atoms, Neighbor};

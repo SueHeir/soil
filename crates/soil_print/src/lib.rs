@@ -64,6 +64,7 @@
 
 #![warn(missing_docs)]
 
+mod config;
 mod dump;
 mod plugin;
 mod registry;

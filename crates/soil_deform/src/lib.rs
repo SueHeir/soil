@@ -216,11 +216,6 @@ impl fmt::Display for DeformConfigError {
 
 impl std::error::Error for DeformConfigError {}
 
-fn exit_deform_error(err: DeformConfigError) -> ! {
-    eprintln!("ERROR: {err}");
-    std::process::exit(1);
-}
-
 /// Per-axis deformation state.
 #[derive(Clone, Debug)]
 pub struct AxisDeform {
@@ -566,7 +561,7 @@ fn setup_deform(
 
     // Parse axis definitions fresh from this stage's config.
     let (axes, shear_xy_rate) = validate_deform_config(&config, &domain, comm.size())
-        .unwrap_or_else(|err| exit_deform_error(err));
+        .expect("DeformPlugin validated every declared stage before the scheduler started");
     state.axes = axes;
     state.shear_xy_rate = shear_xy_rate;
     state.shear_initialized = false;
@@ -656,7 +651,7 @@ fn apply_deform(
     // matching entry rather than silently treating missing data as a one-step run.
     let total_steps = if needs_stage_total_steps(&state) {
         current_stage_total_steps(run_state.as_deref(), scheduler_manager.as_deref())
-            .unwrap_or_else(|err| exit_deform_error(err))
+            .expect("DeformPlugin validated the declared run stages before the scheduler started")
     } else {
         0
     };
@@ -674,7 +669,9 @@ fn apply_deform(
         let old_size = old_hi - old_lo;
 
         let (new_lo, new_hi) = next_axis_bounds(axis, AXIS_NAMES[dim], dt, step, total_steps)
-            .unwrap_or_else(|err| exit_deform_error(err));
+            .expect(
+                "DeformPlugin validated declared deformation bounds before the scheduler started",
+            );
 
         let new_size = new_hi - new_lo;
 

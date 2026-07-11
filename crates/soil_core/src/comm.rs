@@ -14,8 +14,6 @@
 //! 3. **Forward comm**: lightweight position/velocity update for existing ghosts
 //! 4. **Reverse comm**: accumulate forces from ghosts back to their owners
 
-use std::process::exit;
-
 use grass_app::prelude::*;
 use grass_scheduler::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -227,6 +225,23 @@ forward_precision = "f64""#,
             maxneed: [0, 0, 0],
         });
 
+        // Validate against the actual backend before legacy scheduler setup.
+        // `App::try_start` returns this error and never advances a step.
+        app.add_fallible_setup_system("validate communication processor grid", |app: &mut App| {
+            let config = app.get_resource_ref::<CommConfig>()
+                .ok_or_else(|| AppError::message("CommunicationPlugin did not register CommConfig"))?;
+            let comm = app.get_resource_ref::<CommResource>()
+                .ok_or_else(|| AppError::message("CommunicationPlugin did not register CommResource"))?;
+            let configured = config.processors_x * config.processors_y * config.processors_z;
+            if configured != comm.size() {
+                return Err(AppError::message(format!(
+                    "[comm] processors {} {} {} multiply to {configured}, but the active communicator has {} ranks",
+                    config.processors_x, config.processors_y, config.processors_z, comm.size()
+                )));
+            }
+            Ok(())
+        }, ScheduleSetupSet::PreSetup);
+
         app.add_setup_system(comm_read_input.run_if(first_stage_only()), ScheduleSetupSet::PreSetup)
             .add_setup_system(comm_setup.run_if(first_stage_only()), ScheduleSetupSet::PostSetup)
             .add_update_system(
@@ -280,7 +295,7 @@ pub fn comm_read_input(config: Res<CommConfig>, mut comm: ResMut<CommResource>) 
                 comm.size()
             );
         }
-        exit(1);
+        panic!("CommunicationPlugin startup validation was bypassed: processor grid does not match communicator size");
     }
 
     let rank = comm.rank();

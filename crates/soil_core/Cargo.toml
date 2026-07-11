@@ -28,3 +28,6 @@ grass_io.workspace = true
 serde.workspace = true
 toml.workspace = true
 rand.workspace = true
+
+[dev-dependencies]
+soil_derive = { path = "../soil_derive", version = "0.1.3" }

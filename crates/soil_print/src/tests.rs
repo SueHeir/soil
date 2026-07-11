@@ -129,6 +129,13 @@ impl AtomData for GenericColumn {
     fn as_any_mut(&mut self) -> &mut dyn Any {
         self
     }
+    fn len(&self) -> usize {
+        self.scalar.len()
+    }
+    fn push_default(&mut self) {
+        self.scalar.push(0.0);
+        self.vector.push([0.0; 3]);
+    }
     fn truncate(&mut self, n: usize) {
         self.scalar.truncate(n);
         self.vector.truncate(n);
@@ -223,7 +230,7 @@ fn fixture_atoms() -> (
 /// Register a `GenericColumn` on a fresh registry.
 fn registry_with_column() -> AtomDataRegistry {
     let mut reg = AtomDataRegistry::new();
-    reg.register(GenericColumn::default());
+    reg.try_register(GenericColumn::default(), 0).unwrap();
     reg
 }
 

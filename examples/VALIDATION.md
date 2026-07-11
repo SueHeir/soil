@@ -3,6 +3,14 @@
 Validation examples live under top-level `examples/`, matching the DIRT layout.
 Crate directories contain library code only.
 
+## atomdata_row_contract
+
+Exact row-count contract validation for late extension registration and a
+malformed manual multi-column store. The accepted store must have three rows;
+the malformed store's hidden two-row column must be rejected.
+
+![AtomData row contract](atomdata_row_contract/plots/atomdata_row_contract.png)
+
 ## virial_thermo_crossrank
 
 MPI validation that `VirialStress` pair-force contributions reach the

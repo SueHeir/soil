@@ -1169,16 +1169,14 @@ impl<'a> ParticleStore<'a> {
     /// Append a single ghost record. For a variable-width stream, use the
     /// counted batch API so its exact end can be verified.
     pub fn append_ghost(&mut self, payload: &[f64]) -> Result<usize, ParticleStoreError> {
-        let used = self.append_received(payload, true)?;
-        self.atoms.nghost += 1;
-        Ok(used)
+        self.append_records(payload, 1, true)?;
+        Ok(payload.len())
     }
 
     /// Append a single migrated local record.
     pub fn append_migrant(&mut self, payload: &[f64]) -> Result<usize, ParticleStoreError> {
-        let used = self.append_received(payload, false)?;
-        self.atoms.nlocal += 1;
-        Ok(used)
+        self.append_records(payload, 1, false)?;
+        Ok(payload.len())
     }
 
     /// Append exactly `count` ghost records, rolling the whole batch back when
@@ -1206,34 +1204,42 @@ impl<'a> ParticleStore<'a> {
         count: usize,
         ghost: bool,
     ) -> Result<(), ParticleStoreError> {
-        if !self.registry.validate_rows(self.atoms.len()) {
+        // A migrated atom is locally owned.  Appending it after a ghost suffix
+        // would put a local row behind ghosts and violate Atom's prefix layout.
+        if (!ghost && self.atoms.nghost != 0) || !self.registry.validate_rows(self.atoms.len()) {
             return Err(ParticleStoreError::InvalidStructuralOperation);
         }
         let rows_before = self.atoms.len();
-        let nlocal_before = self.atoms.nlocal;
-        let nghost_before = self.atoms.nghost;
-        self.reserve(count);
-        let result = (|| {
+        let core_before = self.atoms.clone();
+        let extension_before = self.registry.row_snapshot(rows_before);
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            self.reserve(count);
             let mut pos = 0;
             for _ in 0..count {
-                let used = if ghost {
-                    self.append_ghost(&payload[pos..])?
+                let used = self.append_received(&payload[pos..], ghost)?;
+                if ghost {
+                    self.atoms.nghost += 1;
                 } else {
-                    self.append_migrant(&payload[pos..])?
-                };
+                    self.atoms.nlocal += 1;
+                }
                 pos += used;
             }
             (pos == payload.len())
                 .then_some(())
                 .ok_or(ParticleStoreError::MalformedExtensionRecord)
-        })();
-        if result.is_err() {
-            self.atoms.truncate_to(rows_before);
-            self.registry.truncate_all(rows_before);
-            self.atoms.nlocal = nlocal_before;
-            self.atoms.nghost = nghost_before;
+        }));
+        if matches!(result, Ok(Ok(())))
+            && self.atoms.len() == rows_before + count
+            && self.registry.validate_rows(rows_before + count)
+        {
+            return Ok(());
         }
-        result
+        *self.atoms = core_before;
+        assert!(
+            self.registry.decode_rows(rows_before, &extension_before),
+            "AtomData migration wire contract could not restore a receive transaction"
+        );
+        Err(ParticleStoreError::MalformedExtensionRecord)
     }
 }
 
@@ -1380,6 +1386,50 @@ mod tests {
         fn unpack(&mut self, buf: &[f64]) -> usize {
             self.rows.push(buf[0]);
             1
+        }
+        fn apply_permutation(&mut self, _perm: &[usize], _n: usize) {}
+    }
+
+    /// A deliberately hostile legacy decoder: it corrupts an existing row and
+    /// then reports an invalid record.  This exercises receive rollback beyond
+    /// simple truncation, which cannot restore overwritten rows.
+    struct CorruptingUnpackRows {
+        rows: Vec<f64>,
+    }
+
+    impl AtomData for CorruptingUnpackRows {
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+        fn as_any_mut(&mut self) -> &mut dyn Any {
+            self
+        }
+        fn len(&self) -> usize {
+            self.rows.len()
+        }
+        fn push_default(&mut self) {
+            self.rows.push(0.0);
+        }
+        fn truncate(&mut self, n: usize) {
+            self.rows.truncate(n);
+        }
+        fn swap_remove(&mut self, i: usize) {
+            self.rows.swap_remove(i);
+        }
+        fn pack(&self, i: usize, buf: &mut Vec<f64>) {
+            buf.push(self.rows[i]);
+        }
+        fn unpack(&mut self, buf: &[f64]) -> usize {
+            // A clean restart decode is valid, so the facade can recover via
+            // the documented wire contract.  An incremental receive instead
+            // corrupts existing state and reports an invalid record.
+            if self.rows.is_empty() {
+                self.rows.push(buf[0]);
+                1
+            } else {
+                self.rows[0] = -999.0;
+                0
+            }
         }
         fn apply_permutation(&mut self, _perm: &[usize], _n: usize) {}
     }
@@ -1574,6 +1624,65 @@ mod tests {
             vec![4.0, 9.0]
         );
         assert!(registry.validate_rows(atoms.len()));
+    }
+
+    #[test]
+    fn particle_store_receive_restores_overwritten_legacy_rows() {
+        let mut source_atoms = Atom::new();
+        source_atoms.push_test_atom(20, [1.0; 3], 1.0, 1.0);
+        source_atoms.nlocal = 1;
+        let mut source_registry = AtomDataRegistry::new();
+        source_registry
+            .try_register(CorruptingUnpackRows { rows: vec![7.0] }, 1)
+            .unwrap();
+        let mut payload = Vec::new();
+        ParticleStore::new(&mut source_atoms, &source_registry)
+            .pack_migrant(0, &mut payload)
+            .unwrap();
+
+        let mut atoms = Atom::new();
+        atoms.push_test_atom(10, [0.0; 3], 1.0, 1.0);
+        atoms.nlocal = 1;
+        let mut registry = AtomDataRegistry::new();
+        registry
+            .try_register(CorruptingUnpackRows { rows: vec![5.0] }, 1)
+            .unwrap();
+
+        assert_eq!(
+            ParticleStore::new(&mut atoms, &registry).append_migrant(&payload),
+            Err(ParticleStoreError::MalformedExtensionRecord)
+        );
+        assert_eq!(atoms.tag, vec![10]);
+        assert_eq!(atoms.nlocal, 1);
+        assert_eq!(
+            registry.get::<CorruptingUnpackRows>().unwrap().rows,
+            vec![5.0]
+        );
+        assert!(registry.validate_rows(atoms.len()));
+    }
+
+    #[test]
+    fn particle_store_rejects_migrant_after_ghost_suffix() {
+        let mut source = Atom::new();
+        source.push_test_atom(20, [1.0; 3], 1.0, 1.0);
+        source.nlocal = 1;
+        let registry = AtomDataRegistry::new();
+        let mut payload = Vec::new();
+        ParticleStore::new(&mut source, &registry)
+            .pack_migrant(0, &mut payload)
+            .unwrap();
+
+        let mut atoms = Atom::new();
+        atoms.push_test_atom(10, [0.0; 3], 1.0, 1.0);
+        atoms.push_test_atom(99, [9.0; 3], 1.0, 1.0);
+        atoms.nlocal = 1;
+        atoms.nghost = 1;
+        assert_eq!(
+            ParticleStore::new(&mut atoms, &registry).append_migrant(&payload),
+            Err(ParticleStoreError::InvalidStructuralOperation)
+        );
+        assert_eq!(atoms.tag, vec![10, 99]);
+        assert_eq!((atoms.nlocal, atoms.nghost), (1, 1));
     }
 
     #[test]

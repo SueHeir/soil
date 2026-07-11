@@ -122,20 +122,6 @@ impl AtomData for BondStore {
         apply_permutation_in_place(&mut self.bonds, perm, n, visited);
     }
 
-    fn structural_snapshot(&self) -> Option<Box<dyn Any>> {
-        Some(Box::new(self.clone()))
-    }
-
-    fn restore_structural_snapshot(&mut self, snapshot: Box<dyn Any>) -> bool {
-        match snapshot.downcast::<Self>() {
-            Ok(snapshot) => {
-                *self = *snapshot;
-                true
-            }
-            Err(_) => false,
-        }
-    }
-
     /// Pack format: `[count, (partner_tag, bond_type, r0) × count]` — 1 + 3×count f64s.
     fn pack(&self, i: usize, buf: &mut Vec<f64>) {
         if i < self.bonds.len() {

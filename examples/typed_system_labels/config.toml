@@ -1,0 +1,27 @@
+# Expected scheduler contracts for the exported SOIL typed labels.
+# `provider = false` must be rejected for a required dependency; `true` must
+# organize successfully. These expectations are the reference data for sweep.py.
+
+[[case]]
+name = "pbc-required-missing"
+target = "pbc"
+provider = false
+expected = "reject"
+
+[[case]]
+name = "pbc-required-present"
+target = "pbc"
+provider = true
+expected = "accept"
+
+[[case]]
+name = "borders-sort-required-missing"
+target = "sort_atoms"
+provider = false
+expected = "reject"
+
+[[case]]
+name = "borders-sort-required-present"
+target = "sort_atoms"
+provider = true
+expected = "accept"

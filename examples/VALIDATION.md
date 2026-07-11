@@ -28,6 +28,14 @@ a zero-allocation hot-loop guard.
 
 ![ParticlesWith query validation](particleswith_queries/plots/particleswith_queries.png)
 
+## typed_system_labels
+
+Typed scheduler-label compatibility matrix for the required `PBC` and
+`SORT_ATOMS -> BORDERS` seams. It compares observed schedule organization
+against the declared accept/reject contracts.
+
+![typed scheduler-label compatibility matrix](typed_system_labels/plots/typed_system_labels_matrix.png)
+
 ## virial_thermo_crossrank
 
 MPI validation that `VirialStress` pair-force contributions reach the

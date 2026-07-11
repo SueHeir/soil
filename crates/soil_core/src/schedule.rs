@@ -203,10 +203,14 @@ mod tests {
     #[test]
     fn public_system_keys_preserve_stable_schedule_names() {
         assert_eq!(crate::DOMAIN_READ_INPUT.name(), "domain_read_input");
+        assert_eq!(crate::SHRINK_WRAP.name(), "shrink_wrap");
+        assert_eq!(crate::PBC.name(), "pbc");
         assert_eq!(crate::NEIGHBOR_SETUP.name(), "neighbor_setup");
+        assert_eq!(crate::DECIDE_REBUILD.name(), "decide_rebuild");
+        assert_eq!(crate::SORT_ATOMS.name(), "sort_atoms");
+        assert_eq!(crate::BORDERS.name(), "borders");
         assert_eq!(crate::EXCHANGE.name(), "exchange");
         assert_eq!(crate::REVERSE_SEND_FORCE.name(), "reverse_send_force");
-        assert_eq!(crate::PBC.name(), "pbc");
         assert_eq!(crate::UPDATE_CYCLE.name(), "update_cycle");
     }
 
@@ -245,5 +249,16 @@ mod tests {
             ParticleSimScheduleSet::PreExchange,
         );
         scheduler.organize_systems();
+    }
+
+    #[test]
+    fn substrate_plugins_register_their_required_typed_schedule_seams() {
+        let mut app = grass_app::App::new();
+        app.add_plugins(crate::AtomPlugin)
+            .add_plugins(crate::DomainPlugin)
+            .add_plugins(crate::NeighborPlugin)
+            .add_plugins(crate::CommunicationPlugin);
+
+        app.prepare();
     }
 }

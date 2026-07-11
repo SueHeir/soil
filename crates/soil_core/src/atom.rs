@@ -1000,6 +1000,18 @@ impl<'a> ParticleStore<'a> {
         Self { atoms, registry }
     }
 
+    /// Check the complete structural invariant, including ownership partition.
+    ///
+    /// Row alignment alone is insufficient: a stale `nlocal`/`nghost` pair can
+    /// make an otherwise aligned ghost suffix appear locally owned.  Structural
+    /// operations must reject that state rather than silently relabelling rows.
+    fn has_valid_layout(&self) -> bool {
+        self.atoms.validate_rows()
+            && self.registry.validate_rows(self.atoms.len())
+            && (self.atoms.nlocal as usize).checked_add(self.atoms.nghost as usize)
+                == Some(self.atoms.len())
+    }
+
     /// Reserve capacity in both the core and extension stores.
     pub fn reserve(&mut self, additional: usize) {
         self.atoms.reserve(additional);
@@ -1015,7 +1027,10 @@ impl<'a> ParticleStore<'a> {
         extension_buffers: &[Vec<f64>],
     ) -> Result<(), ParticleStoreError> {
         let expected = replacement.nlocal as usize;
-        if replacement.nghost != 0 || replacement.len() != expected || !replacement.validate_rows()
+        if !self.has_valid_layout()
+            || replacement.nghost != 0
+            || replacement.len() != expected
+            || !replacement.validate_rows()
         {
             return Err(ParticleStoreError::InvalidStructuralOperation);
         }
@@ -1060,9 +1075,7 @@ impl<'a> ParticleStore<'a> {
         // `Vec::swap_remove` would pull the final ghost into the local prefix.
         // Full-rebuild ordering discards ghosts before deletions; reject an
         // accidental out-of-order caller rather than corrupting ownership.
-        if self.atoms.nghost != 0
-            || index >= self.atoms.nlocal as usize
-            || !self.registry.validate_rows(self.atoms.len())
+        if !self.has_valid_layout() || self.atoms.nghost != 0 || index >= self.atoms.nlocal as usize
         {
             return Err(ParticleStoreError::InvalidStructuralOperation);
         }
@@ -1076,7 +1089,7 @@ impl<'a> ParticleStore<'a> {
 
     /// Drop the ghost suffix from core and extensions together.
     pub fn discard_ghosts(&mut self) -> Result<(), ParticleStoreError> {
-        if !self.registry.validate_rows(self.atoms.len()) {
+        if !self.has_valid_layout() {
             return Err(ParticleStoreError::InvalidStructuralOperation);
         }
         let nlocal = self.atoms.nlocal as usize;
@@ -1095,6 +1108,9 @@ impl<'a> ParticleStore<'a> {
     /// Callers therefore never have to update these coupled counters beside the
     /// core/extension structural operation.
     pub fn begin_ghost_rebuild(&mut self) -> Result<(), ParticleStoreError> {
+        if !self.has_valid_layout() {
+            return Err(ParticleStoreError::InvalidStructuralOperation);
+        }
         if self.atoms.nghost > 0 {
             self.discard_ghosts()?;
         }
@@ -1110,7 +1126,7 @@ impl<'a> ParticleStore<'a> {
         scratch: &mut Vec<bool>,
     ) -> Result<(), ParticleStoreError> {
         let n = self.atoms.nlocal as usize;
-        if permutation.len() != n || !self.registry.validate_rows(self.atoms.len()) {
+        if !self.has_valid_layout() || permutation.len() != n {
             return Err(ParticleStoreError::InvalidStructuralOperation);
         }
         scratch.clear();
@@ -1138,7 +1154,7 @@ impl<'a> ParticleStore<'a> {
 
     /// Pack a local migrant as a length-delimited core-plus-extension record.
     pub fn pack_migrant(&self, index: usize, buf: &mut Vec<f64>) -> Result<(), ParticleStoreError> {
-        if index >= self.atoms.len() || !self.registry.validate_rows(self.atoms.len()) {
+        if !self.has_valid_layout() || index >= self.atoms.nlocal as usize {
             return Err(ParticleStoreError::InvalidStructuralOperation);
         }
         Self::frame_record(buf, |buf| {
@@ -1156,7 +1172,7 @@ impl<'a> ParticleStore<'a> {
         vel_offset: [f64; 3],
         buf: &mut Vec<f64>,
     ) -> Result<(), ParticleStoreError> {
-        if index >= self.atoms.len() || !self.registry.validate_rows(self.atoms.len()) {
+        if !self.has_valid_layout() || index >= self.atoms.len() {
             return Err(ParticleStoreError::InvalidStructuralOperation);
         }
         Self::frame_record(buf, |buf| {
@@ -1235,7 +1251,7 @@ impl<'a> ParticleStore<'a> {
     ) -> Result<(), ParticleStoreError> {
         // A migrated atom is locally owned.  Appending it after a ghost suffix
         // would put a local row behind ghosts and violate Atom's prefix layout.
-        if (!ghost && self.atoms.nghost != 0) || !self.registry.validate_rows(self.atoms.len()) {
+        if !self.has_valid_layout() || (!ghost && self.atoms.nghost != 0) {
             return Err(ParticleStoreError::InvalidStructuralOperation);
         }
         let rows_before = self.atoms.len();
@@ -1819,6 +1835,35 @@ mod tests {
         );
         assert_eq!(atoms.tag, vec![10, 99]);
         assert_eq!((atoms.nlocal, atoms.nghost), (1, 1));
+    }
+
+    #[test]
+    fn particle_store_rejects_stale_ownership_counters_without_relabelling_rows() {
+        let mut atoms = Atom::new();
+        atoms.push_test_atom(10, [0.0; 3], 1.0, 1.0);
+        atoms.push_test_atom(99, [9.0; 3], 1.0, 1.0);
+        // The second row is neither accounted as local nor as a ghost.  Its
+        // columns happen to align, but accepting it would silently turn an
+        // unowned row into a local one at the next rebuild.
+        atoms.nlocal = 1;
+        atoms.nghost = 0;
+        let registry = AtomDataRegistry::new();
+        let before_tags = atoms.tag.clone();
+        let before_counts = (atoms.nlocal, atoms.nghost);
+
+        assert_eq!(
+            ParticleStore::new(&mut atoms, &registry).begin_ghost_rebuild(),
+            Err(ParticleStoreError::InvalidStructuralOperation)
+        );
+        assert_eq!(atoms.tag, before_tags);
+        assert_eq!((atoms.nlocal, atoms.nghost), before_counts);
+
+        let mut wire = Vec::new();
+        assert_eq!(
+            ParticleStore::new(&mut atoms, &registry).pack_migrant(1, &mut wire),
+            Err(ParticleStoreError::InvalidStructuralOperation)
+        );
+        assert!(wire.is_empty());
     }
 
     #[test]

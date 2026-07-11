@@ -71,6 +71,7 @@
 //!
 //! The derive macro generates:
 //! - `pack` / `unpack` — serialize **all** fields for atom migration
+//! - `snapshot` — capture a direct rollback copy for structural transactions
 //! - `truncate` / `swap_remove` — resize all field vectors together
 //! - `apply_permutation` — reorder all field vectors by a permutation
 //! - `pack_forward` / `unpack_forward` — communicate `#[forward]` fields (overwrite)
@@ -180,6 +181,7 @@ struct FieldInfo {
 /// | Method | Includes | Behavior |
 /// |--------|----------|----------|
 /// | `pack` / `unpack` | all fields | Migration: serialize all per-atom data |
+/// | `snapshot` | all fields | Direct rollback copy; never decoded during recovery |
 /// | `truncate` / `swap_remove` | all fields | Keep field vecs in sync |
 /// | `apply_permutation` | all fields | Reorder by permutation |
 /// | `pack_forward` / `unpack_forward` | `#[forward]` fields | Overwrite on unpack |
@@ -305,6 +307,13 @@ pub fn derive_atom_data(input: TokenStream) -> TokenStream {
             }
         })
         .collect();
+    let snapshot_fields: Vec<_> = field_infos
+        .iter()
+        .map(|f| {
+            let id = &f.ident;
+            quote! { #id: self.#id.clone() }
+        })
+        .collect();
 
     // --- pack (all fields, sequential into buffer) ---
     let pack_stmts: Vec<_> = field_infos
@@ -348,6 +357,9 @@ pub fn derive_atom_data(input: TokenStream) -> TokenStream {
             }
             fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
                 self
+            }
+            fn snapshot(&self) -> Box<dyn AtomData> {
+                Box::new(Self { #(#snapshot_fields),* })
             }
 
             fn len(&self) -> usize { #first_len }

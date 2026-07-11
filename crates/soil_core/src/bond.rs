@@ -88,6 +88,9 @@ impl AtomData for BondStore {
     fn as_any_mut(&mut self) -> &mut dyn Any {
         self
     }
+    fn snapshot(&self) -> Box<dyn AtomData> {
+        Box::new(self.clone())
+    }
 
     fn len(&self) -> usize {
         self.bonds.len()

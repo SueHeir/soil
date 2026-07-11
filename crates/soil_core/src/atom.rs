@@ -22,7 +22,8 @@
 //!
 //! **Mandatory** (every extension must keep its columns consistent under
 //! structural ops): [`as_any`](AtomData::as_any) /
-//! [`as_any_mut`](AtomData::as_any_mut), [`truncate`](AtomData::truncate),
+//! [`as_any_mut`](AtomData::as_any_mut), [`snapshot`](AtomData::snapshot),
+//! [`truncate`](AtomData::truncate),
 //! [`swap_remove`](AtomData::swap_remove), [`pack`](AtomData::pack) /
 //! [`unpack`](AtomData::unpack) (migration + restart), and
 //! [`apply_permutation`](AtomData::apply_permutation).
@@ -90,6 +91,7 @@ pub const ATOM_PACK_SIZE: usize = 17;
 /// impl AtomData for Charge {
 ///     fn as_any(&self) -> &dyn Any { self }
 ///     fn as_any_mut(&mut self) -> &mut dyn Any { self }
+///     fn snapshot(&self) -> Box<dyn AtomData> { Box::new(Charge { q: self.q.clone() }) }
 ///     fn len(&self) -> usize { self.q.len() }
 ///     fn push_default(&mut self) { self.q.push(0.0); }
 ///     fn truncate(&mut self, n: usize) { self.q.truncate(n); }
@@ -183,6 +185,13 @@ pub trait AtomData: Any {
     fn as_any(&self) -> &dyn Any;
     /// Upcast to `&mut dyn Any` for mutable downcasting in the registry.
     fn as_any_mut(&mut self) -> &mut dyn Any;
+    /// Capture an independent copy for an all-or-nothing particle-store
+    /// operation. Implementations must preserve every row and any additional
+    /// state which affects later structural operations.
+    ///
+    /// This is separate from the migration wire format: rollback must not
+    /// depend on calling a decoder after that decoder has failed.
+    fn snapshot(&self) -> Box<dyn AtomData>;
     /// Number of rows currently stored. This must equal the atom-store length.
     fn len(&self) -> usize;
     /// Whether this extension has no rows.
@@ -487,60 +496,21 @@ impl AtomDataRegistry {
             .all(|(_, cell)| cell.borrow().len() == expected)
     }
 
-    /// Capture every extension through its existing migration wire contract.
-    /// Structural edits are rare, so this deliberately favors a universal,
-    /// auditable rollback path over adding a clone hook to every hand-written
-    /// extension. `pack` is already required to describe the complete row.
-    fn row_snapshot(&self, rows: usize) -> Vec<Vec<f64>> {
-        debug_assert!(self.validate_rows(rows));
-        self.pack_all_for_restart(rows)
+    /// Capture every extension before a fallible structural operation.
+    fn snapshot(&self) -> Vec<Box<dyn AtomData>> {
+        self.stores
+            .iter()
+            .map(|(_, cell)| cell.borrow().snapshot())
+            .collect()
     }
 
-    /// Decode exact rows from framed extension buffers. The caller supplies a
-    /// known-good snapshot for recovery if a legacy `unpack` callback panics or
-    /// consumes an invalid amount.
-    fn decode_rows(&self, expected_rows: usize, buffers: &[Vec<f64>]) -> bool {
-        if buffers.len() != self.stores.len() {
-            return false;
+    /// Restore a captured extension snapshot without calling an extension's
+    /// packing or decoding hooks.
+    fn restore(&self, snapshot: Vec<Box<dyn AtomData>>) {
+        assert_eq!(snapshot.len(), self.stores.len());
+        for ((_, cell), saved) in self.stores.iter().zip(snapshot) {
+            *cell.borrow_mut() = saved;
         }
-        matches!(
-            catch_unwind(AssertUnwindSafe(|| {
-                for ((_, cell), buffer) in self.stores.iter().zip(buffers) {
-                    let mut store = cell.borrow_mut();
-                    store.truncate(0);
-                    let mut pos = 0;
-                    for _ in 0..expected_rows {
-                        let used = store.unpack(&buffer[pos..]);
-                        if used == 0 || used > buffer.len().saturating_sub(pos) {
-                            return false;
-                        }
-                        pos += used;
-                    }
-                    if pos != buffer.len() || store.len() != expected_rows {
-                        return false;
-                    }
-                }
-                self.validate_rows(expected_rows)
-            })),
-            Ok(true)
-        )
-    }
-
-    fn restore_restart_rows(
-        &self,
-        previous_rows: usize,
-        expected_rows: usize,
-        buffers: &[Vec<f64>],
-    ) -> Result<(), ParticleStoreError> {
-        let snapshot = self.row_snapshot(previous_rows);
-        if self.decode_rows(expected_rows, buffers) {
-            return Ok(());
-        }
-        assert!(
-            self.decode_rows(previous_rows, &snapshot),
-            "AtomData migration wire contract could not restore a structural transaction"
-        );
-        Err(ParticleStoreError::MalformedExtensionRecord)
     }
 
     /// Remove atom at index `i` from all registered extensions via swap-remove.
@@ -698,6 +668,29 @@ impl AtomDataRegistry {
                 pos += store.unpack(&buf[pos..]);
             }
         }
+    }
+
+    /// Decode an exact restart row count, rejecting under- and over-consumption.
+    fn unpack_restart_rows(&self, expected_rows: usize, buffers: &[Vec<f64>]) -> bool {
+        if buffers.len() != self.stores.len() {
+            return false;
+        }
+        for ((_, cell), buf) in self.stores.iter().zip(buffers) {
+            let mut store = cell.borrow_mut();
+            store.truncate(0);
+            let mut pos = 0;
+            for _ in 0..expected_rows {
+                let used = store.unpack(&buf[pos..]);
+                if used == 0 || used > buf.len().saturating_sub(pos) {
+                    return false;
+                }
+                pos += used;
+            }
+            if pos != buf.len() || store.len() != expected_rows {
+                return false;
+            }
+        }
+        self.validate_rows(expected_rows)
     }
 }
 
@@ -1010,10 +1003,18 @@ impl<'a> ParticleStore<'a> {
         if replacement.nghost != 0 || replacement.len() != expected {
             return Err(ParticleStoreError::InvalidStructuralOperation);
         }
-        self.registry
-            .restore_restart_rows(self.atoms.len(), expected, extension_buffers)?;
-        *self.atoms = replacement;
-        Ok(())
+        let snapshot = self.registry.snapshot();
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            self.registry
+                .unpack_restart_rows(expected, extension_buffers)
+        }));
+        if matches!(result, Ok(true)) {
+            *self.atoms = replacement;
+            Ok(())
+        } else {
+            self.registry.restore(snapshot);
+            Err(ParticleStoreError::MalformedExtensionRecord)
+        }
     }
 
     /// Run a legacy extension callback behind one all-or-nothing boundary.
@@ -1024,8 +1025,7 @@ impl<'a> ParticleStore<'a> {
         expected_rows: usize,
         operation: impl FnOnce(&mut Atom, &AtomDataRegistry),
     ) -> Result<(), ParticleStoreError> {
-        let rows_before = self.atoms.len();
-        let snapshot = self.registry.row_snapshot(rows_before);
+        let snapshot = self.registry.snapshot();
         let core_before = self.atoms.clone();
         let result = catch_unwind(AssertUnwindSafe(|| operation(self.atoms, self.registry)));
         if result.is_ok()
@@ -1035,10 +1035,7 @@ impl<'a> ParticleStore<'a> {
             return Ok(());
         }
         *self.atoms = core_before;
-        assert!(
-            self.registry.decode_rows(rows_before, &snapshot),
-            "AtomData migration wire contract could not restore a structural transaction"
-        );
+        self.registry.restore(snapshot);
         Err(ParticleStoreError::MalformedExtensionRecord)
     }
 
@@ -1211,7 +1208,7 @@ impl<'a> ParticleStore<'a> {
         }
         let rows_before = self.atoms.len();
         let core_before = self.atoms.clone();
-        let extension_before = self.registry.row_snapshot(rows_before);
+        let extension_before = self.registry.snapshot();
         let result = catch_unwind(AssertUnwindSafe(|| {
             self.reserve(count);
             let mut pos = 0;
@@ -1235,10 +1232,7 @@ impl<'a> ParticleStore<'a> {
             return Ok(());
         }
         *self.atoms = core_before;
-        assert!(
-            self.registry.decode_rows(rows_before, &extension_before),
-            "AtomData migration wire contract could not restore a receive transaction"
-        );
+        self.registry.restore(extension_before);
         Err(ParticleStoreError::MalformedExtensionRecord)
     }
 }
@@ -1320,6 +1314,11 @@ mod tests {
         fn as_any_mut(&mut self) -> &mut dyn Any {
             self
         }
+        fn snapshot(&self) -> Box<dyn AtomData> {
+            Box::new(Self {
+                rows: self.rows.clone(),
+            })
+        }
         fn len(&self) -> usize {
             self.rows.len()
         }
@@ -1367,6 +1366,11 @@ mod tests {
         fn as_any_mut(&mut self) -> &mut dyn Any {
             self
         }
+        fn snapshot(&self) -> Box<dyn AtomData> {
+            Box::new(Self {
+                rows: self.rows.clone(),
+            })
+        }
         fn len(&self) -> usize {
             self.rows.len()
         }
@@ -1404,6 +1408,11 @@ mod tests {
         fn as_any_mut(&mut self) -> &mut dyn Any {
             self
         }
+        fn snapshot(&self) -> Box<dyn AtomData> {
+            Box::new(Self {
+                rows: self.rows.clone(),
+            })
+        }
         fn len(&self) -> usize {
             self.rows.len()
         }
@@ -1434,6 +1443,47 @@ mod tests {
         fn apply_permutation(&mut self, _perm: &[usize], _n: usize) {}
     }
 
+    /// Decoder failure must not become the mechanism used to rebuild the old
+    /// state. This fixture panics after mutation, including during any attempted
+    /// wire-format replay; its snapshot is the only valid recovery path.
+    struct PanicOnDecodeRows {
+        rows: Vec<f64>,
+    }
+
+    impl AtomData for PanicOnDecodeRows {
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+        fn as_any_mut(&mut self) -> &mut dyn Any {
+            self
+        }
+        fn snapshot(&self) -> Box<dyn AtomData> {
+            Box::new(Self {
+                rows: self.rows.clone(),
+            })
+        }
+        fn len(&self) -> usize {
+            self.rows.len()
+        }
+        fn push_default(&mut self) {
+            self.rows.push(0.0);
+        }
+        fn truncate(&mut self, n: usize) {
+            self.rows.truncate(n);
+        }
+        fn swap_remove(&mut self, i: usize) {
+            self.rows.swap_remove(i);
+        }
+        fn pack(&self, i: usize, buf: &mut Vec<f64>) {
+            buf.push(self.rows[i]);
+        }
+        fn unpack(&mut self, _buf: &[f64]) -> usize {
+            self.rows.push(-999.0);
+            panic!("simulated decoder failure")
+        }
+        fn apply_permutation(&mut self, _perm: &[usize], _n: usize) {}
+    }
+
     /// A hand-written two-column store. Unlike a derive-generated store, a
     /// custom layout must explicitly report every column in `validate_rows`.
     #[derive(Default)]
@@ -1448,6 +1498,12 @@ mod tests {
         }
         fn as_any_mut(&mut self) -> &mut dyn Any {
             self
+        }
+        fn snapshot(&self) -> Box<dyn AtomData> {
+            Box::new(Self {
+                scalar: self.scalar.clone(),
+                vector: self.vector.clone(),
+            })
         }
         fn len(&self) -> usize {
             self.scalar.len()
@@ -1509,6 +1565,9 @@ mod tests {
         }
         fn as_any_mut(&mut self) -> &mut dyn Any {
             self
+        }
+        fn snapshot(&self) -> Box<dyn AtomData> {
+            Box::new(Self)
         }
         fn len(&self) -> usize {
             0
@@ -1658,6 +1717,29 @@ mod tests {
             registry.get::<CorruptingUnpackRows>().unwrap().rows,
             vec![5.0]
         );
+        assert!(registry.validate_rows(atoms.len()));
+    }
+
+    #[test]
+    fn particle_store_rollback_never_replays_a_failing_decoder() {
+        let mut atoms = Atom::new();
+        atoms.push_test_atom(10, [0.0; 3], 1.0, 1.0);
+        atoms.nlocal = 1;
+        let mut registry = AtomDataRegistry::new();
+        registry
+            .try_register(PanicOnDecodeRows { rows: vec![5.0] }, 1)
+            .unwrap();
+        let payload = vec![ATOM_PACK_SIZE as f64 + 1.0]
+            .into_iter()
+            .chain(std::iter::repeat(0.0).take(ATOM_PACK_SIZE + 1))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            ParticleStore::new(&mut atoms, &registry).append_migrant(&payload),
+            Err(ParticleStoreError::MalformedExtensionRecord)
+        );
+        assert_eq!(atoms.tag, vec![10]);
+        assert_eq!(registry.get::<PanicOnDecodeRows>().unwrap().rows, vec![5.0]);
         assert!(registry.validate_rows(atoms.len()));
     }
 

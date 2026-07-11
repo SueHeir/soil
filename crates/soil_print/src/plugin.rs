@@ -1,8 +1,3 @@
-use grass_app::prelude::*;
-use grass_scheduler::prelude::*;
-use soil_core::{stage_tables, Config, ParticleSimScheduleSet, ScheduleSetupSet};
-
-use crate::thermo::parse_thermo_column;
 use crate::{
     check_stage_end_save,
     dump::{write_dump_binary, write_dump_lammps, write_dump_text},
@@ -10,6 +5,9 @@ use crate::{
     read_restart, setup_thermo, sync_dump_box, write_restart, DumpConfig, DumpRegistry,
     RestartConfig, Thermo, ThermoConfig, VtpConfig,
 };
+use grass_app::prelude::*;
+use grass_scheduler::prelude::*;
+use soil_core::{Config, ParticleSimScheduleSet, ScheduleSetupSet};
 
 /// Main output plugin — registers thermo, dump, restart, and VTP systems.
 ///
@@ -20,29 +18,7 @@ pub struct PrintPlugin;
 
 impl Plugin for PrintPlugin {
     fn default_config(&self) -> Option<&str> {
-        Some(
-            r#"[dump]
-# Dump output interval (0 = disabled)
-interval = 0
-# Dump format: "text" (CSV), "binary", or "lammps" (.lammpstrj, OVITO-native)
-format = "text"
-# false: MPI-gather all ranks into one file/step; true: one file per rank
-per_rank = false
-# include ghost (halo) atoms, flagged with an IsGhost column
-ghost = false
-
-[restart]
-# Restart file write interval (0 = disabled)
-interval = 0
-# Restart format: "bincode" or "json"
-format = "bincode"
-# Whether to read restart files at startup
-read = false
-
-[vtp]
-# VTP (ParaView) output interval (0 = disabled)
-interval = 0"#,
-        )
+        Some(crate::config::DEFAULT_CONFIG)
     }
 
     fn build(&self, app: &mut App) {
@@ -54,45 +30,7 @@ interval = 0"#,
     }
 
     fn try_build(&self, app: &mut App) -> Result<(), AppError> {
-        Config::try_load::<DumpConfig>(app, "dump")
-            .map_err(|e| AppError::message(e.to_string()))?;
-        let restart = Config::try_load::<RestartConfig>(app, "restart")
-            .map_err(|e| AppError::message(e.to_string()))?;
-        if restart.format != "bincode" && restart.format != "json" {
-            return Err(AppError::message(format!(
-                "[restart] format must be 'bincode' or 'json', got '{}'",
-                restart.format
-            )));
-        }
-        Config::try_load::<VtpConfig>(app, "vtp").map_err(|e| AppError::message(e.to_string()))?;
-        let thermo = Config::try_load::<ThermoConfig>(app, "thermo")
-            .map_err(|e| AppError::message(e.to_string()))?;
-
-        if let Some(config) = app.get_resource_ref::<Config>() {
-            let groups = stage_tables(&config)
-                .map_err(|error| AppError::message(error.to_string()))?
-                .into_iter()
-                .map(Config::from_table)
-                .map(|stage| stage.try_parse_array::<soil_core::GroupDef>("group"))
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|error| AppError::message(error.to_string()))?;
-            for column in thermo.columns.as_deref().unwrap_or(&[]) {
-                let parsed = parse_thermo_column(column);
-                if let Some(group) = parsed.group_name {
-                    if group != "all"
-                        && !groups
-                            .iter()
-                            .any(|stage| stage.iter().any(|candidate| candidate.name == group))
-                    {
-                        return Err(AppError::message(format!(
-                            "thermo column '{}': group '{}' is not declared in [[group]]",
-                            column, group
-                        )));
-                    }
-                }
-            }
-        }
-
+        crate::config::load_and_validate(app)?;
         install_print(app);
         Ok(())
     }

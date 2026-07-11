@@ -828,6 +828,20 @@ macro_rules! impl_atom_reserve {
     };
 }
 
+macro_rules! impl_atom_validate_rows {
+    ( $( ($field:ident, $ty:ty) ),* $(,)? ) => {
+        /// Whether every core struct-of-arrays column has the same row count.
+        ///
+        /// `Atom::len()` is defined by the position column, so callers that
+        /// construct a replacement atom from an external representation must
+        /// check the other columns explicitly before installing it.
+        pub fn validate_rows(&self) -> bool {
+            let expected = self.pos.len();
+            $( self.$field.len() == expected )&&*
+        }
+    };
+}
+
 macro_rules! impl_atom_apply_permutation {
     ( $( ($field:ident, $ty:ty) ),* $(,)? ) => {
         /// Reorder the first `n` atoms in every field array according to
@@ -857,6 +871,7 @@ impl Atom {
     for_each_atom_vec!(impl_atom_truncate);
     for_each_atom_vec!(impl_atom_truncate_to);
     for_each_atom_vec!(impl_atom_reserve);
+    for_each_atom_vec!(impl_atom_validate_rows);
     for_each_atom_vec!(impl_atom_apply_permutation);
 
     /// Total number of atoms (local + ghost) currently stored.
@@ -979,8 +994,8 @@ impl<'a> ParticleStore<'a> {
     /// Construct a coordinator after checking the parallel-row precondition.
     pub fn new(atoms: &'a mut Atom, registry: &'a AtomDataRegistry) -> Self {
         assert!(
-            registry.validate_rows(atoms.len()),
-            "particle extension rows are misaligned"
+            atoms.validate_rows() && registry.validate_rows(atoms.len()),
+            "particle core or extension rows are misaligned"
         );
         Self { atoms, registry }
     }
@@ -1000,7 +1015,8 @@ impl<'a> ParticleStore<'a> {
         extension_buffers: &[Vec<f64>],
     ) -> Result<(), ParticleStoreError> {
         let expected = replacement.nlocal as usize;
-        if replacement.nghost != 0 || replacement.len() != expected {
+        if replacement.nghost != 0 || replacement.len() != expected || !replacement.validate_rows()
+        {
             return Err(ParticleStoreError::InvalidStructuralOperation);
         }
         let snapshot = self.registry.snapshot();
@@ -1654,6 +1670,28 @@ mod tests {
         assert_eq!(atoms.tag, before_tags);
         assert_eq!(registry.get::<ManualRows>().unwrap().rows, before_rows);
         assert!(registry.validate_rows(atoms.len()));
+    }
+
+    #[test]
+    fn restart_rejects_a_misaligned_core_replacement_without_mutating_state() {
+        let mut atoms = Atom::new();
+        atoms.push_test_atom(10, [0.0; 3], 1.0, 1.0);
+        atoms.nlocal = 1;
+        let registry = AtomDataRegistry::new();
+
+        let mut replacement = Atom::new();
+        replacement.push_test_atom(20, [1.0; 3], 1.0, 2.0);
+        replacement.nlocal = 1;
+        replacement.mass.clear();
+        assert!(!replacement.validate_rows());
+
+        assert_eq!(
+            ParticleStore::new(&mut atoms, &registry).replace_from_restart(replacement, &[]),
+            Err(ParticleStoreError::InvalidStructuralOperation)
+        );
+        assert_eq!(atoms.tag, vec![10]);
+        assert_eq!(atoms.mass, vec![1.0]);
+        assert!(atoms.validate_rows());
     }
 
     #[test]

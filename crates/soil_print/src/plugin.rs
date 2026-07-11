@@ -2,12 +2,13 @@ use grass_app::prelude::*;
 use grass_scheduler::prelude::*;
 use soil_core::{Config, ParticleSimScheduleSet, ScheduleSetupSet};
 
+use crate::thermo::parse_thermo_column;
 use crate::{
     check_stage_end_save,
     dump::{write_dump_binary, write_dump_lammps, write_dump_text},
-    dump_atoms, output_virial_to_thermo, print_thermo, print_vtp, read_restart, setup_thermo,
-    sync_dump_box, write_restart, DumpConfig, DumpRegistry, RestartConfig, Thermo, ThermoConfig,
-    VtpConfig,
+    dump_atoms, output_virial_to_thermo, preflight_restart_input, print_thermo, print_vtp,
+    read_restart, setup_thermo, sync_dump_box, write_restart, DumpConfig, DumpRegistry,
+    RestartConfig, Thermo, ThermoConfig, VtpConfig,
 };
 
 /// Main output plugin — registers thermo, dump, restart, and VTP systems.
@@ -64,8 +65,25 @@ interval = 0"#,
             )));
         }
         Config::try_load::<VtpConfig>(app, "vtp").map_err(|e| AppError::message(e.to_string()))?;
-        Config::try_load::<ThermoConfig>(app, "thermo")
+        let thermo = Config::try_load::<ThermoConfig>(app, "thermo")
             .map_err(|e| AppError::message(e.to_string()))?;
+
+        if let Some(config) = app.get_resource_ref::<Config>() {
+            let groups = config
+                .try_parse_array::<soil_core::GroupDef>("group")
+                .map_err(|error| AppError::message(error.to_string()))?;
+            for column in thermo.columns.as_deref().unwrap_or(&[]) {
+                let parsed = parse_thermo_column(column);
+                if let Some(group) = parsed.group_name {
+                    if group != "all" && !groups.iter().any(|candidate| candidate.name == group) {
+                        return Err(AppError::message(format!(
+                            "thermo column '{}': group '{}' is not declared in [[group]]",
+                            column, group
+                        )));
+                    }
+                }
+            }
+        }
 
         install_print(app);
         Ok(())
@@ -73,31 +91,51 @@ interval = 0"#,
 }
 
 fn install_print(app: &mut App) {
-        // Built-in dump formats, registered through the same public extension
-        // point (`register_format`) any plugin uses — core just ships three.
-        let dump_reg = DumpRegistry::new();
-        dump_reg.register_format("text", write_dump_text);
-        dump_reg.register_format("binary", write_dump_binary);
-        dump_reg.register_format("lammps", write_dump_lammps);
-        app.add_resource(dump_reg);
+    // Built-in dump formats, registered through the same public extension
+    // point (`register_format`) any plugin uses — core just ships three.
+    let dump_reg = DumpRegistry::new();
+    dump_reg.register_format("text", write_dump_text);
+    dump_reg.register_format("binary", write_dump_binary);
+    dump_reg.register_format("lammps", write_dump_lammps);
+    app.add_resource(dump_reg);
 
-        app.add_resource(Thermo::new())
-            .add_setup_system(setup_thermo, ScheduleSetupSet::PostSetup)
-            .add_setup_system(
-                read_restart.run_if(first_stage_only()),
-                ScheduleSetupSet::PostSetup,
-            )
-            .add_setup_system(sync_dump_box, ScheduleSetupSet::PostSetup)
-            .add_update_system(output_virial_to_thermo, ParticleSimScheduleSet::PostForce)
-            .add_update_system(sync_dump_box, ParticleSimScheduleSet::PostForce)
-            .add_update_system(print_vtp, ParticleSimScheduleSet::PostFinalIntegration)
-            .add_update_system(print_thermo, ParticleSimScheduleSet::PostFinalIntegration)
-            .add_update_system(dump_atoms, ParticleSimScheduleSet::PostFinalIntegration)
-            .add_update_system(write_restart, ParticleSimScheduleSet::PostFinalIntegration)
-            .add_update_system(
-                check_stage_end_save.before("update_cycle"),
-                ParticleSimScheduleSet::PostFinalIntegration,
-            );
+    // File corruption is ordinary user input, so it must reach `try_start`
+    // as AppError before any legacy scheduler setup or update can run.
+    app.add_fallible_setup_system(
+        "validate restart input",
+        |app: &mut App| {
+            let restart = app
+                .get_resource_ref::<RestartConfig>()
+                .map(|config| (*config).clone())
+                .unwrap_or_default();
+            let Some(comm) = app.get_resource_ref::<soil_core::CommResource>() else {
+                return Ok(());
+            };
+            let Some(input) = app.get_resource_ref::<soil_core::Input>() else {
+                return Ok(());
+            };
+            preflight_restart_input(&restart, &**comm, &input).map_err(AppError::message)
+        },
+        ScheduleSetupSet::PostSetup,
+    );
+
+    app.add_resource(Thermo::new())
+        .add_setup_system(setup_thermo, ScheduleSetupSet::PostSetup)
+        .add_setup_system(
+            read_restart.run_if(first_stage_only()),
+            ScheduleSetupSet::PostSetup,
+        )
+        .add_setup_system(sync_dump_box, ScheduleSetupSet::PostSetup)
+        .add_update_system(output_virial_to_thermo, ParticleSimScheduleSet::PostForce)
+        .add_update_system(sync_dump_box, ParticleSimScheduleSet::PostForce)
+        .add_update_system(print_vtp, ParticleSimScheduleSet::PostFinalIntegration)
+        .add_update_system(print_thermo, ParticleSimScheduleSet::PostFinalIntegration)
+        .add_update_system(dump_atoms, ParticleSimScheduleSet::PostFinalIntegration)
+        .add_update_system(write_restart, ParticleSimScheduleSet::PostFinalIntegration)
+        .add_update_system(
+            check_stage_end_save.before("update_cycle"),
+            ParticleSimScheduleSet::PostFinalIntegration,
+        );
 }
 
 #[cfg(test)]
@@ -113,7 +151,24 @@ mod fallible_tests {
             Ok(_) => panic!("invalid restart format unexpectedly registered"),
             Err(error) => error,
         };
-        assert!(error.to_string().contains("[restart] format"), "unexpected error: {error}");
+        assert!(
+            error.to_string().contains("[restart] format"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn unknown_thermo_group_is_returned_by_fallible_plugin_registration() {
+        let mut app = App::new();
+        app.add_resource(Config::from_str("[thermo]\ncolumns = ['ke/missing']\n"));
+        let error = match app.try_add_plugins(PrintPlugin) {
+            Ok(_) => panic!("unknown thermo group unexpectedly registered"),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains("group 'missing'"),
+            "unexpected error: {error}"
+        );
     }
 }
 

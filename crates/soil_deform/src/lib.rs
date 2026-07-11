@@ -298,13 +298,21 @@ impl Plugin for DeformPlugin {
 
     fn try_build(&self, app: &mut App) -> Result<(), AppError> {
         if let Some(config) = app.get_resource_ref::<Config>() {
+            let domain = config
+                .try_section::<soil_core::DomainConfig>("domain")
+                .map_err(|e| AppError::message(format!("failed to parse [domain] section: {e}")))?;
+            let domain =
+                soil_core::decompose_domain(&domain, &soil_core::SingleProcessComm::default());
+            let ranks = app
+                .get_resource_ref::<CommResource>()
+                .map_or(1, |comm| comm.size());
             for table in stage_tables(&config).map_err(|e| AppError::message(e.to_string()))? {
                 let config = Config::from_table(table)
                     .try_section::<DeformConfig>("deform")
                     .map_err(|e| {
                         AppError::message(format!("failed to parse [deform] section: {e}"))
                     })?;
-                validate_deform_config(&config, &Domain::new(), 1)
+                validate_deform_config(&config, &domain, ranks)
                     .map_err(|e| AppError::message(e.to_string()))?;
             }
         }
@@ -319,21 +327,21 @@ impl Plugin for DeformPlugin {
 }
 
 fn install_deform(app: &mut App) {
-        let state = DeformState {
-            axes: [None, None, None],
-            shear_xy_rate: None,
-            shear_initialized: false,
-            remap: true,
-            step: 0,
-            initialized: false,
-        };
+    let state = DeformState {
+        axes: [None, None, None],
+        shear_xy_rate: None,
+        shear_initialized: false,
+        remap: true,
+        step: 0,
+        initialized: false,
+    };
 
-        // Always register systems — the setup system reads per-stage config and
-        // populates axes (or clears them) accordingly. The update system early-
-        // returns when no axes are active.
-        app.add_resource(state)
-            .add_setup_system(setup_deform, ScheduleSetupSet::PostSetup)
-            .add_update_system(apply_deform, ParticleSimScheduleSet::PreInitialIntegration);
+    // Always register systems — the setup system reads per-stage config and
+    // populates axes (or clears them) accordingly. The update system early-
+    // returns when no axes are active.
+    app.add_resource(state)
+        .add_setup_system(setup_deform, ScheduleSetupSet::PostSetup)
+        .add_update_system(apply_deform, ParticleSimScheduleSet::PreInitialIntegration);
 }
 
 /// Parse an optional axis definition from config into a runtime [`AxisDeform`].

@@ -187,10 +187,10 @@ pub fn setup_thermo(
             match groups.as_ref() {
                 Some(groups) => groups
                     .validate_name(gname, &format!("thermo column '{}'", col.raw))
-                    .expect("thermo group references are validated during startup"),
+                    .expect("thermo group references are validated by PrintPlugin::try_build"),
                 None => {
                     panic!(
-                        "thermo group reference survived startup validation: {}",
+                        "thermo group plugin was not installed before validated thermo setup: {}",
                         col.raw
                     );
                 }

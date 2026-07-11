@@ -232,9 +232,9 @@ impl Plugin for GroupPlugin {
 }
 
 fn install_groups(app: &mut App) {
-        app.add_resource(GroupRegistry::new())
-            .add_setup_system(setup_groups, ScheduleSetupSet::PostSetup)
-            .add_update_system(rebuild_groups, ParticleSimScheduleSet::PreForce);
+    app.add_resource(GroupRegistry::new())
+        .add_setup_system(setup_groups, ScheduleSetupSet::PostSetup)
+        .add_update_system(rebuild_groups, ParticleSimScheduleSet::PreForce);
 }
 
 // ── Systems ─────────────────────────────────────────────────────────────────
@@ -347,7 +347,10 @@ mod tests {
             Ok(_) => panic!("malformed configuration unexpectedly registered"),
             Err(error) => error,
         };
-        assert!(error.to_string().contains("invalid type"), "unexpected error: {error}");
+        assert!(
+            error.to_string().contains("invalid type"),
+            "unexpected error: {error}"
+        );
     }
 
     fn make_atom(positions: &[(f64, f64, f64)], types: &[u32]) -> Atom {

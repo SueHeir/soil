@@ -74,7 +74,9 @@ mod vtp;
 pub use dump::{dump_atoms, sync_dump_box, DumpConfig};
 pub use plugin::PrintPlugin;
 pub use registry::{BoxInfo, DumpFrame, DumpRegistry};
-pub use restart::{check_stage_end_save, read_restart, write_restart, RestartConfig};
+pub use restart::{
+    check_stage_end_save, preflight_restart_input, read_restart, write_restart, RestartConfig,
+};
 pub use thermo::{
     output_virial_to_thermo, print_thermo, setup_thermo, Thermo, ThermoColumn, ThermoConfig,
 };

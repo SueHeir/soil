@@ -153,7 +153,9 @@ impl Plugin for SoilFixesPlugin {
         let config = app
             .get_resource_ref::<Config>()
             .expect("Config resource must exist before SoilFixesPlugin");
-        let registry = PinRegistry { pins: config.parse_array::<PinDef>("pin") };
+        let registry = PinRegistry {
+            pins: config.parse_array::<PinDef>("pin"),
+        };
         drop(config);
         install_pins(app, registry);
     }
@@ -169,30 +171,47 @@ impl Plugin for SoilFixesPlugin {
             PinRegistry { pins: Vec::new() }
         };
 
+        // Group references are configuration, not a late simulation event.  Check
+        // them while the caller can still receive an AppError; the scheduled
+        // system below may then treat a missing name as an internal ordering bug.
+        if let Some(config) = app.get_resource_ref::<Config>() {
+            let groups = config
+                .try_parse_array::<soil_core::GroupDef>("group")
+                .map_err(|error| AppError::message(error.to_string()))?;
+            for pin in &registry.pins {
+                if pin.group != "all" && !groups.iter().any(|group| group.name == pin.group) {
+                    return Err(AppError::message(format!(
+                        "fix pin: group '{}' is not declared in [[group]]",
+                        pin.group
+                    )));
+                }
+            }
+        }
+
         install_pins(app, registry);
         Ok(())
     }
 }
 
 fn install_pins(app: &mut App, registry: PinRegistry) {
-        if registry.pins.is_empty() {
-            app.add_resource(registry);
-            return;
-        }
+    if registry.pins.is_empty() {
+        app.add_resource(registry);
+        return;
+    }
 
-        app.add_resource(registry)
-            .add_resource(PinState::default())
-            .add_setup_system(setup_pins, ScheduleSetupSet::PostSetup);
+    app.add_resource(registry)
+        .add_resource(PinState::default())
+        .add_setup_system(setup_pins, ScheduleSetupSet::PostSetup);
 
-        // PreInitialIntegration: enforce pos/vel/force BEFORE the Verlet drift
-        // step, so any would-be drift is cancelled before forces are computed.
-        // (On the first step the group mask may not yet be built, in which case
-        // the impl is a no-op and the PostForce pass below picks things up.)
-        app.add_update_system(apply_pin_pre, ParticleSimScheduleSet::PreInitialIntegration);
-        // PostForce: capture (on the first step that has a populated mask) and
-        // re-enforce, ensuring FinalIntegration has f=0 and the next step's
-        // InitialIntegration has v=0.
-        app.add_update_system(apply_pin_post, ParticleSimScheduleSet::PostForce);
+    // PreInitialIntegration: enforce pos/vel/force BEFORE the Verlet drift
+    // step, so any would-be drift is cancelled before forces are computed.
+    // (On the first step the group mask may not yet be built, in which case
+    // the impl is a no-op and the PostForce pass below picks things up.)
+    app.add_update_system(apply_pin_pre, ParticleSimScheduleSet::PreInitialIntegration);
+    // PostForce: capture (on the first step that has a populated mask) and
+    // re-enforce, ensuring FinalIntegration has f=0 and the next step's
+    // InitialIntegration has v=0.
+    app.add_update_system(apply_pin_post, ParticleSimScheduleSet::PostForce);
 }
 
 /// Validates pin group names at setup time and prints a summary on rank 0.
@@ -200,7 +219,7 @@ fn setup_pins(registry: Res<PinRegistry>, comm: Res<CommResource>, groups: Res<G
     for f in &registry.pins {
         groups
             .validate_name(&f.group, "fix pin")
-            .expect("pin group names are validated before simulation setup");
+            .expect("pin group names are validated by SoilFixesPlugin::try_build");
     }
     if comm.rank() != 0 {
         return;
@@ -292,6 +311,7 @@ fn apply_pin_post(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use grass_app::App;
     use soil_core::group::GroupDef;
 
     fn make_atoms(n: usize) -> Atom {
@@ -303,6 +323,17 @@ mod tests {
         atom.natoms = n as u64;
         atom.dt = 0.001;
         atom
+    }
+
+    #[test]
+    fn unknown_pin_group_is_returned_during_fallible_registration() {
+        let mut app = App::new();
+        app.add_resource(Config::from_str("[[pin]]\ngroup = 'missing'\n"));
+        let error = match app.try_add_plugins(SoilFixesPlugin) {
+            Ok(_) => panic!("unknown pin group unexpectedly registered"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("group 'missing'"));
     }
 
     fn make_group_registry(name: &str, mask: Vec<bool>) -> GroupRegistry {

@@ -79,11 +79,11 @@ pub mod comm;
 pub mod domain;
 pub mod group;
 pub mod input;
+pub mod neighbor;
+pub mod precision;
 pub mod region;
 pub mod schedule;
 pub mod startup;
-pub mod neighbor;
-pub mod precision;
 pub mod tree;
 pub mod virial;
 
@@ -110,16 +110,16 @@ pub use region::{Axis, Region, RegionSampleError, SurfaceResult};
 // existing SOIL downstream code keeps writing `soil_core::RunPlugin`
 // / `Res<RunConfig>` etc. unchanged.
 pub use grass_io::{
-    set_stage_name, run_read_input, update_cycle, validate_stages, FirstStageOnlyConfigs,
+    run_read_input, set_stage_name, update_cycle, validate_stages, FirstStageOnlyConfigs,
     RunConfig, RunPlugin, RunSchedule, RunState, StageConfig, StageOverrides, RUN_NAMESPACE,
 };
 // `deep_merge` is also re-exported in case downstream code uses it.
 pub use grass_io::deep_merge;
 
-pub use schedule::*;
-pub use startup::stage_tables;
 pub use neighbor::*;
 pub use precision::{Accum, Real};
+pub use schedule::*;
+pub use startup::stage_tables;
 pub use tree::{Monopole, Octree, OctreeNode};
 pub use virial::*;
 

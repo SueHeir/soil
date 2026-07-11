@@ -523,21 +523,21 @@ boundary_z = "periodic"
 }
 
 fn install_domain(app: &mut App) {
-        app.add_resource(Domain::new())
-            .add_setup_system(
-                domain_read_input
-                    .label("domain_read_input")
-                    .run_if(first_stage_only()),
-                ScheduleSetupSet::Setup,
-            )
-            .add_update_system(
-                shrink_wrap.label("shrink_wrap").before("pbc"),
-                ParticleSimScheduleSet::PreExchange,
-            )
-            .add_update_system(
-                pbc.label("pbc").run_if(in_state(CommState::FullRebuild)),
-                ParticleSimScheduleSet::PreExchange,
-            );
+    app.add_resource(Domain::new())
+        .add_setup_system(
+            domain_read_input
+                .label("domain_read_input")
+                .run_if(first_stage_only()),
+            ScheduleSetupSet::Setup,
+        )
+        .add_update_system(
+            shrink_wrap.label("shrink_wrap").before("pbc"),
+            ParticleSimScheduleSet::PreExchange,
+        )
+        .add_update_system(
+            pbc.label("pbc").run_if(in_state(CommState::FullRebuild)),
+            ParticleSimScheduleSet::PreExchange,
+        );
 }
 
 fn boundary_type_char(bt: BoundaryType) -> char {

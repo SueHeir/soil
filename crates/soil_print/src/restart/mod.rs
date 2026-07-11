@@ -59,6 +59,54 @@ fn restart_base_dir(input: &Input) -> String {
     }
 }
 
+/// Verify that an enabled restart input is readable and decodes before setup
+/// begins.  This deliberately performs no mutation: `read_restart` remains the
+/// sole owner of restoring atom state after the fallible application boundary
+/// has accepted the input.
+pub fn preflight_restart_input(
+    restart_config: &RestartConfig,
+    comm: &dyn soil_core::CommBackend,
+    input: &Input,
+) -> Result<(), String> {
+    if !restart_config.read {
+        return Ok(());
+    }
+    let base_dir = restart_base_dir(input);
+    let ext = if restart_config.format == "json" {
+        "json"
+    } else {
+        "bin"
+    };
+    let suffix = format!("_rank{}.{}", comm.rank(), ext);
+    let latest = fs::read_dir(&base_dir)
+        .ok()
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name().to_string_lossy().to_string();
+            name.strip_prefix("restart_")
+                .and_then(|tail| tail.strip_suffix(&suffix))
+                .and_then(|step| step.parse::<usize>().ok())
+        })
+        .max();
+    let Some(step) = latest else {
+        return Ok(()); // preserve the historical "no checkpoint yet" behavior
+    };
+    let filename = format!("{base_dir}/restart_{step}_rank{}.{}", comm.rank(), ext);
+    let file = File::open(&filename)
+        .map_err(|error| format!("failed to open restart file '{filename}': {error}"))?;
+    if ext == "json" {
+        serde_json::from_reader::<_, RestartData>(std::io::BufReader::new(file))
+            .map_err(|error| format!("failed to parse restart JSON '{filename}': {error}"))?;
+    } else {
+        bincode::deserialize_from::<_, RestartData>(std::io::BufReader::new(file)).map_err(
+            |error| format!("failed to deserialize restart bincode '{filename}': {error}"),
+        )?;
+    }
+    Ok(())
+}
+
 // ── Restart write ───────────────────────────────────────────────────────────
 
 /// Write restart (checkpoint) files at the configured interval.

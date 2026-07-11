@@ -131,3 +131,8 @@ required-features = ["mpi_backend", "precision-double"]
 name = "atomdata_row_contract"
 path = "examples/atomdata_row_contract/main.rs"
 required-features = ["precision-double"]
+
+[[example]]
+name = "particle_store_facade"
+path = "examples/particle_store_facade/main.rs"
+required-features = ["precision-double"]

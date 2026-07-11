@@ -482,6 +482,17 @@ impl AtomDataRegistry {
         }
     }
 
+    /// Append one default row to every registered extension.
+    ///
+    /// This is deliberately registry-owned: a local particle may only be
+    /// created through [`ParticleStore`], which performs this operation in the
+    /// same transaction as the core SoA append.
+    fn push_default_all(&self) {
+        for (_, cell) in &self.stores {
+            cell.borrow_mut().push_default();
+        }
+    }
+
     /// Reserve capacity in each extension alongside the core SoA.
     pub fn reserve_all(&self, additional: usize) {
         for (_, cell) in &self.stores {
@@ -980,6 +991,25 @@ impl Atom {
         self.image.push([0, 0, 0]);
         self.is_ghost.push(false);
     }
+
+    /// Append one local core row with substrate defaults.
+    ///
+    /// Particle-method plugins fill method-specific extension columns after
+    /// construction.  The facade pairs this with extension `push_default`
+    /// calls, so the default row never exists in the core alone.
+    fn push_default_row(&mut self) {
+        self.tag.push(0);
+        self.atom_type.push(0);
+        self.origin_index.push(0);
+        self.is_ghost.push(false);
+        self.pos.push([0.0; 3]);
+        self.vel.push([0.0; 3]);
+        self.force.push([0.0; 3]);
+        self.cutoff_radius.push(0.0);
+        self.mass.push(1.0);
+        self.inv_mass.push(1.0);
+        self.image.push([0; 3]);
+    }
 }
 
 /// Coordinates the structural operations which must keep `Atom` and every
@@ -1016,6 +1046,25 @@ impl<'a> ParticleStore<'a> {
     pub fn reserve(&mut self, additional: usize) {
         self.atoms.reserve(additional);
         self.registry.reserve_all(additional);
+    }
+
+    /// Transactionally append one locally-owned particle with core defaults.
+    ///
+    /// `global_natoms` is supplied by the caller that owns the necessary
+    /// collective accounting; a rank-local append must not guess a global
+    /// total.  The facade installs that authoritative value only if both core
+    /// and every extension accepted their new aligned row.
+    pub fn push_default_local(&mut self, global_natoms: u64) -> Result<(), ParticleStoreError> {
+        if !self.has_valid_layout() || self.atoms.nghost != 0 {
+            return Err(ParticleStoreError::InvalidStructuralOperation);
+        }
+        let expected = self.atoms.len() + 1;
+        self.structural_transaction(expected, |atoms, registry| {
+            atoms.push_default_row();
+            registry.push_default_all();
+            atoms.nlocal += 1;
+            atoms.natoms = global_natoms;
+        })
     }
 
     /// Replace the complete local core state and its restart extension rows.
@@ -1658,6 +1707,39 @@ mod tests {
         assert_eq!(registry.get::<ManualRows>().unwrap().rows, vec![100.0]);
         assert_eq!((store.atoms.nlocal, store.atoms.nghost), (1, 0));
         assert!(registry.validate_rows(store.atoms.len()));
+    }
+
+    #[test]
+    fn particle_store_default_push_is_atomic_and_sets_authoritative_count() {
+        let mut atoms = Atom::new();
+        let mut registry = AtomDataRegistry::new();
+        registry.try_register(ManualRows::default(), 0).unwrap();
+
+        ParticleStore::new(&mut atoms, &registry)
+            .push_default_local(17)
+            .unwrap();
+        assert_eq!((atoms.nlocal, atoms.nghost, atoms.natoms), (1, 0, 17));
+        assert_eq!(atoms.mass, vec![1.0]);
+        assert_eq!(atoms.inv_mass, vec![1.0]);
+        assert_eq!(registry.get::<ManualRows>().unwrap().rows, vec![-1.0]);
+
+        let mut failing_atoms = Atom::new();
+        let mut failing_registry = AtomDataRegistry::new();
+        failing_registry.try_register(BrokenDefaults, 0).unwrap();
+        assert_eq!(
+            ParticleStore::new(&mut failing_atoms, &failing_registry).push_default_local(1),
+            Err(ParticleStoreError::MalformedExtensionRecord)
+        );
+        assert!(failing_atoms.is_empty());
+        assert_eq!(
+            (
+                failing_atoms.nlocal,
+                failing_atoms.nghost,
+                failing_atoms.natoms
+            ),
+            (0, 0, 0)
+        );
+        assert!(failing_registry.validate_rows(0));
     }
 
     #[test]

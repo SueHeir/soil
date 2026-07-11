@@ -25,7 +25,7 @@ pub use grass_mpi::{get_mpi_world, MpiCommBackend};
 
 use crate::{
     Accum, Atom, AtomDataRegistry, CommState, Config, Domain, Neighbor, ParticleSimScheduleSet,
-    Real, ScheduleSetupSet,
+    ParticleStore, Real, ScheduleSetupSet,
 };
 
 // ── CommConfig ──────────────────────────────────────────────────────────────
@@ -413,8 +413,9 @@ fn pack_border_atoms(
                 }
             };
             if in_skin {
-                atoms.pack_border(i, change_pos, vel_offset, send_buff);
-                registry.pack_all(i, send_buff);
+                ParticleStore::new(atoms, registry)
+                    .pack_border(i, change_pos, vel_offset, send_buff)
+                    .expect("border packing found invalid particle columns");
                 packed_indices.push(i);
                 count += 1;
             }
@@ -476,8 +477,9 @@ fn pack_border_atoms(
             }
         };
         if in_skin {
-            atoms.pack_border(i, change_pos, vel_offset, send_buff);
-            registry.pack_all(i, send_buff);
+            ParticleStore::new(atoms, registry)
+                .pack_border(i, change_pos, vel_offset, send_buff)
+                .expect("border packing found invalid particle columns");
             packed_indices.push(i);
             count += 1;
         }
@@ -522,8 +524,9 @@ fn pack_orthogonal_border_bins(
                 pos_dim >= fixed_thresh
             };
             if in_skin {
-                atoms.pack_border(i, change_pos, vel_offset, send_buff);
-                registry.pack_all(i, send_buff);
+                ParticleStore::new(atoms, registry)
+                    .pack_border(i, change_pos, vel_offset, send_buff)
+                    .expect("border packing found invalid particle columns");
                 packed_indices.push(i);
             }
             start += 1;
@@ -589,8 +592,9 @@ fn pack_orthogonal_border_bins(
             pos_dim >= fixed_thresh
         };
         if in_skin {
-            atoms.pack_border(i, change_pos, vel_offset, send_buff);
-            registry.pack_all(i, send_buff);
+            ParticleStore::new(atoms, registry)
+                .pack_border(i, change_pos, vel_offset, send_buff)
+                .expect("border packing found invalid particle columns");
             packed_indices.push(i);
         }
     }
@@ -613,38 +617,27 @@ fn lower_bound_u32(values: &[u32], target: u32) -> usize {
 }
 
 fn unpack_ghost_atoms(atoms: &mut Atom, registry: &AtomDataRegistry, buf: &[f64], count: usize) {
-    atoms.reserve(count);
     let data = &buf[..buf.len() - 1];
-    let mut pos = 0;
-    for _ in 0..count {
-        pos += atoms.unpack_atom(&data[pos..], true);
-        pos += registry.unpack_all(&data[pos..]);
-        atoms.nghost += 1;
-    }
+    ParticleStore::new(atoms, registry)
+        .append_ghost_records(data, count)
+        .expect("ghost exchange payload is malformed");
 }
 
 /// Like [`unpack_ghost_atoms`] but for a payload that does NOT carry a trailing
 /// count element (the count-first C7 path receives the exact payload, with the
 /// atom count delivered separately by a tiny pre-message).
 fn unpack_ghost_payload(atoms: &mut Atom, registry: &AtomDataRegistry, data: &[f64], count: usize) {
-    atoms.reserve(count);
-    let mut pos = 0;
-    for _ in 0..count {
-        pos += atoms.unpack_atom(&data[pos..], true);
-        pos += registry.unpack_all(&data[pos..]);
-        atoms.nghost += 1;
-    }
+    ParticleStore::new(atoms, registry)
+        .append_ghost_records(data, count)
+        .expect("ghost exchange payload is malformed");
 }
 
 /// Unpack `count` migrated (non-ghost) atoms from a count-first exchange payload
 /// (no trailing count element). Mirrors [`unpack_ghost_payload`] for [`exchange`].
 fn unpack_exchanged(atoms: &mut Atom, registry: &AtomDataRegistry, data: &[f64], count: usize) {
-    atoms.reserve(count);
-    let mut pos = 0;
-    for _ in 0..count {
-        pos += atoms.unpack_atom(&data[pos..], false);
-        pos += registry.unpack_all(&data[pos..]);
-    }
+    ParticleStore::new(atoms, registry)
+        .append_migrant_records(data, count)
+        .expect("exchange payload is malformed");
 }
 
 // ── Forward comm (lightweight ghost position update) ─────────────────────────
@@ -1258,20 +1251,16 @@ pub fn borders(
     let mut send_buff = std::mem::take(&mut buffers.border_send_buff);
     let mut recv_buff = std::mem::take(&mut buffers.border_recv_buff);
 
-    // Full ghost rebuild: remove old ghosts first
-    if atoms.nghost > 0 {
-        atoms.truncate_to_nlocal();
-        registry.truncate_all(atoms.nlocal as usize);
-        atoms.nghost = 0;
-    }
+    // Full ghost rebuild: remove old ghosts and derive the ownership counters
+    // through the facade before appending a new ghost suffix.
+    ParticleStore::new(&mut atoms, &registry)
+        .begin_ghost_rebuild()
+        .expect("borders found misaligned particle columns");
 
     // `natoms` (global count) is reporting-only — nothing in the neighbor/force/
     // exchange/integrator path reads it. It's refreshed by `print_thermo` (which
     // already runs a collective on its cadence), so we no longer pay an all_reduce
     // collective here on every ghost rebuild.
-    atoms.nlocal = atoms.len() as u32;
-    atoms.nghost = 0;
-
     // Compute maxneed on first full rebuild (ghost_cutoff is set by neighbor_setup)
     if topo.maxneed == [0, 0, 0] {
         let decomp = comm.processor_decomposition();
@@ -1795,16 +1784,20 @@ pub fn exchange(
             let disp_hi = min_image(coord - sub_hi);
             if disp_lo < 0.0 {
                 lo_count += 1.0;
-                atoms.pack_exchange(i, &mut atoms_buff[0]);
-                registry.pack_all(i, &mut atoms_buff[0]);
-                atoms.swap_remove(i);
-                registry.swap_remove_all(i);
+                ParticleStore::new(&mut atoms, &registry)
+                    .pack_migrant(i, &mut atoms_buff[0])
+                    .expect("exchange found invalid particle columns");
+                ParticleStore::new(&mut atoms, &registry)
+                    .swap_remove(i)
+                    .expect("exchange found an invalid local particle index");
             } else if disp_hi >= 0.0 {
                 hi_count += 1.0;
-                atoms.pack_exchange(i, &mut atoms_buff[1]);
-                registry.pack_all(i, &mut atoms_buff[1]);
-                atoms.swap_remove(i);
-                registry.swap_remove_all(i);
+                ParticleStore::new(&mut atoms, &registry)
+                    .pack_migrant(i, &mut atoms_buff[1])
+                    .expect("exchange found invalid particle columns");
+                ParticleStore::new(&mut atoms, &registry)
+                    .swap_remove(i)
+                    .expect("exchange found an invalid local particle index");
             }
         }
 
@@ -2298,13 +2291,16 @@ mod tests {
         let mut source = Atom::new();
         source.push_test_atom(10, [0.1, 0.0, 0.0], 0.5, 1.0);
         source.push_test_atom(20, [0.9, 0.0, 0.0], 0.5, 1.0);
+        source.nlocal = 2;
 
         let mut lo = Vec::new();
         let mut hi = Vec::new();
-        source.pack_exchange(0, &mut lo);
-        registry.pack_all(0, &mut lo);
-        source.pack_exchange(1, &mut hi);
-        registry.pack_all(1, &mut hi);
+        ParticleStore::new(&mut source, &registry)
+            .pack_migrant(0, &mut lo)
+            .unwrap();
+        ParticleStore::new(&mut source, &registry)
+            .pack_migrant(1, &mut hi)
+            .unwrap();
 
         let mut atoms = Atom::new();
         let comm = CountingComm::default();

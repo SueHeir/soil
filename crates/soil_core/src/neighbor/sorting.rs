@@ -4,7 +4,7 @@ use grass_scheduler::prelude::*;
 
 use super::grid::recompute_bins;
 use super::Neighbor;
-use crate::{Atom, AtomDataRegistry, CommResource, CommState, Domain};
+use crate::{Atom, AtomDataRegistry, CommResource, CommState, Domain, ParticleStore};
 
 /// Reorder local atoms by spatial bin for improved cache locality.
 ///
@@ -139,12 +139,9 @@ pub fn sort_atoms_by_bin(
     neighbor.local_cells_valid = true;
 
     if !already_sorted {
-        atoms.apply_permutation_with_scratch(&perm, nlocal, &mut neighbor.sort_permutation_visited);
-        registry.apply_permutation_all_with_scratch(
-            &perm,
-            nlocal,
-            &mut neighbor.sort_permutation_visited,
-        );
+        ParticleStore::new(&mut atoms, &registry)
+            .apply_permutation(&perm, &mut neighbor.sort_permutation_visited)
+            .expect("spatial sorting found invalid particle columns");
 
         // Apply the same permutation to last_build_pos so displacement checks
         // compare the correct atom's current position against its saved position.

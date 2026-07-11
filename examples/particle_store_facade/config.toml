@@ -1,0 +1,5 @@
+# A deliberately small but multi-record facade wire path.  The test requires
+# exact tag/extension parity after a framed migration and exact rollback after
+# a trailing payload error.
+particle_count = 64
+repetitions = 40

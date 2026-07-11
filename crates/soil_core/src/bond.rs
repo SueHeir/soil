@@ -27,6 +27,7 @@ pub struct BondEntry {
 ///
 /// Each local (and ghost) atom has a `Vec<BondEntry>` listing all bonds it
 /// participates in. Both atoms in a bonded pair store the bond (A→B and B→A).
+#[derive(Clone)]
 pub struct BondStore {
     /// Per-atom bond lists, indexed by local atom index.
     pub bonds: Vec<Vec<BondEntry>>,
@@ -86,6 +87,9 @@ impl AtomData for BondStore {
     }
     fn as_any_mut(&mut self) -> &mut dyn Any {
         self
+    }
+    fn snapshot(&self) -> Box<dyn AtomData> {
+        Box::new(self.clone())
     }
 
     fn len(&self) -> usize {
@@ -327,7 +331,7 @@ mod tests {
     /// in the buffer.
     #[test]
     fn migration_preserves_bonds_across_ranks() {
-        use crate::{Atom, AtomDataRegistry};
+        use crate::{Atom, AtomDataRegistry, ParticleStore};
 
         // ── Rank A: two atoms bonded to each other ────────────────────────
         let mut atoms_a = Atom::new();
@@ -352,11 +356,12 @@ mod tests {
         // ── Migrate atom 0 (tag 10) to rank B ─────────────────────────────
         let migrate_idx = 0;
         let mut buf = Vec::new();
-        atoms_a.pack_exchange(migrate_idx, &mut buf);
-        registry_a.pack_all(migrate_idx, &mut buf);
-        atoms_a.swap_remove(migrate_idx);
-        registry_a.swap_remove_all(migrate_idx);
-        atoms_a.nlocal -= 1;
+        ParticleStore::new(&mut atoms_a, &registry_a)
+            .pack_migrant(migrate_idx, &mut buf)
+            .unwrap();
+        ParticleStore::new(&mut atoms_a, &registry_a)
+            .swap_remove(migrate_idx)
+            .unwrap();
 
         // Rank A now has only tag 20 (swapped into index 0), and its bond to
         // tag 10 must still be present and at the same index.
@@ -374,12 +379,9 @@ mod tests {
             .try_register(BondStore::new(), atoms_b.len())
             .unwrap();
 
-        let mut pos = 0;
-        pos += atoms_b.unpack_atom(&buf[pos..], false);
-        pos += registry_b.unpack_all(&buf[pos..]);
-        atoms_b.nlocal = 1;
-
-        assert_eq!(pos, buf.len(), "must consume the entire exchange buffer");
+        ParticleStore::new(&mut atoms_b, &registry_b)
+            .append_migrant_records(&buf, 1)
+            .unwrap();
         assert_eq!(atoms_b.tag[0], 10);
 
         let store_b = registry_b.expect::<BondStore>("rankB");
@@ -394,7 +396,7 @@ mod tests {
     /// passenger atom — exercises the per-atom bond-count prefix.
     #[test]
     fn migration_preserves_multi_bond_and_empty() {
-        use crate::{Atom, AtomDataRegistry};
+        use crate::{Atom, AtomDataRegistry, ParticleStore};
 
         let mut atoms = Atom::new();
         atoms.push_test_atom(10, [0.0, 0.0, 0.0], 0.5, 1.0);
@@ -435,11 +437,12 @@ mod tests {
         let mut buf = Vec::new();
         for idx in [3usize, 0usize] {
             // Iterate high→low so swap_remove is safe
-            atoms.pack_exchange(idx, &mut buf);
-            registry.pack_all(idx, &mut buf);
-            atoms.swap_remove(idx);
-            registry.swap_remove_all(idx);
-            atoms.nlocal -= 1;
+            ParticleStore::new(&mut atoms, &registry)
+                .pack_migrant(idx, &mut buf)
+                .unwrap();
+            ParticleStore::new(&mut atoms, &registry)
+                .swap_remove(idx)
+                .unwrap();
         }
 
         // Decode on a fresh "rank B".
@@ -448,13 +451,9 @@ mod tests {
         registry_b
             .try_register(BondStore::new(), atoms_b.len())
             .unwrap();
-        let mut pos = 0;
-        for _ in 0..2 {
-            pos += atoms_b.unpack_atom(&buf[pos..], false);
-            pos += registry_b.unpack_all(&buf[pos..]);
-            atoms_b.nlocal += 1;
-        }
-        assert_eq!(pos, buf.len());
+        ParticleStore::new(&mut atoms_b, &registry_b)
+            .append_migrant_records(&buf, 2)
+            .unwrap();
         assert_eq!(atoms_b.nlocal, 2);
 
         // The receiving rank's bond lists must match the order of unpack.

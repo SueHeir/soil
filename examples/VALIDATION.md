@@ -11,6 +11,15 @@ the malformed store's hidden two-row column must be rejected.
 
 ![AtomData row contract](atomdata_row_contract/plots/atomdata_row_contract.png)
 
+## particle_store_facade
+
+Executable validation and measured representative communication path for the
+new synchronized `ParticleStore` facade.  It checks transactional local
+construction, exact core-plus-extension parity for a framed multi-record
+migration, and all-or-nothing rollback for a trailing-payload failure.
+
+![ParticleStore facade communication validation](particle_store_facade/plots/particle_store_facade.png)
+
 ## virial_thermo_crossrank
 
 MPI validation that `VirialStress` pair-force contributions reach the

@@ -54,6 +54,7 @@
 use std::{
     any::{Any, TypeId},
     cell::{Ref, RefCell, RefMut},
+    panic::{catch_unwind, AssertUnwindSafe},
 };
 
 use crate::{Accum, CommState, ParticleSimScheduleSet, Real};
@@ -190,6 +191,10 @@ pub trait AtomData: Any {
     }
     /// Append one default row, used when an extension is registered late.
     fn push_default(&mut self);
+    /// Reserve capacity for future rows. This is a capacity hint only; it does
+    /// not change the extension's row count. The default keeps custom stores
+    /// source-compatible.
+    fn reserve(&mut self, _additional: usize) {}
     /// Validate the row layout before registration.
     ///
     /// Single-column implementations can use the default. A manual store with
@@ -295,6 +300,35 @@ impl std::fmt::Display for AtomDataRegistrationError {
 }
 
 impl std::error::Error for AtomDataRegistrationError {}
+
+/// A particle-store operation could not preserve the core/extension row
+/// invariant.  Receiving is fallible because `AtomData::unpack` predates this
+/// boundary and cannot return an error itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParticleStoreError {
+    /// The core part of a received particle is incomplete.
+    TruncatedCoreRecord,
+    /// An extension panicked, over-read, or failed to append one aligned row.
+    MalformedExtensionRecord,
+    /// A caller addressed a ghost/nonexistent local row or supplied a non-bijection.
+    InvalidStructuralOperation,
+}
+
+impl std::fmt::Display for ParticleStoreError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::TruncatedCoreRecord => {
+                write!(f, "particle payload is shorter than a core record")
+            }
+            Self::MalformedExtensionRecord => write!(f, "particle extension record is malformed"),
+            Self::InvalidStructuralOperation => {
+                write!(f, "invalid particle-store structural operation")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ParticleStoreError {}
 
 // ── AtomDataRegistry ─────────────────────────────────────────────────────────
 
@@ -439,6 +473,20 @@ impl AtomDataRegistry {
         }
     }
 
+    /// Reserve capacity in each extension alongside the core SoA.
+    pub fn reserve_all(&self, additional: usize) {
+        for (_, cell) in &self.stores {
+            cell.borrow_mut().reserve(additional);
+        }
+    }
+
+    /// True when every extension has one row per core particle.
+    pub fn validate_rows(&self, expected: usize) -> bool {
+        self.stores
+            .iter()
+            .all(|(_, cell)| cell.borrow().len() == expected)
+    }
+
     /// Remove atom at index `i` from all registered extensions via swap-remove.
     pub fn swap_remove_all(&self, i: usize) {
         for (_, cell) in &self.stores {
@@ -460,6 +508,19 @@ impl AtomDataRegistry {
             pos += cell.borrow_mut().unpack(&buf[pos..]);
         }
         pos
+    }
+
+    /// Decode one extension record while containing the legacy infallible
+    /// callback boundary. A failed decoder is rolled back to `expected_rows`.
+    fn unpack_one(&self, expected_rows: usize, buf: &[f64]) -> Result<usize, ParticleStoreError> {
+        let decoded = catch_unwind(AssertUnwindSafe(|| self.unpack_all(buf)));
+        match decoded {
+            Ok(used) if used == buf.len() && self.validate_rows(expected_rows + 1) => Ok(used),
+            _ => {
+                self.truncate_all(expected_rows);
+                Err(ParticleStoreError::MalformedExtensionRecord)
+            }
+        }
     }
 
     /// Reorder all extensions according to `perm[0..n]`.
@@ -699,6 +760,14 @@ macro_rules! impl_atom_truncate {
     };
 }
 
+macro_rules! impl_atom_truncate_to {
+    ( $( ($field:ident, $ty:ty) ),* $(,)? ) => {
+        fn truncate_to(&mut self, n: usize) {
+            $( self.$field.truncate(n); )*
+        }
+    };
+}
+
 macro_rules! impl_atom_reserve {
     ( $( ($field:ident, $ty:ty) ),* $(,)? ) => {
         /// Reserve capacity for `additional` more atoms in every field array
@@ -736,6 +805,7 @@ impl Atom {
     for_each_atom_vec!(impl_atom_new);
     for_each_atom_vec!(impl_atom_swap_remove);
     for_each_atom_vec!(impl_atom_truncate);
+    for_each_atom_vec!(impl_atom_truncate_to);
     for_each_atom_vec!(impl_atom_reserve);
     for_each_atom_vec!(impl_atom_apply_permutation);
 
@@ -847,6 +917,223 @@ impl Atom {
     }
 }
 
+/// Coordinates the structural operations which must keep `Atom` and every
+/// registered `AtomData` extension in lockstep.  It intentionally owns no data:
+/// force kernels retain direct slice access to the public SoA.
+pub struct ParticleStore<'a> {
+    atoms: &'a mut Atom,
+    registry: &'a AtomDataRegistry,
+}
+
+impl<'a> ParticleStore<'a> {
+    /// Construct a coordinator after checking the parallel-row precondition.
+    pub fn new(atoms: &'a mut Atom, registry: &'a AtomDataRegistry) -> Self {
+        assert!(
+            registry.validate_rows(atoms.len()),
+            "particle extension rows are misaligned"
+        );
+        Self { atoms, registry }
+    }
+
+    /// Reserve capacity in both the core and extension stores.
+    pub fn reserve(&mut self, additional: usize) {
+        self.atoms.reserve(additional);
+        self.registry.reserve_all(additional);
+    }
+
+    /// Remove a locally owned row from core and extensions together.
+    pub fn swap_remove(&mut self, index: usize) -> Result<(), ParticleStoreError> {
+        // `Vec::swap_remove` would pull the final ghost into the local prefix.
+        // Full-rebuild ordering discards ghosts before deletions; reject an
+        // accidental out-of-order caller rather than corrupting ownership.
+        if self.atoms.nghost != 0
+            || index >= self.atoms.nlocal as usize
+            || !self.registry.validate_rows(self.atoms.len())
+        {
+            return Err(ParticleStoreError::InvalidStructuralOperation);
+        }
+        self.atoms.swap_remove(index);
+        self.registry.swap_remove_all(index);
+        self.atoms.nlocal -= 1;
+        Ok(())
+    }
+
+    /// Drop the ghost suffix from core and extensions together.
+    pub fn discard_ghosts(&mut self) -> Result<(), ParticleStoreError> {
+        if !self.registry.validate_rows(self.atoms.len()) {
+            return Err(ParticleStoreError::InvalidStructuralOperation);
+        }
+        let nlocal = self.atoms.nlocal as usize;
+        self.atoms.truncate_to(nlocal);
+        self.registry.truncate_all(nlocal);
+        self.atoms.nghost = 0;
+        Ok(())
+    }
+
+    /// Apply a validated local permutation to all parallel columns.
+    pub fn apply_permutation(
+        &mut self,
+        permutation: &[usize],
+        scratch: &mut Vec<bool>,
+    ) -> Result<(), ParticleStoreError> {
+        let n = self.atoms.nlocal as usize;
+        if permutation.len() != n || !self.registry.validate_rows(self.atoms.len()) {
+            return Err(ParticleStoreError::InvalidStructuralOperation);
+        }
+        scratch.clear();
+        scratch.resize(n, false);
+        for &source in permutation {
+            if source >= n || std::mem::replace(&mut scratch[source], true) {
+                return Err(ParticleStoreError::InvalidStructuralOperation);
+            }
+        }
+        self.atoms
+            .apply_permutation_with_scratch(permutation, n, scratch);
+        self.registry
+            .apply_permutation_all_with_scratch(permutation, n, scratch);
+        Ok(())
+    }
+
+    fn frame_record<F>(buf: &mut Vec<f64>, pack: F)
+    where
+        F: FnOnce(&mut Vec<f64>),
+    {
+        let frame = buf.len();
+        buf.push(0.0);
+        pack(buf);
+        buf[frame] = (buf.len() - frame - 1) as f64;
+    }
+
+    /// Pack a local migrant as a length-delimited core-plus-extension record.
+    pub fn pack_migrant(&self, index: usize, buf: &mut Vec<f64>) -> Result<(), ParticleStoreError> {
+        if index >= self.atoms.len() || !self.registry.validate_rows(self.atoms.len()) {
+            return Err(ParticleStoreError::InvalidStructuralOperation);
+        }
+        Self::frame_record(buf, |buf| {
+            self.atoms.pack_exchange(index, buf);
+            self.registry.pack_all(index, buf);
+        });
+        Ok(())
+    }
+
+    /// Pack a border ghost record with the same explicit frame used by exchange.
+    pub fn pack_border(
+        &mut self,
+        index: usize,
+        change_pos: [f64; 3],
+        vel_offset: [f64; 3],
+        buf: &mut Vec<f64>,
+    ) -> Result<(), ParticleStoreError> {
+        if index >= self.atoms.len() || !self.registry.validate_rows(self.atoms.len()) {
+            return Err(ParticleStoreError::InvalidStructuralOperation);
+        }
+        Self::frame_record(buf, |buf| {
+            self.atoms.pack_border(index, change_pos, vel_offset, buf);
+            self.registry.pack_all(index, buf);
+        });
+        Ok(())
+    }
+
+    fn append_received(
+        &mut self,
+        payload: &[f64],
+        ghost: bool,
+    ) -> Result<usize, ParticleStoreError> {
+        let Some(&length) = payload.first() else {
+            return Err(ParticleStoreError::TruncatedCoreRecord);
+        };
+        if !length.is_finite()
+            || length < ATOM_PACK_SIZE as f64
+            || length > (usize::MAX - 1) as f64
+            || length.fract() != 0.0
+        {
+            return Err(ParticleStoreError::MalformedExtensionRecord);
+        }
+        let record_len = length as usize;
+        if payload.len() < record_len + 1 {
+            return Err(ParticleStoreError::TruncatedCoreRecord);
+        }
+        let record = &payload[1..=record_len];
+        let rows_before = self.atoms.len();
+        let extension_used = self
+            .registry
+            .unpack_one(rows_before, &record[ATOM_PACK_SIZE..])?;
+        debug_assert_eq!(ATOM_PACK_SIZE + extension_used, record_len);
+        self.atoms.unpack_atom(record, ghost);
+        Ok(record_len + 1)
+    }
+
+    /// Append a single ghost record. For a variable-width stream, use the
+    /// counted batch API so its exact end can be verified.
+    pub fn append_ghost(&mut self, payload: &[f64]) -> Result<usize, ParticleStoreError> {
+        let used = self.append_received(payload, true)?;
+        self.atoms.nghost += 1;
+        Ok(used)
+    }
+
+    /// Append a single migrated local record.
+    pub fn append_migrant(&mut self, payload: &[f64]) -> Result<usize, ParticleStoreError> {
+        let used = self.append_received(payload, false)?;
+        self.atoms.nlocal += 1;
+        Ok(used)
+    }
+
+    /// Append exactly `count` ghost records, rolling the whole batch back when
+    /// a record is bad or the count/payload boundary disagrees.
+    pub fn append_ghost_records(
+        &mut self,
+        payload: &[f64],
+        count: usize,
+    ) -> Result<(), ParticleStoreError> {
+        self.append_records(payload, count, true)
+    }
+
+    /// Append exactly `count` migrant records transactionally.
+    pub fn append_migrant_records(
+        &mut self,
+        payload: &[f64],
+        count: usize,
+    ) -> Result<(), ParticleStoreError> {
+        self.append_records(payload, count, false)
+    }
+
+    fn append_records(
+        &mut self,
+        payload: &[f64],
+        count: usize,
+        ghost: bool,
+    ) -> Result<(), ParticleStoreError> {
+        if !self.registry.validate_rows(self.atoms.len()) {
+            return Err(ParticleStoreError::InvalidStructuralOperation);
+        }
+        let rows_before = self.atoms.len();
+        let nlocal_before = self.atoms.nlocal;
+        let nghost_before = self.atoms.nghost;
+        self.reserve(count);
+        let result = (|| {
+            let mut pos = 0;
+            for _ in 0..count {
+                let used = if ghost {
+                    self.append_ghost(&payload[pos..])?
+                } else {
+                    self.append_migrant(&payload[pos..])?
+                };
+                pos += used;
+            }
+            (pos == payload.len())
+                .then_some(())
+                .ok_or(ParticleStoreError::MalformedExtensionRecord)
+        })();
+        if result.is_err() {
+            self.atoms.truncate_to(rows_before);
+            self.registry.truncate_all(rows_before);
+            self.atoms.nlocal = nlocal_before;
+            self.atoms.nghost = nghost_before;
+        }
+        result
+    }
+}
+
 /// Compute kinetic energy over local atoms, optionally filtered by a group mask.
 pub fn compute_ke(atoms: &Atom, mask: Option<&[bool]>) -> f64 {
     let nlocal = atoms.nlocal as usize;
@@ -887,9 +1174,9 @@ impl Plugin for AtomPlugin {
 /// Truncate ghost atoms before the next communication phase.
 /// Gated by `run_if(in_state(CommState::FullRebuild))` — only runs on full rebuild steps.
 pub fn remove_ghost_atoms(mut atoms: ResMut<Atom>, registry: Res<AtomDataRegistry>) {
-    atoms.truncate_to_nlocal();
-    registry.truncate_all(atoms.nlocal as usize);
-    atoms.nghost = 0;
+    ParticleStore::new(&mut atoms, &registry)
+        .discard_ghosts()
+        .expect("AtomPlugin found misaligned particle columns");
 }
 
 fn zero_all_forces(mut atoms: ResMut<Atom>, registry: Res<AtomDataRegistry>) {
@@ -1044,6 +1331,80 @@ mod tests {
             0
         }
         fn apply_permutation(&mut self, _: &[usize], _: usize) {}
+    }
+
+    #[test]
+    fn particle_store_coordinates_remove_sort_and_ghost_discard() {
+        let mut atoms = Atom::new();
+        for (tag, x) in [(10, 0.0), (20, 1.0), (30, 2.0)] {
+            atoms.push_test_atom(tag, [x, 0.0, 0.0], 1.0, 1.0);
+        }
+        atoms.nlocal = 2;
+        atoms.nghost = 1;
+        let mut registry = AtomDataRegistry::new();
+        registry
+            .try_register(
+                ManualRows {
+                    rows: vec![100.0, 200.0, 300.0],
+                },
+                3,
+            )
+            .unwrap();
+
+        let mut store = ParticleStore::new(&mut atoms, &registry);
+        let mut scratch = Vec::new();
+        store.apply_permutation(&[1, 0], &mut scratch).unwrap();
+        store.discard_ghosts().unwrap();
+        store.swap_remove(0).unwrap();
+
+        assert_eq!(store.atoms.tag, vec![10]);
+        assert_eq!(registry.get::<ManualRows>().unwrap().rows, vec![100.0]);
+        assert_eq!((store.atoms.nlocal, store.atoms.nghost), (1, 0));
+        assert!(registry.validate_rows(store.atoms.len()));
+    }
+
+    #[test]
+    fn particle_store_counted_receive_accepts_variable_records_and_rolls_back() {
+        let mut source_atoms = Atom::new();
+        source_atoms.push_test_atom(10, [0.0; 3], 1.0, 1.0);
+        source_atoms.push_test_atom(20, [1.0; 3], 1.0, 1.0);
+        source_atoms.nlocal = 2;
+        let mut source_registry = AtomDataRegistry::new();
+        source_registry
+            .try_register(
+                ManualRows {
+                    rows: vec![4.0, 9.0],
+                },
+                2,
+            )
+            .unwrap();
+        let mut payload = Vec::new();
+        for i in 0..2 {
+            ParticleStore::new(&mut source_atoms, &source_registry)
+                .pack_migrant(i, &mut payload)
+                .unwrap();
+        }
+
+        let mut atoms = Atom::new();
+        let mut registry = AtomDataRegistry::new();
+        registry.try_register(ManualRows::default(), 0).unwrap();
+        ParticleStore::new(&mut atoms, &registry)
+            .append_migrant_records(&payload, 2)
+            .unwrap();
+        assert_eq!(atoms.tag, vec![10, 20]);
+        assert_eq!(registry.get::<ManualRows>().unwrap().rows, vec![4.0, 9.0]);
+
+        let before_tags = atoms.tag.clone();
+        let before_rows = registry.get::<ManualRows>().unwrap().rows.clone();
+        let mut malformed = payload.clone();
+        malformed.push(123.0);
+        assert_eq!(
+            ParticleStore::new(&mut atoms, &registry).append_ghost_records(&malformed, 2),
+            Err(ParticleStoreError::MalformedExtensionRecord)
+        );
+        assert_eq!(atoms.tag, before_tags);
+        assert_eq!(registry.get::<ManualRows>().unwrap().rows, before_rows);
+        assert!(registry.validate_rows(atoms.len()));
     }
 
     #[test]

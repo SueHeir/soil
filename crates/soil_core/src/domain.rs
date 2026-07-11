@@ -738,8 +738,9 @@ pub fn pbc(
                     atoms.pos[i][d] = new_pos as Real;
                     atoms.image[i][d] += delta;
                 } else if (atoms.pos[i][d] as f64) < low[d] || (atoms.pos[i][d] as f64) >= high[d] {
-                    atoms.swap_remove(i);
-                    registry.swap_remove_all(i);
+                    crate::ParticleStore::new(&mut atoms, &registry)
+                        .swap_remove(i)
+                        .expect("pbc found misaligned particle columns");
                     removed += 1;
                     continue 'outer;
                 }
@@ -790,8 +791,9 @@ fn pbc_triclinic(
                 }
             } else if lam[d] < 0.0 || lam[d] >= 1.0 {
                 // Fixed / shrink-wrap axis: atom left the box → remove it.
-                atoms.swap_remove(i);
-                registry.swap_remove_all(i);
+                crate::ParticleStore::new(atoms, registry)
+                    .swap_remove(i)
+                    .expect("triclinic pbc found misaligned particle columns");
                 removed += 1;
                 continue 'outer;
             }

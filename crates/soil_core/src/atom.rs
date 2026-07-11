@@ -1087,6 +1087,22 @@ impl<'a> ParticleStore<'a> {
         })
     }
 
+    /// Begin a full ghost rebuild with a local-only, aligned particle prefix.
+    ///
+    /// This is the one communication boundary that may reset the ownership
+    /// counters.  It first drops an existing ghost suffix transactionally, then
+    /// derives `nlocal` from the surviving core rows and clears `nghost`.
+    /// Callers therefore never have to update these coupled counters beside the
+    /// core/extension structural operation.
+    pub fn begin_ghost_rebuild(&mut self) -> Result<(), ParticleStoreError> {
+        if self.atoms.nghost > 0 {
+            self.discard_ghosts()?;
+        }
+        self.atoms.nlocal = self.atoms.len() as u32;
+        self.atoms.nghost = 0;
+        Ok(())
+    }
+
     /// Apply a validated local permutation to all parallel columns.
     pub fn apply_permutation(
         &mut self,
@@ -1619,7 +1635,7 @@ mod tests {
         let mut store = ParticleStore::new(&mut atoms, &registry);
         let mut scratch = Vec::new();
         store.apply_permutation(&[1, 0], &mut scratch).unwrap();
-        store.discard_ghosts().unwrap();
+        store.begin_ghost_rebuild().unwrap();
         store.swap_remove(0).unwrap();
 
         assert_eq!(store.atoms.tag, vec![10]);

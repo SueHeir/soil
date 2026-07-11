@@ -1251,20 +1251,16 @@ pub fn borders(
     let mut send_buff = std::mem::take(&mut buffers.border_send_buff);
     let mut recv_buff = std::mem::take(&mut buffers.border_recv_buff);
 
-    // Full ghost rebuild: remove old ghosts first
-    if atoms.nghost > 0 {
-        ParticleStore::new(&mut atoms, &registry)
-            .discard_ghosts()
-            .expect("borders found misaligned particle columns");
-    }
+    // Full ghost rebuild: remove old ghosts and derive the ownership counters
+    // through the facade before appending a new ghost suffix.
+    ParticleStore::new(&mut atoms, &registry)
+        .begin_ghost_rebuild()
+        .expect("borders found misaligned particle columns");
 
     // `natoms` (global count) is reporting-only — nothing in the neighbor/force/
     // exchange/integrator path reads it. It's refreshed by `print_thermo` (which
     // already runs a collective on its cadence), so we no longer pay an all_reduce
     // collective here on every ghost rebuild.
-    atoms.nlocal = atoms.len() as u32;
-    atoms.nghost = 0;
-
     // Compute maxneed on first full rebuild (ghost_cutoff is set by neighbor_setup)
     if topo.maxneed == [0, 0, 0] {
         let decomp = comm.processor_decomposition();

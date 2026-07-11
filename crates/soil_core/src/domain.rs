@@ -729,7 +729,6 @@ pub fn pbc(
         // Slow path: non-periodic axes may require removal (local atoms only).
         // Shrink-wrap axes: atoms are always inside bounds (shrink_wrap ran first),
         // so the out-of-bounds check is a no-op — but it's harmless and correct.
-        let nlocal_before = atoms.nlocal as usize;
         let mut removed = 0usize;
         'outer: for i in (0..atoms.nlocal as usize).rev() {
             for d in 0..3 {
@@ -748,7 +747,6 @@ pub fn pbc(
         }
         // Update nlocal and force full rebuild since sendlists are stale.
         if removed > 0 {
-            atoms.nlocal = (nlocal_before - removed) as u32;
             comm_state.0 = CommState::FullRebuild;
         }
     }
@@ -771,7 +769,6 @@ fn pbc_triclinic(
 ) {
     let periodic = domain.periodic_flags();
     let bvel = domain.boundary_vel;
-    let nlocal_before = atoms.nlocal as usize;
     let mut removed = 0usize;
 
     'outer: for i in (0..atoms.nlocal as usize).rev() {
@@ -816,7 +813,6 @@ fn pbc_triclinic(
     }
 
     if removed > 0 {
-        atoms.nlocal = (nlocal_before - removed) as u32;
         comm_state.0 = CommState::FullRebuild;
     }
 }

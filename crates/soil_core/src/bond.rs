@@ -27,6 +27,7 @@ pub struct BondEntry {
 ///
 /// Each local (and ghost) atom has a `Vec<BondEntry>` listing all bonds it
 /// participates in. Both atoms in a bonded pair store the bond (A→B and B→A).
+#[derive(Clone)]
 pub struct BondStore {
     /// Per-atom bond lists, indexed by local atom index.
     pub bonds: Vec<Vec<BondEntry>>,
@@ -119,6 +120,20 @@ impl AtomData for BondStore {
         visited: &mut Vec<bool>,
     ) {
         apply_permutation_in_place(&mut self.bonds, perm, n, visited);
+    }
+
+    fn structural_snapshot(&self) -> Option<Box<dyn Any>> {
+        Some(Box::new(self.clone()))
+    }
+
+    fn restore_structural_snapshot(&mut self, snapshot: Box<dyn Any>) -> bool {
+        match snapshot.downcast::<Self>() {
+            Ok(snapshot) => {
+                *self = *snapshot;
+                true
+            }
+            Err(_) => false,
+        }
     }
 
     /// Pack format: `[count, (partner_tag, bond_type, r0) × count]` — 1 + 3×count f64s.

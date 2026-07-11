@@ -2,7 +2,9 @@ use std::{fs, fs::File};
 
 use grass_scheduler::prelude::*;
 use serde::Deserialize;
-use soil_core::{Accum, Atom, AtomDataRegistry, CommResource, Input, Real, RunConfig, RunState};
+use soil_core::{
+    Accum, Atom, AtomDataRegistry, CommResource, Input, ParticleStore, Real, RunConfig, RunState,
+};
 
 use crate::{dump::dump_atoms_inner, DumpConfig, DumpRegistry};
 
@@ -315,46 +317,47 @@ pub fn read_restart(
 
     let n = data.tag.len();
 
-    // Clear existing atoms and repopulate from restart data
-    atoms.natoms = data.natoms;
-    atoms.nlocal = n as u32;
-    atoms.nghost = 0;
-    atoms.dt = data.dt;
+    // Build a complete replacement off to the side.  The facade installs it
+    // only after every extension buffer has decoded to exactly n rows.
+    let mut restored = Atom::new();
+    restored.natoms = data.natoms;
+    restored.nlocal = n as u32;
+    restored.nghost = 0;
+    restored.dt = data.dt;
 
-    atoms.tag = data.tag;
-    atoms.atom_type = data.atom_type;
-    atoms.origin_index = vec![0; n];
-    atoms.is_ghost = vec![false; n];
+    restored.tag = data.tag;
+    restored.atom_type = data.atom_type;
+    restored.origin_index = vec![0; n];
+    restored.is_ghost = vec![false; n];
     // Restart wire format is f64; convert back to the build's storage precision.
-    atoms.pos = data
+    restored.pos = data
         .pos_x
         .iter()
         .zip(data.pos_y.iter())
         .zip(data.pos_z.iter())
         .map(|((&x, &y), &z)| [x as Real, y as Real, z as Real])
         .collect();
-    atoms.vel = data
+    restored.vel = data
         .vel_x
         .iter()
         .zip(data.vel_y.iter())
         .zip(data.vel_z.iter())
         .map(|((&x, &y), &z)| [x as Real, y as Real, z as Real])
         .collect();
-    atoms.force = data
+    restored.force = data
         .force_x
         .iter()
         .zip(data.force_y.iter())
         .zip(data.force_z.iter())
         .map(|((&x, &y), &z)| [x as Accum, y as Accum, z as Accum])
         .collect();
-    atoms.mass = data.mass.iter().map(|&m| m as Real).collect();
-    atoms.inv_mass = atoms.mass.iter().map(|&m| 1.0 / m).collect();
-    atoms.cutoff_radius = data.cutoff_radius.iter().map(|&r| r as Real).collect();
+    restored.mass = data.mass.iter().map(|&m| m as Real).collect();
+    restored.inv_mass = restored.mass.iter().map(|&m| 1.0 / m).collect();
+    restored.cutoff_radius = data.cutoff_radius.iter().map(|&r| r as Real).collect();
 
-    // Restore AtomData (DemAtom, etc.) from generic buffers
-    if !data.atom_data_buffers.is_empty() {
-        registry.unpack_all_from_restart(&data.atom_data_buffers);
-    }
+    ParticleStore::new(&mut atoms, &registry)
+        .replace_from_restart(restored, &data.atom_data_buffers)
+        .unwrap_or_else(|error| panic!("restart particle-store import failed: {error}"));
 
     run_state.total_cycle = data.total_cycle;
     if rank == 0 {

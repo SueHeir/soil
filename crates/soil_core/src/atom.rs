@@ -224,6 +224,19 @@ pub trait AtomData: Any {
     /// Reorder atoms according to `perm[0..n]` (used by spatial sorting).
     fn apply_permutation(&mut self, perm: &[usize], n: usize);
 
+    /// Return an erased exact copy before an infrequent structural operation.
+    ///
+    /// A store that opts out is deliberately rejected by the transactional
+    /// facade: truncating is not a rollback mechanism for swap/remove or a
+    /// reordering callback that has already changed its rows.
+    fn structural_snapshot(&self) -> Option<Box<dyn Any>> {
+        None
+    }
+    /// Restore a value produced by [`structural_snapshot`](Self::structural_snapshot).
+    fn restore_structural_snapshot(&mut self, _snapshot: Box<dyn Any>) -> bool {
+        false
+    }
+
     /// Pack forward-comm fields (e.g. omega for DEM) into buf.
     fn pack_forward(&self, _i: usize, _buf: &mut Vec<f64>) {}
     /// Unpack forward-comm fields; returns number of f64s consumed.
@@ -487,6 +500,59 @@ impl AtomDataRegistry {
             .all(|(_, cell)| cell.borrow().len() == expected)
     }
 
+    fn structural_snapshots(&self) -> Option<Vec<Box<dyn Any>>> {
+        self.stores
+            .iter()
+            .map(|(_, cell)| cell.borrow().structural_snapshot())
+            .collect()
+    }
+
+    fn restore_structural_snapshots(&self, snapshots: Vec<Box<dyn Any>>) -> bool {
+        self.stores
+            .iter()
+            .zip(snapshots)
+            .all(|((_, cell), snapshot)| cell.borrow_mut().restore_structural_snapshot(snapshot))
+    }
+
+    fn restore_restart_rows(
+        &self,
+        expected_rows: usize,
+        buffers: &[Vec<f64>],
+    ) -> Result<(), ParticleStoreError> {
+        if buffers.len() != self.stores.len() {
+            return Err(ParticleStoreError::MalformedExtensionRecord);
+        }
+        let snapshots = self
+            .structural_snapshots()
+            .ok_or(ParticleStoreError::InvalidStructuralOperation)?;
+        let decoded = catch_unwind(AssertUnwindSafe(|| {
+            for ((_, cell), buffer) in self.stores.iter().zip(buffers) {
+                let mut store = cell.borrow_mut();
+                store.truncate(0);
+                let mut pos = 0;
+                for _ in 0..expected_rows {
+                    let used = store.unpack(&buffer[pos..]);
+                    if used == 0 || used > buffer.len().saturating_sub(pos) {
+                        return false;
+                    }
+                    pos += used;
+                }
+                if pos != buffer.len() || store.len() != expected_rows {
+                    return false;
+                }
+            }
+            self.validate_rows(expected_rows)
+        }));
+        if matches!(decoded, Ok(true)) {
+            return Ok(());
+        }
+        assert!(
+            self.restore_structural_snapshots(snapshots),
+            "AtomData restart snapshot contract violated"
+        );
+        Err(ParticleStoreError::MalformedExtensionRecord)
+    }
+
     /// Remove atom at index `i` from all registered extensions via swap-remove.
     pub fn swap_remove_all(&self, i: usize) {
         for (_, cell) in &self.stores {
@@ -672,6 +738,7 @@ macro_rules! for_each_atom_vec {
 // ── Atom ──────────────────────────────────────────────────────────────────────
 
 /// Struct-of-arrays storage for all per-atom fields (position, velocity, force, etc.).
+#[derive(Clone)]
 pub struct Atom {
     /// Total number of atoms across all ranks (global count).
     pub natoms: u64,
@@ -941,6 +1008,51 @@ impl<'a> ParticleStore<'a> {
         self.registry.reserve_all(additional);
     }
 
+    /// Replace the complete local core state and its restart extension rows.
+    /// Extension buffers are consumed exactly; malformed or panicking decoders
+    /// leave both the previous core and every extension untouched.
+    pub fn replace_from_restart(
+        &mut self,
+        replacement: Atom,
+        extension_buffers: &[Vec<f64>],
+    ) -> Result<(), ParticleStoreError> {
+        let expected = replacement.nlocal as usize;
+        if replacement.nghost != 0 || replacement.len() != expected {
+            return Err(ParticleStoreError::InvalidStructuralOperation);
+        }
+        self.registry
+            .restore_restart_rows(expected, extension_buffers)?;
+        *self.atoms = replacement;
+        Ok(())
+    }
+
+    /// Run a legacy extension callback behind one all-or-nothing boundary.
+    /// Snapshot availability is checked before the core is touched, and a
+    /// successful-but-malformed callback is treated the same as a panic.
+    fn structural_transaction(
+        &mut self,
+        expected_rows: usize,
+        operation: impl FnOnce(&mut Atom, &AtomDataRegistry),
+    ) -> Result<(), ParticleStoreError> {
+        let snapshots = self
+            .registry
+            .structural_snapshots()
+            .ok_or(ParticleStoreError::InvalidStructuralOperation)?;
+        let core_before = self.atoms.clone();
+        let result = catch_unwind(AssertUnwindSafe(|| operation(self.atoms, self.registry)));
+        if result.is_ok()
+            && self.registry.validate_rows(expected_rows)
+            && self.atoms.len() == expected_rows
+        {
+            return Ok(());
+        }
+        *self.atoms = core_before;
+        if !self.registry.restore_structural_snapshots(snapshots) {
+            panic!("AtomData snapshot contract violated while restoring structural transaction");
+        }
+        Err(ParticleStoreError::MalformedExtensionRecord)
+    }
+
     /// Remove a locally owned row from core and extensions together.
     pub fn swap_remove(&mut self, index: usize) -> Result<(), ParticleStoreError> {
         // `Vec::swap_remove` would pull the final ghost into the local prefix.
@@ -952,10 +1064,12 @@ impl<'a> ParticleStore<'a> {
         {
             return Err(ParticleStoreError::InvalidStructuralOperation);
         }
-        self.atoms.swap_remove(index);
-        self.registry.swap_remove_all(index);
-        self.atoms.nlocal -= 1;
-        Ok(())
+        let expected = self.atoms.len() - 1;
+        self.structural_transaction(expected, |atoms, registry| {
+            atoms.swap_remove(index);
+            registry.swap_remove_all(index);
+            atoms.nlocal -= 1;
+        })
     }
 
     /// Drop the ghost suffix from core and extensions together.
@@ -964,10 +1078,11 @@ impl<'a> ParticleStore<'a> {
             return Err(ParticleStoreError::InvalidStructuralOperation);
         }
         let nlocal = self.atoms.nlocal as usize;
-        self.atoms.truncate_to(nlocal);
-        self.registry.truncate_all(nlocal);
-        self.atoms.nghost = 0;
-        Ok(())
+        self.structural_transaction(nlocal, |atoms, registry| {
+            atoms.truncate_to(nlocal);
+            registry.truncate_all(nlocal);
+            atoms.nghost = 0;
+        })
     }
 
     /// Apply a validated local permutation to all parallel columns.
@@ -987,11 +1102,10 @@ impl<'a> ParticleStore<'a> {
                 return Err(ParticleStoreError::InvalidStructuralOperation);
             }
         }
-        self.atoms
-            .apply_permutation_with_scratch(permutation, n, scratch);
-        self.registry
-            .apply_permutation_all_with_scratch(permutation, n, scratch);
-        Ok(())
+        self.structural_transaction(self.atoms.len(), |atoms, registry| {
+            atoms.apply_permutation_with_scratch(permutation, n, scratch);
+            registry.apply_permutation_all_with_scratch(permutation, n, scratch);
+        })
     }
 
     fn frame_record<F>(buf: &mut Vec<f64>, pack: F)
@@ -1241,6 +1355,18 @@ mod tests {
             visited: &mut Vec<bool>,
         ) {
             apply_permutation_in_place(&mut self.rows, perm, n, visited);
+        }
+        fn structural_snapshot(&self) -> Option<Box<dyn Any>> {
+            Some(Box::new(self.rows.clone()))
+        }
+        fn restore_structural_snapshot(&mut self, snapshot: Box<dyn Any>) -> bool {
+            match snapshot.downcast::<Vec<f64>>() {
+                Ok(rows) => {
+                    self.rows = *rows;
+                    true
+                }
+                Err(_) => false,
+            }
         }
     }
 

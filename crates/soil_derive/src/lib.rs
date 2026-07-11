@@ -332,6 +332,14 @@ pub fn derive_atom_data(input: TokenStream) -> TokenStream {
         })
         .collect();
 
+    let snapshot_fields: Vec<_> = field_infos
+        .iter()
+        .map(|f| {
+            let id = &f.ident;
+            quote! { #id: self.#id.clone() }
+        })
+        .collect();
+
     // --- forward communication (#[forward] fields) ---
     let forward_methods = build_comm_methods(&field_infos, CommDirection::Forward);
 
@@ -390,6 +398,17 @@ pub fn derive_atom_data(input: TokenStream) -> TokenStream {
                 visited: &mut Vec<bool>,
             ) {
                 #(#perm_stmts)*
+            }
+
+            fn structural_snapshot(&self) -> Option<Box<dyn std::any::Any>> {
+                Some(Box::new(Self { #(#snapshot_fields),* }))
+            }
+
+            fn restore_structural_snapshot(&mut self, snapshot: Box<dyn std::any::Any>) -> bool {
+                match snapshot.downcast::<Self>() {
+                    Ok(snapshot) => { *self = *snapshot; true }
+                    Err(_) => false,
+                }
             }
 
             #forward_methods

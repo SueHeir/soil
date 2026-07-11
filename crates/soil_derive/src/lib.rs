@@ -97,16 +97,22 @@ enum FieldKind {
 /// Inspect a field's [`Type`] and return its [`FieldKind`], or `None` if the
 /// type is not a supported `Vec<f64>` or `Vec<[f64; N]>`.
 fn classify_field(ty: &Type) -> Option<FieldKind> {
-    let Type::Path(type_path) = ty else { return None };
+    let Type::Path(type_path) = ty else {
+        return None;
+    };
     let segments = &type_path.path.segments;
     if segments.len() != 1 || segments[0].ident != "Vec" {
         return None;
     }
-    let syn::PathArguments::AngleBracketed(args) = &segments[0].arguments else { return None };
+    let syn::PathArguments::AngleBracketed(args) = &segments[0].arguments else {
+        return None;
+    };
     if args.args.len() != 1 {
         return None;
     }
-    let syn::GenericArgument::Type(inner) = &args.args[0] else { return None };
+    let syn::GenericArgument::Type(inner) = &args.args[0] else {
+        return None;
+    };
 
     // Check for plain f64
     if let Type::Path(inner_path) = inner {
@@ -269,6 +275,37 @@ pub fn derive_atom_data(input: TokenStream) -> TokenStream {
         })
         .collect();
 
+    let first_len = field_infos
+        .first()
+        .map(|f| {
+            let id = &f.ident;
+            quote! { self.#id.len() }
+        })
+        .unwrap_or_else(|| quote! { 0 });
+    let default_stmts: Vec<_> = field_infos
+        .iter()
+        .map(|f| {
+            let id = &f.ident;
+            match f.kind {
+                FieldKind::Scalar => quote! { self.#id.push(0.0); },
+                FieldKind::Array(n) => quote! { self.#id.push([0.0; #n]); },
+            }
+        })
+        .collect();
+    let row_checks: Vec<_> = field_infos
+        .iter()
+        .map(|f| {
+            let id = &f.ident;
+            quote! {
+                if self.#id.len() != expected {
+                    return Err(soil_core::AtomDataRegistrationError::RowCountMismatch {
+                        type_name: std::any::type_name::<Self>(), expected, actual: self.#id.len(),
+                    });
+                }
+            }
+        })
+        .collect();
+
     // --- pack (all fields, sequential into buffer) ---
     let pack_stmts: Vec<_> = field_infos
         .iter()
@@ -313,6 +350,17 @@ pub fn derive_atom_data(input: TokenStream) -> TokenStream {
                 self
             }
 
+            fn len(&self) -> usize { #first_len }
+
+            fn push_default(&mut self) {
+                #(#default_stmts)*
+            }
+
+            fn validate_rows(&self, expected: usize) -> Result<(), soil_core::AtomDataRegistrationError> {
+                #(#row_checks)*
+                Ok(())
+            }
+
             fn truncate(&mut self, n: usize) {
                 #(#truncate_stmts)*
             }
@@ -355,9 +403,7 @@ pub fn derive_atom_data(input: TokenStream) -> TokenStream {
 
 /// Build `unpack` statements for all fields, returning the statements and the
 /// total number of `f64` values consumed per atom.
-fn build_unpack_stmts(
-    fields: &[FieldInfo],
-) -> (Vec<proc_macro2::TokenStream>, usize) {
+fn build_unpack_stmts(fields: &[FieldInfo]) -> (Vec<proc_macro2::TokenStream>, usize) {
     let mut stmts = Vec::new();
     let mut offset: usize = 0;
     for f in fields {
@@ -387,14 +433,17 @@ enum CommDirection {
 
 /// Build `pack_*`, `unpack_*`, and `*_comm_size` methods for either forward
 /// or reverse communication.
-fn build_comm_methods(
-    fields: &[FieldInfo],
-    direction: CommDirection,
-) -> proc_macro2::TokenStream {
+fn build_comm_methods(fields: &[FieldInfo], direction: CommDirection) -> proc_macro2::TokenStream {
     let is_forward = matches!(direction, CommDirection::Forward);
     let selected: Vec<_> = fields
         .iter()
-        .filter(|f| if is_forward { f.is_forward } else { f.is_reverse })
+        .filter(|f| {
+            if is_forward {
+                f.is_forward
+            } else {
+                f.is_reverse
+            }
+        })
         .collect();
 
     if selected.is_empty() {

@@ -35,9 +35,7 @@ pub struct BondStore {
 impl BondStore {
     /// Create an empty bond store (no atoms, no bonds).
     pub fn new() -> Self {
-        BondStore {
-            bonds: Vec::new(),
-        }
+        BondStore { bonds: Vec::new() }
     }
 
     /// Returns true if local atom `i` has a bond to the atom with global tag `partner_tag`.
@@ -88,6 +86,14 @@ impl AtomData for BondStore {
     }
     fn as_any_mut(&mut self) -> &mut dyn Any {
         self
+    }
+
+    fn len(&self) -> usize {
+        self.bonds.len()
+    }
+
+    fn push_default(&mut self) {
+        self.bonds.push(Vec::new());
     }
 
     fn truncate(&mut self, n: usize) {
@@ -174,14 +180,30 @@ mod tests {
         // Bonds: 10-20 (type 1, r0=1.0), 20-30 (type 1, r0=1.5)
         let mut store = BondStore::new();
         // atom 0 (tag 10): bonded to 20
-        store.bonds.push(vec![BondEntry { partner_tag: 20, bond_type: 1, r0: 1.0 }]);
+        store.bonds.push(vec![BondEntry {
+            partner_tag: 20,
+            bond_type: 1,
+            r0: 1.0,
+        }]);
         // atom 1 (tag 20): bonded to 10 and 30
         store.bonds.push(vec![
-            BondEntry { partner_tag: 10, bond_type: 1, r0: 1.0 },
-            BondEntry { partner_tag: 30, bond_type: 1, r0: 1.5 },
+            BondEntry {
+                partner_tag: 10,
+                bond_type: 1,
+                r0: 1.0,
+            },
+            BondEntry {
+                partner_tag: 30,
+                bond_type: 1,
+                r0: 1.5,
+            },
         ]);
         // atom 2 (tag 30): bonded to 20
-        store.bonds.push(vec![BondEntry { partner_tag: 20, bond_type: 1, r0: 1.5 }]);
+        store.bonds.push(vec![BondEntry {
+            partner_tag: 20,
+            bond_type: 1,
+            r0: 1.5,
+        }]);
         // atom 3 (tag 40): no bonds
         store.bonds.push(Vec::new());
         store
@@ -288,7 +310,11 @@ mod tests {
         store.truncate(3);
         assert_eq!(store.bonds.len(), 3);
         // Add some data to first entry
-        store.bonds[0].push(BondEntry { partner_tag: 5, bond_type: 0, r0: 2.0 });
+        store.bonds[0].push(BondEntry {
+            partner_tag: 5,
+            bond_type: 0,
+            r0: 2.0,
+        });
         store.truncate(1);
         assert_eq!(store.bonds.len(), 1);
         assert_eq!(store.bonds[0][0].partner_tag, 5);
@@ -311,9 +337,17 @@ mod tests {
 
         let mut registry_a = AtomDataRegistry::new();
         let mut store_a = BondStore::new();
-        store_a.bonds.push(vec![BondEntry { partner_tag: 20, bond_type: 1, r0: 1.0 }]);
-        store_a.bonds.push(vec![BondEntry { partner_tag: 10, bond_type: 1, r0: 1.0 }]);
-        registry_a.register(store_a);
+        store_a.bonds.push(vec![BondEntry {
+            partner_tag: 20,
+            bond_type: 1,
+            r0: 1.0,
+        }]);
+        store_a.bonds.push(vec![BondEntry {
+            partner_tag: 10,
+            bond_type: 1,
+            r0: 1.0,
+        }]);
+        registry_a.try_register(store_a, atoms_a.len()).unwrap();
 
         // ── Migrate atom 0 (tag 10) to rank B ─────────────────────────────
         let migrate_idx = 0;
@@ -336,7 +370,9 @@ mod tests {
         let mut atoms_b = Atom::new();
         atoms_b.nlocal = 0;
         let mut registry_b = AtomDataRegistry::new();
-        registry_b.register(BondStore::new());
+        registry_b
+            .try_register(BondStore::new(), atoms_b.len())
+            .unwrap();
 
         let mut pos = 0;
         pos += atoms_b.unpack_atom(&buf[pos..], false);
@@ -371,13 +407,29 @@ mod tests {
         let mut store = BondStore::new();
         // Atom 0 (tag 10): bonded to 20 and 30
         store.bonds.push(vec![
-            BondEntry { partner_tag: 20, bond_type: 1, r0: 1.0 },
-            BondEntry { partner_tag: 30, bond_type: 2, r0: 2.0 },
+            BondEntry {
+                partner_tag: 20,
+                bond_type: 1,
+                r0: 1.0,
+            },
+            BondEntry {
+                partner_tag: 30,
+                bond_type: 2,
+                r0: 2.0,
+            },
         ]);
-        store.bonds.push(vec![BondEntry { partner_tag: 10, bond_type: 1, r0: 1.0 }]);
-        store.bonds.push(vec![BondEntry { partner_tag: 10, bond_type: 2, r0: 2.0 }]);
+        store.bonds.push(vec![BondEntry {
+            partner_tag: 10,
+            bond_type: 1,
+            r0: 1.0,
+        }]);
+        store.bonds.push(vec![BondEntry {
+            partner_tag: 10,
+            bond_type: 2,
+            r0: 2.0,
+        }]);
         store.bonds.push(Vec::new()); // tag 40 is unbonded
-        registry.register(store);
+        registry.try_register(store, atoms.len()).unwrap();
 
         // Migrate atoms 0 and 3 together (one with bonds, one without).
         let mut buf = Vec::new();
@@ -393,7 +445,9 @@ mod tests {
         // Decode on a fresh "rank B".
         let mut atoms_b = Atom::new();
         let mut registry_b = AtomDataRegistry::new();
-        registry_b.register(BondStore::new());
+        registry_b
+            .try_register(BondStore::new(), atoms_b.len())
+            .unwrap();
         let mut pos = 0;
         for _ in 0..2 {
             pos += atoms_b.unpack_atom(&buf[pos..], false);

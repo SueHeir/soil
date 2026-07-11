@@ -56,9 +56,9 @@ use std::{
     cell::{Ref, RefCell, RefMut},
 };
 
+use crate::{Accum, CommState, ParticleSimScheduleSet, Real};
 use grass_app::prelude::*;
 use grass_scheduler::prelude::*;
-use crate::{Accum, CommState, ParticleSimScheduleSet, Real};
 
 /// Number of `f64`s packed/unpacked for one atom's base fields
 /// (tag, origin_index, cutoff_radius, atom_type, pos×3, vel×3, force×3, mass, image×3).
@@ -89,6 +89,8 @@ pub const ATOM_PACK_SIZE: usize = 17;
 /// impl AtomData for Charge {
 ///     fn as_any(&self) -> &dyn Any { self }
 ///     fn as_any_mut(&mut self) -> &mut dyn Any { self }
+///     fn len(&self) -> usize { self.q.len() }
+///     fn push_default(&mut self) { self.q.push(0.0); }
 ///     fn truncate(&mut self, n: usize) { self.q.truncate(n); }
 ///     fn swap_remove(&mut self, i: usize) { self.q.swap_remove(i); }
 ///     fn pack(&self, i: usize, buf: &mut Vec<f64>) { buf.push(self.q[i]); }
@@ -106,11 +108,24 @@ pub const ATOM_PACK_SIZE: usize = 17;
 #[macro_export]
 macro_rules! register_atom_data {
     ($app:expr, $value:expr) => {
-        if let Some(cell) = $app.get_mut_resource(::std::any::TypeId::of::<$crate::AtomDataRegistry>()) {
+        let atom_count =
+            if let Some(cell) = $app.get_mut_resource(::std::any::TypeId::of::<$crate::Atom>()) {
+                cell.borrow()
+                    .downcast_ref::<$crate::Atom>()
+                    .expect("Failed to downcast Atom — this is a bug in SOIL")
+                    .len()
+            } else {
+                panic!("Atom not found — AtomPlugin must be added first");
+            };
+        if let Some(cell) =
+            $app.get_mut_resource(::std::any::TypeId::of::<$crate::AtomDataRegistry>())
+        {
             let mut binder = cell.borrow_mut();
-            binder.downcast_mut::<$crate::AtomDataRegistry>()
+            binder
+                .downcast_mut::<$crate::AtomDataRegistry>()
                 .expect("Failed to downcast AtomDataRegistry — this is a bug in SOIL")
-                .register($value);
+                .try_register($value, atom_count)
+                .unwrap_or_else(|error| panic!("failed to register AtomData: {error}"));
         } else {
             panic!("AtomDataRegistry not found — AtomPlugin must be added first");
         }
@@ -167,6 +182,31 @@ pub trait AtomData: Any {
     fn as_any(&self) -> &dyn Any;
     /// Upcast to `&mut dyn Any` for mutable downcasting in the registry.
     fn as_any_mut(&mut self) -> &mut dyn Any;
+    /// Number of rows currently stored. This must equal the atom-store length.
+    fn len(&self) -> usize;
+    /// Whether this extension has no rows.
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+    /// Append one default row, used when an extension is registered late.
+    fn push_default(&mut self);
+    /// Validate the row layout before registration.
+    ///
+    /// Single-column implementations can use the default. A manual store with
+    /// multiple per-atom columns must override this method and check each
+    /// column; [`AtomDataRegistry`] calls it before accepting the store.
+    fn validate_rows(&self, expected: usize) -> Result<(), AtomDataRegistrationError> {
+        let actual = self.len();
+        if actual == expected {
+            Ok(())
+        } else {
+            Err(AtomDataRegistrationError::RowCountMismatch {
+                type_name: std::any::type_name::<Self>(),
+                expected,
+                actual,
+            })
+        }
+    }
     /// Shrink all per-atom Vecs to length `n`, discarding trailing entries.
     fn truncate(&mut self, n: usize);
     /// Remove atom at index `i` by swapping with the last element.
@@ -182,11 +222,15 @@ pub trait AtomData: Any {
     /// Pack forward-comm fields (e.g. omega for DEM) into buf.
     fn pack_forward(&self, _i: usize, _buf: &mut Vec<f64>) {}
     /// Unpack forward-comm fields; returns number of f64s consumed.
-    fn unpack_forward(&mut self, _i: usize, _buf: &[f64]) -> usize { 0 }
+    fn unpack_forward(&mut self, _i: usize, _buf: &[f64]) -> usize {
+        0
+    }
     /// Pack reverse-comm fields (e.g. torque for DEM) into buf.
     fn pack_reverse(&self, _i: usize, _buf: &mut Vec<f64>) {}
     /// Unpack reverse-comm fields; returns number of f64s consumed.
-    fn unpack_reverse(&mut self, _i: usize, _buf: &[f64]) -> usize { 0 }
+    fn unpack_reverse(&mut self, _i: usize, _buf: &[f64]) -> usize {
+        0
+    }
     /// Zero per-step accumulators (e.g. torque) for atoms 0..n.
     fn zero(&mut self, _n: usize) {}
     /// Reorder atoms with caller-owned cycle scratch.
@@ -203,10 +247,54 @@ pub trait AtomData: Any {
         self.apply_permutation(perm, n);
     }
     /// Number of f64s per atom in forward comm.
-    fn forward_comm_size(&self) -> usize { 0 }
+    fn forward_comm_size(&self) -> usize {
+        0
+    }
     /// Number of f64s per atom in reverse comm.
-    fn reverse_comm_size(&self) -> usize { 0 }
+    fn reverse_comm_size(&self) -> usize {
+        0
+    }
 }
+
+/// Why an [`AtomData`] extension could not be registered.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AtomDataRegistrationError {
+    /// The extension type already has a store in the registry.
+    Duplicate {
+        /// Rust type name of the duplicate extension.
+        type_name: &'static str,
+    },
+    /// A supplied extension did not have one row per atom.
+    RowCountMismatch {
+        /// Rust type name of the malformed extension.
+        type_name: &'static str,
+        /// Required atom-row count.
+        expected: usize,
+        /// Row count reported by the extension.
+        actual: usize,
+    },
+    /// Default-row backfill did not produce the required number of rows.
+    DefaultBackfillFailed {
+        /// Rust type name of the malformed extension.
+        type_name: &'static str,
+        /// Required atom-row count.
+        expected: usize,
+        /// Row count after attempted backfill.
+        actual: usize,
+    },
+}
+
+impl std::fmt::Display for AtomDataRegistrationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Duplicate { type_name } => write!(f, "AtomData type `{type_name}` is already registered"),
+            Self::RowCountMismatch { type_name, expected, actual } => write!(f, "AtomData `{type_name}` has {actual} rows; expected {expected}"),
+            Self::DefaultBackfillFailed { type_name, expected, actual } => write!(f, "AtomData `{type_name}` default backfill produced {actual} rows; expected {expected}"),
+        }
+    }
+}
+
+impl std::error::Error for AtomDataRegistrationError {}
 
 // ── AtomDataRegistry ─────────────────────────────────────────────────────────
 
@@ -239,16 +327,42 @@ impl AtomDataRegistry {
         }
     }
 
-    /// Register a new [`AtomData`] extension. Panics if the same type is registered twice.
-    pub fn register<T: AtomData + 'static>(&mut self, data: T) {
+    /// Register a new extension, enforcing one row for every current atom.
+    /// Empty stores are default-filled; nonempty stores must already match.
+    pub fn try_register<T: AtomData + 'static>(
+        &mut self,
+        mut data: T,
+        atom_count: usize,
+    ) -> Result<(), AtomDataRegistrationError> {
         let id = TypeId::of::<T>();
         for (existing_id, _) in &self.stores {
             if *existing_id == id {
-                panic!("AtomData type already registered");
+                return Err(AtomDataRegistrationError::Duplicate {
+                    type_name: std::any::type_name::<T>(),
+                });
             }
+        }
+        if data.is_empty() {
+            for _ in 0..atom_count {
+                data.push_default();
+            }
+            match data.validate_rows(atom_count) {
+                Ok(()) => {}
+                Err(AtomDataRegistrationError::RowCountMismatch { actual, .. }) => {
+                    return Err(AtomDataRegistrationError::DefaultBackfillFailed {
+                        type_name: std::any::type_name::<T>(),
+                        expected: atom_count,
+                        actual,
+                    });
+                }
+                Err(error) => return Err(error),
+            }
+        } else {
+            data.validate_rows(atom_count)?;
         }
         self.stores.push((id, RefCell::new(Box::new(data))));
         self.rebuild_comm_caches();
+        Ok(())
     }
 
     /// Recompute which stores carry forward / reverse comm data. Called at
@@ -269,10 +383,13 @@ impl AtomDataRegistry {
         self.stores
             .iter()
             .find(|(tid, _)| *tid == id)
-            .map(|(_, cell)| Ref::map(cell.borrow(), |b| {
-                b.as_any().downcast_ref::<T>()
-                    .expect("AtomData downcast failed — type mismatch (this is a bug in SOIL)")
-            }))
+            .map(|(_, cell)| {
+                Ref::map(cell.borrow(), |b| {
+                    b.as_any()
+                        .downcast_ref::<T>()
+                        .expect("AtomData downcast failed — type mismatch (this is a bug in SOIL)")
+                })
+            })
     }
 
     /// Borrow a registered [`AtomData`] extension mutably, or `None` if not registered.
@@ -283,7 +400,8 @@ impl AtomDataRegistry {
             .find(|(tid, _)| *tid == id)
             .map(|(_, cell)| {
                 RefMut::map(cell.borrow_mut(), |b| {
-                    b.as_any_mut().downcast_mut::<T>()
+                    b.as_any_mut()
+                        .downcast_mut::<T>()
                         .expect("AtomData downcast failed — type mismatch (this is a bug in SOIL)")
                 })
             })
@@ -358,7 +476,8 @@ impl AtomDataRegistry {
         visited: &mut Vec<bool>,
     ) {
         for (_, cell) in &self.stores {
-            cell.borrow_mut().apply_permutation_with_scratch(perm, n, visited);
+            cell.borrow_mut()
+                .apply_permutation_with_scratch(perm, n, visited);
         }
     }
 
@@ -376,7 +495,10 @@ impl AtomDataRegistry {
     pub fn unpack_forward_all(&self, i: usize, buf: &[f64]) -> usize {
         let mut pos = 0;
         for &si in &self.forward_stores {
-            pos += self.stores[si].1.borrow_mut().unpack_forward(i, &buf[pos..]);
+            pos += self.stores[si]
+                .1
+                .borrow_mut()
+                .unpack_forward(i, &buf[pos..]);
         }
         pos
     }
@@ -394,7 +516,10 @@ impl AtomDataRegistry {
     pub fn unpack_reverse_all(&self, i: usize, buf: &[f64]) -> usize {
         let mut pos = 0;
         for &si in &self.reverse_stores {
-            pos += self.stores[si].1.borrow_mut().unpack_reverse(i, &buf[pos..]);
+            pos += self.stores[si]
+                .1
+                .borrow_mut()
+                .unpack_reverse(i, &buf[pos..]);
         }
         pos
     }
@@ -408,12 +533,18 @@ impl AtomDataRegistry {
 
     /// Total number of `f64`s per atom in forward comm across all extensions.
     pub fn forward_comm_size(&self) -> usize {
-        self.stores.iter().map(|(_, cell)| cell.borrow().forward_comm_size()).sum()
+        self.stores
+            .iter()
+            .map(|(_, cell)| cell.borrow().forward_comm_size())
+            .sum()
     }
 
     /// Total number of `f64`s per atom in reverse comm across all extensions.
     pub fn reverse_comm_size(&self) -> usize {
-        self.stores.iter().map(|(_, cell)| cell.borrow().reverse_comm_size()).sum()
+        self.stores
+            .iter()
+            .map(|(_, cell)| cell.borrow().reverse_comm_size())
+            .sum()
     }
 
     /// Pack all local atoms for restart file serialization.
@@ -634,7 +765,14 @@ impl Atom {
     /// `vel_offset` is the Lees–Edwards streaming-velocity jump applied to ghost
     /// copies that wrap across a moving (sheared) periodic face; it is `[0;3]` for
     /// ordinary ghosts and for exchanged (migrated) atoms.
-    fn pack_atom_inner(&self, i: usize, origin_index_val: f64, pos_offset: [f64; 3], vel_offset: [f64; 3], buf: &mut Vec<f64>) {
+    fn pack_atom_inner(
+        &self,
+        i: usize,
+        origin_index_val: f64,
+        pos_offset: [f64; 3],
+        vel_offset: [f64; 3],
+        buf: &mut Vec<f64>,
+    ) {
         buf.push(self.tag[i] as f64);
         buf.push(origin_index_val);
         buf.push(self.cutoff_radius[i] as f64);
@@ -662,7 +800,13 @@ impl Atom {
     /// Pack atom `i` as a ghost for border communication, applying a periodic
     /// position shift and (for sheared periodic faces) a velocity shift.
     /// Stores the local index as `origin_index` so reverse comm can accumulate forces back.
-    pub fn pack_border(&mut self, i: usize, change_pos: [f64; 3], vel_offset: [f64; 3], buf: &mut Vec<f64>) {
+    pub fn pack_border(
+        &mut self,
+        i: usize,
+        change_pos: [f64; 3],
+        vel_offset: [f64; 3],
+        buf: &mut Vec<f64>,
+    ) {
         self.pack_atom_inner(i, i as f64, change_pos, vel_offset, buf);
     }
 
@@ -672,12 +816,16 @@ impl Atom {
         self.origin_index.push(buf[1] as i32);
         self.cutoff_radius.push(buf[2] as Real);
         self.atom_type.push(buf[3] as u32);
-        self.pos.push([buf[4] as Real, buf[5] as Real, buf[6] as Real]);
-        self.vel.push([buf[7] as Real, buf[8] as Real, buf[9] as Real]);
-        self.force.push([buf[10] as Accum, buf[11] as Accum, buf[12] as Accum]);
+        self.pos
+            .push([buf[4] as Real, buf[5] as Real, buf[6] as Real]);
+        self.vel
+            .push([buf[7] as Real, buf[8] as Real, buf[9] as Real]);
+        self.force
+            .push([buf[10] as Accum, buf[11] as Accum, buf[12] as Accum]);
         self.mass.push(buf[13] as Real);
         self.inv_mass.push((1.0 / buf[13]) as Real);
-        self.image.push([buf[14] as i32, buf[15] as i32, buf[16] as i32]);
+        self.image
+            .push([buf[14] as i32, buf[15] as i32, buf[16] as i32]);
         self.is_ghost.push(is_ghost);
         ATOM_PACK_SIZE
     }
@@ -687,7 +835,8 @@ impl Atom {
         self.tag.push(tag);
         self.atom_type.push(0);
         self.origin_index.push(0);
-        self.pos.push([pos[0] as Real, pos[1] as Real, pos[2] as Real]);
+        self.pos
+            .push([pos[0] as Real, pos[1] as Real, pos[2] as Real]);
         self.vel.push([0.0; 3]);
         self.force.push([0.0; 3]);
         self.mass.push(mass as Real);
@@ -728,7 +877,10 @@ impl Plugin for AtomPlugin {
                 remove_ghost_atoms.run_if(in_state(CommState::FullRebuild)),
                 ParticleSimScheduleSet::PostInitialIntegration,
             )
-            .add_update_system(zero_all_forces, ParticleSimScheduleSet::PostInitialIntegration);
+            .add_update_system(
+                zero_all_forces,
+                ParticleSimScheduleSet::PostInitialIntegration,
+            );
     }
 }
 
@@ -748,7 +900,288 @@ fn zero_all_forces(mut atoms: ResMut<Atom>, registry: Res<AtomDataRegistry>) {
 
 #[cfg(test)]
 mod tests {
-    use super::apply_permutation_in_place;
+    use super::*;
+    use soil_derive::AtomData;
+    use std::any::Any;
+
+    #[derive(Default, AtomData)]
+    struct DerivedRows {
+        #[forward]
+        scalar: Vec<f64>,
+        #[reverse]
+        vector: Vec<[f64; 3]>,
+    }
+
+    #[derive(Default)]
+    struct ManualRows {
+        rows: Vec<f64>,
+    }
+
+    impl AtomData for ManualRows {
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+        fn as_any_mut(&mut self) -> &mut dyn Any {
+            self
+        }
+        fn len(&self) -> usize {
+            self.rows.len()
+        }
+        fn push_default(&mut self) {
+            self.rows.push(-1.0);
+        }
+        fn truncate(&mut self, n: usize) {
+            self.rows.truncate(n);
+        }
+        fn swap_remove(&mut self, i: usize) {
+            self.rows.swap_remove(i);
+        }
+        fn pack(&self, i: usize, buf: &mut Vec<f64>) {
+            buf.push(self.rows[i]);
+        }
+        fn unpack(&mut self, buf: &[f64]) -> usize {
+            self.rows.push(buf[0]);
+            1
+        }
+        fn apply_permutation(&mut self, perm: &[usize], n: usize) {
+            let mut visited = Vec::new();
+            self.apply_permutation_with_scratch(perm, n, &mut visited);
+        }
+        fn apply_permutation_with_scratch(
+            &mut self,
+            perm: &[usize],
+            n: usize,
+            visited: &mut Vec<bool>,
+        ) {
+            apply_permutation_in_place(&mut self.rows, perm, n, visited);
+        }
+    }
+
+    /// A hand-written two-column store. Unlike a derive-generated store, a
+    /// custom layout must explicitly report every column in `validate_rows`.
+    #[derive(Default)]
+    struct ManualMultiColumnRows {
+        scalar: Vec<f64>,
+        vector: Vec<[f64; 3]>,
+    }
+
+    impl AtomData for ManualMultiColumnRows {
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+        fn as_any_mut(&mut self) -> &mut dyn Any {
+            self
+        }
+        fn len(&self) -> usize {
+            self.scalar.len()
+        }
+        fn push_default(&mut self) {
+            self.scalar.push(0.0);
+            self.vector.push([0.0; 3]);
+        }
+        fn validate_rows(&self, expected: usize) -> Result<(), AtomDataRegistrationError> {
+            for actual in [self.scalar.len(), self.vector.len()] {
+                if actual != expected {
+                    return Err(AtomDataRegistrationError::RowCountMismatch {
+                        type_name: std::any::type_name::<Self>(),
+                        expected,
+                        actual,
+                    });
+                }
+            }
+            Ok(())
+        }
+        fn truncate(&mut self, n: usize) {
+            self.scalar.truncate(n);
+            self.vector.truncate(n);
+        }
+        fn swap_remove(&mut self, i: usize) {
+            self.scalar.swap_remove(i);
+            self.vector.swap_remove(i);
+        }
+        fn pack(&self, i: usize, buf: &mut Vec<f64>) {
+            buf.push(self.scalar[i]);
+            buf.extend_from_slice(&self.vector[i]);
+        }
+        fn unpack(&mut self, buf: &[f64]) -> usize {
+            self.scalar.push(buf[0]);
+            self.vector.push([buf[1], buf[2], buf[3]]);
+            4
+        }
+        fn apply_permutation(&mut self, perm: &[usize], n: usize) {
+            let mut visited = Vec::new();
+            self.apply_permutation_with_scratch(perm, n, &mut visited);
+        }
+        fn apply_permutation_with_scratch(
+            &mut self,
+            perm: &[usize],
+            n: usize,
+            visited: &mut Vec<bool>,
+        ) {
+            apply_permutation_in_place(&mut self.scalar, perm, n, visited);
+            apply_permutation_in_place(&mut self.vector, perm, n, visited);
+        }
+    }
+
+    #[derive(Default)]
+    struct BrokenDefaults;
+
+    impl AtomData for BrokenDefaults {
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+        fn as_any_mut(&mut self) -> &mut dyn Any {
+            self
+        }
+        fn len(&self) -> usize {
+            0
+        }
+        fn push_default(&mut self) {}
+        fn truncate(&mut self, _: usize) {}
+        fn swap_remove(&mut self, _: usize) {}
+        fn pack(&self, _: usize, _: &mut Vec<f64>) {}
+        fn unpack(&mut self, _: &[f64]) -> usize {
+            0
+        }
+        fn apply_permutation(&mut self, _: &[usize], _: usize) {}
+    }
+
+    #[test]
+    fn registration_backfills_derived_and_manual_default_rows() {
+        let mut registry = AtomDataRegistry::new();
+        registry.try_register(DerivedRows::default(), 3).unwrap();
+        registry.try_register(ManualRows::default(), 3).unwrap();
+        let derived = registry.get::<DerivedRows>().unwrap();
+        assert_eq!(derived.scalar, vec![0.0; 3]);
+        assert_eq!(derived.vector, vec![[0.0; 3]; 3]);
+        assert_eq!(registry.get::<ManualRows>().unwrap().rows, vec![-1.0; 3]);
+    }
+
+    #[test]
+    fn registration_macro_backfills_after_atoms_already_exist() {
+        let mut app = App::new();
+        app.add_plugins(AtomPlugin);
+        {
+            let cell = app
+                .get_mut_resource(TypeId::of::<Atom>())
+                .expect("AtomPlugin installs Atom");
+            let mut binding = cell.borrow_mut();
+            let atoms = binding.downcast_mut::<Atom>().unwrap();
+            atoms.push_test_atom(1, [0.0; 3], 1.0, 1.0);
+            atoms.push_test_atom(2, [1.0; 3], 1.0, 1.0);
+        }
+        register_atom_data!(app, DerivedRows::default());
+        let cell = app
+            .get_mut_resource(TypeId::of::<AtomDataRegistry>())
+            .unwrap();
+        let binding = cell.borrow();
+        let registry = binding.downcast_ref::<AtomDataRegistry>().unwrap();
+        assert_eq!(registry.get::<DerivedRows>().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn registration_rejects_duplicates_and_malformed_rows() {
+        let mut registry = AtomDataRegistry::new();
+        registry
+            .try_register(
+                ManualRows {
+                    rows: vec![1.0, 2.0],
+                },
+                2,
+            )
+            .unwrap();
+        assert!(matches!(
+            registry.try_register(ManualRows::default(), 2),
+            Err(AtomDataRegistrationError::Duplicate { .. })
+        ));
+        assert!(matches!(
+            AtomDataRegistry::new().try_register(ManualRows { rows: vec![1.0] }, 2),
+            Err(AtomDataRegistrationError::RowCountMismatch {
+                expected: 2,
+                actual: 1,
+                ..
+            })
+        ));
+        assert!(matches!(
+            AtomDataRegistry::new().try_register(BrokenDefaults, 2),
+            Err(AtomDataRegistrationError::DefaultBackfillFailed {
+                expected: 2,
+                actual: 0,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn derive_rejects_misaligned_columns_before_communication() {
+        let data = DerivedRows {
+            scalar: vec![1.0, 2.0],
+            vector: vec![[1.0; 3]],
+        };
+        assert!(matches!(
+            AtomDataRegistry::new().try_register(data, 2),
+            Err(AtomDataRegistrationError::RowCountMismatch {
+                expected: 2,
+                actual: 1,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn custom_multi_column_store_rejects_a_hidden_short_column() {
+        let malformed = ManualMultiColumnRows {
+            scalar: vec![1.0, 2.0],
+            vector: vec![[1.0; 3]],
+        };
+        assert_eq!(malformed.len(), 2, "the primary column alone looks valid");
+        assert!(matches!(
+            AtomDataRegistry::new().try_register(malformed, 2),
+            Err(AtomDataRegistrationError::RowCountMismatch {
+                expected: 2,
+                actual: 1,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn derived_rows_keep_pack_and_comm_ordering_after_backfill() {
+        let mut source = AtomDataRegistry::new();
+        source
+            .try_register(
+                DerivedRows {
+                    scalar: vec![4.0],
+                    vector: vec![[1.0, 2.0, 3.0]],
+                },
+                1,
+            )
+            .unwrap();
+        let mut migration = Vec::new();
+        source.pack_all(0, &mut migration);
+        assert_eq!(migration, vec![4.0, 1.0, 2.0, 3.0]);
+
+        let mut destination = AtomDataRegistry::new();
+        destination.try_register(DerivedRows::default(), 0).unwrap();
+        assert_eq!(destination.unpack_all(&migration), migration.len());
+        let restored = destination.get::<DerivedRows>().unwrap();
+        assert_eq!(restored.scalar, vec![4.0]);
+        assert_eq!(restored.vector, vec![[1.0, 2.0, 3.0]]);
+        drop(restored);
+
+        let mut forward = Vec::new();
+        source.pack_forward_all(0, &mut forward);
+        assert_eq!(forward, vec![4.0]);
+        destination.unpack_forward_all(0, &forward);
+        let mut reverse = Vec::new();
+        source.pack_reverse_all(0, &mut reverse);
+        assert_eq!(reverse, vec![1.0, 2.0, 3.0]);
+        destination.unpack_reverse_all(0, &reverse);
+        assert_eq!(
+            destination.get::<DerivedRows>().unwrap().vector,
+            vec![[2.0, 4.0, 6.0]]
+        );
+    }
 
     #[test]
     fn apply_permutation_in_place_matches_scratch_collect() {

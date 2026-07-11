@@ -126,3 +126,8 @@ required-features = ["precision-double"]
 name = "virial_thermo_crossrank"
 path = "examples/virial_thermo_crossrank/main.rs"
 required-features = ["mpi_backend", "precision-double"]
+
+[[example]]
+name = "atomdata_row_contract"
+path = "examples/atomdata_row_contract/main.rs"
+required-features = ["precision-double"]

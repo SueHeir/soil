@@ -73,6 +73,10 @@
 
 #![warn(missing_docs)]
 
+// Lets `#[derive(soil_derive::AtomData)]` refer to this crate uniformly in
+// internal tests and downstream crates.
+extern crate self as soil_core;
+
 pub mod atom;
 pub mod bond;
 pub mod comm;

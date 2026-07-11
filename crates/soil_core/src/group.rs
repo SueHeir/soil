@@ -117,12 +117,14 @@ impl GroupRegistry {
         self.try_get(name).unwrap_or_else(|err| panic!("{err}"))
     }
 
-    /// Validate that a group name exists. Prints an error and exits if not found.
-    pub fn validate_name(&self, name: &str, context: &str) {
-        if let Err(err) = self.try_get(name) {
-            eprintln!("ERROR: {context}: {err}");
-            std::process::exit(1);
-        }
+    /// Validate that a group name exists with contextual diagnostics.
+    pub fn validate_name(&self, name: &str, context: &str) -> Result<(), GroupLookupError> {
+        self.try_get(name)
+            .map(|_| ())
+            .map_err(|error| GroupLookupError {
+                name: format!("{context}: {error}"),
+                available: Vec::new(),
+            })
     }
 
     /// Return the mask for a named group, or `None` if no group is specified (meaning "all atoms").
@@ -215,10 +217,24 @@ impl Plugin for GroupPlugin {
     }
 
     fn build(&self, app: &mut App) {
-        app.add_resource(GroupRegistry::new())
-            .add_setup_system(setup_groups, ScheduleSetupSet::PostSetup)
-            .add_update_system(rebuild_groups, ParticleSimScheduleSet::PreForce);
+        install_groups(app);
     }
+
+    fn try_build(&self, app: &mut App) -> Result<(), AppError> {
+        if let Some(config) = app.get_resource_ref::<Config>() {
+            config
+                .try_parse_array::<GroupDef>("group")
+                .map_err(|error| AppError::message(error.to_string()))?;
+        }
+        install_groups(app);
+        Ok(())
+    }
+}
+
+fn install_groups(app: &mut App) {
+    app.add_resource(GroupRegistry::new())
+        .add_setup_system(setup_groups, ScheduleSetupSet::PostSetup)
+        .add_update_system(rebuild_groups, ParticleSimScheduleSet::PreForce);
 }
 
 // ── Systems ─────────────────────────────────────────────────────────────────
@@ -320,6 +336,22 @@ pub fn rebuild_groups(atoms: Res<Atom>, mut groups: ResMut<GroupRegistry>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use grass_app::App;
+
+    #[test]
+    fn malformed_group_is_returned_by_fallible_plugin_registration() {
+        let mut app = App::new();
+        app.add_resource(Config::from_str("[[group]]\nname = 7\n"));
+
+        let error = match app.try_add_plugins(GroupPlugin) {
+            Ok(_) => panic!("malformed configuration unexpectedly registered"),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains("invalid type"),
+            "unexpected error: {error}"
+        );
+    }
 
     fn make_atom(positions: &[(f64, f64, f64)], types: &[u32]) -> Atom {
         let mut atom = Atom::new();

@@ -14,18 +14,19 @@
 //! 3. **Forward comm**: lightweight position/velocity update for existing ghosts
 //! 4. **Reverse comm**: accumulate forces from ghosts back to their owners
 
-use std::process::exit;
-
 use grass_app::prelude::*;
 use grass_scheduler::prelude::*;
 use serde::{Deserialize, Serialize};
 
 // Re-export comm abstractions from grass_mpi so downstream users see no change.
-pub use grass_mpi::{CommBackend, CommResource, SendRecvOp, SingleProcessComm, finalize_mpi};
+pub use grass_mpi::{finalize_mpi, CommBackend, CommResource, SendRecvOp, SingleProcessComm};
 #[cfg(feature = "mpi_backend")]
-pub use grass_mpi::{MpiCommBackend, get_mpi_world};
+pub use grass_mpi::{get_mpi_world, MpiCommBackend};
 
-use crate::{Accum, Atom, AtomDataRegistry, CommState, Config, Domain, Neighbor, ParticleSimScheduleSet, Real, ScheduleSetupSet};
+use crate::{
+    Accum, Atom, AtomDataRegistry, CommState, Config, Domain, Neighbor, ParticleSimScheduleSet,
+    Real, ScheduleSetupSet,
+};
 
 // ── CommConfig ──────────────────────────────────────────────────────────────
 
@@ -227,24 +228,51 @@ forward_precision = "f64""#,
             maxneed: [0, 0, 0],
         });
 
-        app.add_setup_system(comm_read_input.run_if(first_stage_only()), ScheduleSetupSet::PreSetup)
-            .add_setup_system(comm_setup.run_if(first_stage_only()), ScheduleSetupSet::PostSetup)
-            .add_update_system(
-                borders.run_if(in_state(CommState::FullRebuild)),
-                ParticleSimScheduleSet::PreNeighbor,
-            )
-            .add_update_system(
-                forward_comm_borders.run_if(in_state(CommState::CommunicateOnly)),
-                ParticleSimScheduleSet::PreNeighbor,
-            )
-            .add_update_system(
-                reverse_send_force.label("reverse_send_force").run_if(newton_on),
-                ParticleSimScheduleSet::PostForce,
-            );
+        // Validate against the actual backend before legacy scheduler setup.
+        // `App::try_start` returns this error and never advances a step.
+        app.add_fallible_setup_system("validate communication processor grid", |app: &mut App| {
+            let config = app.get_resource_ref::<CommConfig>()
+                .ok_or_else(|| AppError::message("CommunicationPlugin did not register CommConfig"))?;
+            let comm = app.get_resource_ref::<CommResource>()
+                .ok_or_else(|| AppError::message("CommunicationPlugin did not register CommResource"))?;
+            let configured = config.processors_x * config.processors_y * config.processors_z;
+            if configured != comm.size() {
+                return Err(AppError::message(format!(
+                    "[comm] processors {} {} {} multiply to {configured}, but the active communicator has {} ranks",
+                    config.processors_x, config.processors_y, config.processors_z, comm.size()
+                )));
+            }
+            Ok(())
+        }, ScheduleSetupSet::PreSetup);
+
+        app.add_setup_system(
+            comm_read_input.run_if(first_stage_only()),
+            ScheduleSetupSet::PreSetup,
+        )
+        .add_setup_system(
+            comm_setup.run_if(first_stage_only()),
+            ScheduleSetupSet::PostSetup,
+        )
+        .add_update_system(
+            borders.run_if(in_state(CommState::FullRebuild)),
+            ParticleSimScheduleSet::PreNeighbor,
+        )
+        .add_update_system(
+            forward_comm_borders.run_if(in_state(CommState::CommunicateOnly)),
+            ParticleSimScheduleSet::PreNeighbor,
+        )
+        .add_update_system(
+            reverse_send_force
+                .label("reverse_send_force")
+                .run_if(newton_on),
+            ParticleSimScheduleSet::PostForce,
+        );
 
         #[cfg(feature = "mpi_backend")]
         app.add_update_system(
-            exchange.label("exchange").run_if(in_state(CommState::FullRebuild)),
+            exchange
+                .label("exchange")
+                .run_if(in_state(CommState::FullRebuild)),
             ParticleSimScheduleSet::Exchange,
         );
 
@@ -280,17 +308,13 @@ pub fn comm_read_input(config: Res<CommConfig>, mut comm: ResMut<CommResource>) 
                 comm.size()
             );
         }
-        exit(1);
+        panic!("CommunicationPlugin startup validation was bypassed: processor grid does not match communicator size");
     }
 
     let rank = comm.rank();
     let pz = config.processors_z;
     let py = config.processors_y;
-    let position = [
-        rank / (py * pz),
-        (rank / pz) % py,
-        rank % pz,
-    ];
+    let position = [rank / (py * pz), (rank / pz) % py, rank % pz];
 
     comm.set_processor_grid(decomp, position);
 }
@@ -361,16 +385,32 @@ fn pack_border_atoms(
         // stay conservative (the real-space force filter removes false positives).
         let lo_face = domain.sub_lamda_low[dim];
         let hi_face = domain.sub_lamda_high[dim];
-        let inflate = if dim == 0 { 1.0 + domain.tilt[0].abs() / domain.size[1] } else { 1.0 };
-        let cut_l = if use_fixed_cut { (ghost_cutoff / domain.size[dim]) * inflate } else { 0.0 };
+        let inflate = if dim == 0 {
+            1.0 + domain.tilt[0].abs() / domain.size[1]
+        } else {
+            1.0
+        };
+        let cut_l = if use_fixed_cut {
+            (ghost_cutoff / domain.size[dim]) * inflate
+        } else {
+            0.0
+        };
         for i in 0..scan_end {
             let pr = atoms.pos[i];
             let lam_dim = domain.x2lamda([pr[0] as f64, pr[1] as f64, pr[2] as f64])[dim];
             let in_skin = if use_fixed_cut {
-                if swap == 0 { lam_dim < lo_face + cut_l } else { lam_dim >= hi_face - cut_l }
+                if swap == 0 {
+                    lam_dim < lo_face + cut_l
+                } else {
+                    lam_dim >= hi_face - cut_l
+                }
             } else {
                 let cut = (atoms.cutoff_radius[i] as f64 * 4.0 / domain.size[dim]) * inflate;
-                if swap == 0 { lam_dim < lo_face + cut } else { lam_dim >= hi_face - cut }
+                if swap == 0 {
+                    lam_dim < lo_face + cut
+                } else {
+                    lam_dim >= hi_face - cut
+                }
             };
             if in_skin {
                 atoms.pack_border(i, change_pos, vel_offset, send_buff);
@@ -387,7 +427,11 @@ fn pack_border_atoms(
     // for the fixed-cutoff fast path (the DEM common case).
     let lo_face = domain.sub_domain_low[dim];
     let hi_face = domain.sub_domain_high[dim];
-    let fixed_thresh = if swap == 0 { lo_face + ghost_cutoff } else { hi_face - ghost_cutoff };
+    let fixed_thresh = if swap == 0 {
+        lo_face + ghost_cutoff
+    } else {
+        hi_face - ghost_cutoff
+    };
 
     if use_fixed_cut {
         if let Some(neighbor) = neighbor {
@@ -417,11 +461,19 @@ fn pack_border_atoms(
         let pos_dim = atoms.pos_component(i, dim);
         let in_skin = if use_fixed_cut {
             // Fixed ghost_cutoff: compare against the precomputed face threshold.
-            if swap == 0 { pos_dim < fixed_thresh } else { pos_dim >= fixed_thresh }
+            if swap == 0 {
+                pos_dim < fixed_thresh
+            } else {
+                pos_dim >= fixed_thresh
+            }
         } else {
             // Polydisperse fallback: per-atom skin * 4.0 (DEM default).
             let cut = atoms.cutoff_radius[i] as f64 * 4.0;
-            if swap == 0 { pos_dim < lo_face + cut } else { pos_dim >= hi_face - cut }
+            if swap == 0 {
+                pos_dim < lo_face + cut
+            } else {
+                pos_dim >= hi_face - cut
+            }
         };
         if in_skin {
             atoms.pack_border(i, change_pos, vel_offset, send_buff);
@@ -464,7 +516,11 @@ fn pack_orthogonal_border_bins(
         while start < nlocal && cells[start] == cell {
             let i = start;
             let pos_dim = atoms.pos_component(i, dim);
-            let in_skin = if swap == 0 { pos_dim < fixed_thresh } else { pos_dim >= fixed_thresh };
+            let in_skin = if swap == 0 {
+                pos_dim < fixed_thresh
+            } else {
+                pos_dim >= fixed_thresh
+            };
             if in_skin {
                 atoms.pack_border(i, change_pos, vel_offset, send_buff);
                 registry.pack_all(i, send_buff);
@@ -478,9 +534,15 @@ fn pack_orthogonal_border_bins(
     let [bsx, bsy, bsz] = neighbor.bin_size;
     let coord_range = |origin: f64, bin_size: f64, n: i32| -> (i32, i32) {
         if swap == 0 {
-            (0, (((fixed_thresh - origin) / bin_size).ceil() as i32 - 1).clamp(0, n - 1))
+            (
+                0,
+                (((fixed_thresh - origin) / bin_size).ceil() as i32 - 1).clamp(0, n - 1),
+            )
         } else {
-            ((((fixed_thresh - origin) / bin_size).floor() as i32).clamp(0, n - 1), n - 1)
+            (
+                (((fixed_thresh - origin) / bin_size).floor() as i32).clamp(0, n - 1),
+                n - 1,
+            )
         }
     };
 
@@ -521,7 +583,11 @@ fn pack_orthogonal_border_bins(
     // must still be eligible for multi-hop/corner forwarding.
     for i in nlocal..scan_end {
         let pos_dim = atoms.pos_component(i, dim);
-        let in_skin = if swap == 0 { pos_dim < fixed_thresh } else { pos_dim >= fixed_thresh };
+        let in_skin = if swap == 0 {
+            pos_dim < fixed_thresh
+        } else {
+            pos_dim >= fixed_thresh
+        };
         if in_skin {
             atoms.pack_border(i, change_pos, vel_offset, send_buff);
             registry.pack_all(i, send_buff);
@@ -586,12 +652,27 @@ fn unpack_exchanged(atoms: &mut Atom, registry: &AtomDataRegistry, data: &[f64],
 /// Per-atom stride in forward_comm: pos(3) + vel(3) = 6 f64s (base fields only).
 const FORWARD_PACK_SIZE: usize = 6;
 
-fn unpack_forward(msg: &[f64], atoms: &mut Atom, registry: &AtomDataRegistry, recv_start: usize, recv_count: usize, extra_per_atom: usize) {
+fn unpack_forward(
+    msg: &[f64],
+    atoms: &mut Atom,
+    registry: &AtomDataRegistry,
+    recv_start: usize,
+    recv_count: usize,
+    extra_per_atom: usize,
+) {
     let stride = FORWARD_PACK_SIZE + extra_per_atom;
     for k in 0..recv_count {
         let base = k * stride;
-        atoms.pos[recv_start + k] = [msg[base] as Real, msg[base + 1] as Real, msg[base + 2] as Real];
-        atoms.vel[recv_start + k] = [msg[base + 3] as Real, msg[base + 4] as Real, msg[base + 5] as Real];
+        atoms.pos[recv_start + k] = [
+            msg[base] as Real,
+            msg[base + 1] as Real,
+            msg[base + 2] as Real,
+        ];
+        atoms.vel[recv_start + k] = [
+            msg[base + 3] as Real,
+            msg[base + 4] as Real,
+            msg[base + 5] as Real,
+        ];
         if extra_per_atom > 0 {
             registry.unpack_forward_all(recv_start + k, &msg[base + FORWARD_PACK_SIZE..]);
         }
@@ -609,11 +690,22 @@ fn unpack_forward_f32(
 ) {
     for k in 0..recv_count {
         let base = k * FORWARD_PACK_SIZE;
-        atoms.pos[recv_start + k] = [base_msg[base] as Real, base_msg[base + 1] as Real, base_msg[base + 2] as Real];
-        atoms.vel[recv_start + k] = [base_msg[base + 3] as Real, base_msg[base + 4] as Real, base_msg[base + 5] as Real];
+        atoms.pos[recv_start + k] = [
+            base_msg[base] as Real,
+            base_msg[base + 1] as Real,
+            base_msg[base + 2] as Real,
+        ];
+        atoms.vel[recv_start + k] = [
+            base_msg[base + 3] as Real,
+            base_msg[base + 4] as Real,
+            base_msg[base + 5] as Real,
+        ];
         if extra_per_atom > 0 {
             let extra_base = k * extra_per_atom;
-            registry.unpack_forward_all(recv_start + k, &extra_msg[extra_base..extra_base + extra_per_atom]);
+            registry.unpack_forward_all(
+                recv_start + k,
+                &extra_msg[extra_base..extra_base + extra_per_atom],
+            );
         }
     }
 }
@@ -626,7 +718,12 @@ fn unpack_forward_f32(
 /// flipping the offset jerks the ghost a full box length, dropping a real contact
 /// and reintroducing it with deep overlap at the next rebuild (a spurious force
 /// that injects energy — a real Haff-cooling energy-conservation bug).
-fn pack_forward_into(swap: &SwapData, buf: &mut Vec<f64>, atoms: &Atom, registry: &AtomDataRegistry) {
+fn pack_forward_into(
+    swap: &SwapData,
+    buf: &mut Vec<f64>,
+    atoms: &Atom,
+    registry: &AtomDataRegistry,
+) {
     let offset = swap.periodic_offset;
     let voff = swap.vel_offset;
     for &idx in &swap.send_indices {
@@ -684,13 +781,24 @@ fn forward_prepare_swap<'s>(
 
     if swap.to_proc == rank {
         // Self-send: copy directly into ghost data, no MPI.
-        unpack_forward(&scratch.send, atoms, registry, swap.recv_start, swap.recv_count, extra);
+        unpack_forward(
+            &scratch.send,
+            atoms,
+            registry,
+            swap.recv_start,
+            swap.recv_count,
+            extra,
+        );
         return None;
     }
 
     // MPI op. `-1` on either side disables that half (non-periodic boundary).
     let source = swap.from_proc;
-    let recv_len = if source != -1 { swap.recv_count * stride } else { 0 };
+    let recv_len = if source != -1 {
+        swap.recv_count * stride
+    } else {
+        0
+    };
     scratch.recv.resize(recv_len, 0.0);
     Some(SendRecvOp {
         dest: swap.to_proc,
@@ -724,33 +832,71 @@ fn forward_comm_f32(
             let scratch = &mut pool[r];
 
             scratch.send_f32.clear();
-            scratch.send_f32.reserve((lo.send_indices.len() + hi.send_indices.len()) * FORWARD_PACK_SIZE);
+            scratch
+                .send_f32
+                .reserve((lo.send_indices.len() + hi.send_indices.len()) * FORWARD_PACK_SIZE);
             pack_forward_base_f32_into(lo, &mut scratch.send_f32, atoms);
             pack_forward_base_f32_into(hi, &mut scratch.send_f32, atoms);
 
             scratch.send_bridge.clear();
-            scratch.send_bridge.extend(scratch.send_f32.iter().map(|&x| x as f64));
-            scratch.recv_bridge.resize((lo.recv_count + hi.recv_count) * FORWARD_PACK_SIZE, 0.0);
-            comm.sendrecv_f64_into(lo.to_proc, &scratch.send_bridge, lo.from_proc, &mut scratch.recv_bridge);
+            scratch
+                .send_bridge
+                .extend(scratch.send_f32.iter().map(|&x| x as f64));
+            scratch
+                .recv_bridge
+                .resize((lo.recv_count + hi.recv_count) * FORWARD_PACK_SIZE, 0.0);
+            comm.sendrecv_f64_into(
+                lo.to_proc,
+                &scratch.send_bridge,
+                lo.from_proc,
+                &mut scratch.recv_bridge,
+            );
 
             scratch.recv_f32.clear();
-            scratch.recv_f32.extend(scratch.recv_bridge.iter().map(|&x| x as f32));
+            scratch
+                .recv_f32
+                .extend(scratch.recv_bridge.iter().map(|&x| x as f32));
 
             if extra > 0 {
                 scratch.send_extra.clear();
-                scratch.send_extra.reserve((lo.send_indices.len() + hi.send_indices.len()) * extra);
+                scratch
+                    .send_extra
+                    .reserve((lo.send_indices.len() + hi.send_indices.len()) * extra);
                 pack_forward_extra_into(lo, &mut scratch.send_extra, registry);
                 pack_forward_extra_into(hi, &mut scratch.send_extra, registry);
-                scratch.recv_extra.resize((lo.recv_count + hi.recv_count) * extra, 0.0);
-                comm.sendrecv_f64_into(lo.to_proc, &scratch.send_extra, lo.from_proc, &mut scratch.recv_extra);
+                scratch
+                    .recv_extra
+                    .resize((lo.recv_count + hi.recv_count) * extra, 0.0);
+                comm.sendrecv_f64_into(
+                    lo.to_proc,
+                    &scratch.send_extra,
+                    lo.from_proc,
+                    &mut scratch.recv_extra,
+                );
             } else {
                 scratch.recv_extra.clear();
             }
 
             let lo_base = lo.recv_count * FORWARD_PACK_SIZE;
             let lo_extra = lo.recv_count * extra;
-            unpack_forward_f32(&scratch.recv_f32[..lo_base], &scratch.recv_extra[..lo_extra], atoms, registry, lo.recv_start, lo.recv_count, extra);
-            unpack_forward_f32(&scratch.recv_f32[lo_base..], &scratch.recv_extra[lo_extra..], atoms, registry, hi.recv_start, hi.recv_count, extra);
+            unpack_forward_f32(
+                &scratch.recv_f32[..lo_base],
+                &scratch.recv_extra[..lo_extra],
+                atoms,
+                registry,
+                lo.recv_start,
+                lo.recv_count,
+                extra,
+            );
+            unpack_forward_f32(
+                &scratch.recv_f32[lo_base..],
+                &scratch.recv_extra[lo_extra..],
+                atoms,
+                registry,
+                hi.recv_start,
+                hi.recv_count,
+                extra,
+            );
 
             r = end;
             continue;
@@ -760,7 +906,9 @@ fn forward_comm_f32(
             let idx = r + idx;
             let scratch = &mut pool[idx];
             scratch.send_f32.clear();
-            scratch.send_f32.reserve(swap.send_indices.len() * FORWARD_PACK_SIZE);
+            scratch
+                .send_f32
+                .reserve(swap.send_indices.len() * FORWARD_PACK_SIZE);
             pack_forward_base_f32_into(swap, &mut scratch.send_f32, atoms);
 
             scratch.send_extra.clear();
@@ -770,13 +918,27 @@ fn forward_comm_f32(
             }
 
             if swap.to_proc == rank {
-                unpack_forward_f32(&scratch.send_f32, &scratch.send_extra, atoms, registry, swap.recv_start, swap.recv_count, extra);
+                unpack_forward_f32(
+                    &scratch.send_f32,
+                    &scratch.send_extra,
+                    atoms,
+                    registry,
+                    swap.recv_start,
+                    swap.recv_count,
+                    extra,
+                );
                 continue;
             }
 
-            let recv_base_len = if swap.from_proc != -1 { swap.recv_count * FORWARD_PACK_SIZE } else { 0 };
+            let recv_base_len = if swap.from_proc != -1 {
+                swap.recv_count * FORWARD_PACK_SIZE
+            } else {
+                0
+            };
             scratch.send_bridge.clear();
-            scratch.send_bridge.extend(scratch.send_f32.iter().map(|&x| x as f64));
+            scratch
+                .send_bridge
+                .extend(scratch.send_f32.iter().map(|&x| x as f64));
             scratch.recv_bridge.resize(recv_base_len, 0.0);
             comm.sendrecv_batch_f64_into(&mut [SendRecvOp {
                 dest: swap.to_proc,
@@ -786,7 +948,11 @@ fn forward_comm_f32(
             }]);
 
             if extra > 0 {
-                let recv_extra_len = if swap.from_proc != -1 { swap.recv_count * extra } else { 0 };
+                let recv_extra_len = if swap.from_proc != -1 {
+                    swap.recv_count * extra
+                } else {
+                    0
+                };
                 scratch.recv_extra.resize(recv_extra_len, 0.0);
                 comm.sendrecv_batch_f64_into(&mut [SendRecvOp {
                     dest: swap.to_proc,
@@ -800,8 +966,18 @@ fn forward_comm_f32(
 
             if swap.from_proc != -1 {
                 scratch.recv_f32.clear();
-                scratch.recv_f32.extend(scratch.recv_bridge.iter().map(|&x| x as f32));
-                unpack_forward_f32(&scratch.recv_f32, &scratch.recv_extra, atoms, registry, swap.recv_start, swap.recv_count, extra);
+                scratch
+                    .recv_f32
+                    .extend(scratch.recv_bridge.iter().map(|&x| x as f32));
+                unpack_forward_f32(
+                    &scratch.recv_f32,
+                    &scratch.recv_extra,
+                    atoms,
+                    registry,
+                    swap.recv_start,
+                    swap.recv_count,
+                    extra,
+                );
             }
         }
         r = end;
@@ -862,15 +1038,31 @@ fn forward_comm(
             {
                 let scratch = &mut pool[r];
                 scratch.send.clear();
-                scratch.send.reserve((lo.send_indices.len() + hi.send_indices.len()) * stride);
+                scratch
+                    .send
+                    .reserve((lo.send_indices.len() + hi.send_indices.len()) * stride);
                 pack_forward_into(lo, &mut scratch.send, atoms, registry);
                 pack_forward_into(hi, &mut scratch.send, atoms, registry);
                 scratch.recv.resize((lo_rc + hi_rc) * stride, 0.0);
                 comm.sendrecv_f64_into(lo.to_proc, &scratch.send, lo.from_proc, &mut scratch.recv);
             }
             let recv = &pool[r].recv;
-            unpack_forward(&recv[..lo_rc * stride], atoms, registry, lo.recv_start, lo_rc, extra);
-            unpack_forward(&recv[lo_rc * stride..], atoms, registry, hi.recv_start, hi_rc, extra);
+            unpack_forward(
+                &recv[..lo_rc * stride],
+                atoms,
+                registry,
+                lo.recv_start,
+                lo_rc,
+                extra,
+            );
+            unpack_forward(
+                &recv[lo_rc * stride..],
+                atoms,
+                registry,
+                hi.recv_start,
+                hi_rc,
+                extra,
+            );
             r = end;
             continue;
         }
@@ -883,13 +1075,23 @@ fn forward_comm(
             let round = &mut pool[r..end];
             let (first, rest) = round.split_first_mut().unwrap();
             let mut ops: Vec<SendRecvOp> = Vec::with_capacity(2);
-            if let Some(op) = forward_prepare_swap(&swaps[r], first, atoms, registry, rank, stride, extra) {
+            if let Some(op) =
+                forward_prepare_swap(&swaps[r], first, atoms, registry, rank, stride, extra)
+            {
                 ops.push(op);
                 jobs[njobs] = r;
                 njobs += 1;
             }
             if end > r + 1 {
-                if let Some(op) = forward_prepare_swap(&swaps[r + 1], &mut rest[0], atoms, registry, rank, stride, extra) {
+                if let Some(op) = forward_prepare_swap(
+                    &swaps[r + 1],
+                    &mut rest[0],
+                    atoms,
+                    registry,
+                    rank,
+                    stride,
+                    extra,
+                ) {
                     ops.push(op);
                     jobs[njobs] = r + 1;
                     njobs += 1;
@@ -904,7 +1106,14 @@ fn forward_comm(
         for &j in &jobs[..njobs] {
             let swap = &swaps[j];
             if swap.from_proc != -1 {
-                unpack_forward(&pool[j].recv, atoms, registry, swap.recv_start, swap.recv_count, extra);
+                unpack_forward(
+                    &pool[j].recv,
+                    atoms,
+                    registry,
+                    swap.recv_start,
+                    swap.recv_count,
+                    extra,
+                );
             }
         }
         r = end;
@@ -929,7 +1138,9 @@ pub fn forward_comm_borders(
     let mut pool = std::mem::take(&mut buffers.forward_scratch);
     match config.forward_precision {
         ForwardCommPrecision::F64 => forward_comm(&mut atoms, &registry, &topo, &**comm, &mut pool),
-        ForwardCommPrecision::F32 => forward_comm_f32(&mut atoms, &registry, &topo, &**comm, &mut pool),
+        ForwardCommPrecision::F32 => {
+            forward_comm_f32(&mut atoms, &registry, &topo, &**comm, &mut pool)
+        }
     }
     buffers.forward_scratch = pool;
 }
@@ -981,9 +1192,15 @@ pub fn forward_comm_overlap(
                 njobs += 1;
             }
             if end > r + 1 {
-                if let Some(op) =
-                    forward_prepare_swap(&swaps[r + 1], &mut rest[0], atoms, registry, rank, stride, extra)
-                {
+                if let Some(op) = forward_prepare_swap(
+                    &swaps[r + 1],
+                    &mut rest[0],
+                    atoms,
+                    registry,
+                    rank,
+                    stride,
+                    extra,
+                ) {
                     ops.push(op);
                     jobs[njobs] = r + 1;
                     njobs += 1;
@@ -1006,7 +1223,14 @@ pub fn forward_comm_overlap(
         for &j in &jobs[..njobs] {
             let swap = &swaps[j];
             if swap.from_proc != -1 {
-                unpack_forward(&pool[j].recv, atoms, registry, swap.recv_start, swap.recv_count, extra);
+                unpack_forward(
+                    &pool[j].recv,
+                    atoms,
+                    registry,
+                    swap.recv_start,
+                    swap.recv_count,
+                    extra,
+                );
             }
         }
         r = end;
@@ -1062,7 +1286,10 @@ pub fn borders(
             for dim in 0..3 {
                 if topo.maxneed[dim] > 1 {
                     let dim_name = ["x", "y", "z"][dim];
-                    println!("Comm: multi-hop ghost communication in dim {}: need={}", dim_name, topo.maxneed[dim]);
+                    println!(
+                        "Comm: multi-hop ghost communication in dim {}: need={}",
+                        dim_name, topo.maxneed[dim]
+                    );
                 }
             }
         }
@@ -1094,12 +1321,20 @@ pub fn borders(
                 let pbc_shift = match dim {
                     0 => [po * domain.size[0], 0.0, 0.0],
                     1 => [po * domain.tilt[0], po * domain.size[1], 0.0],
-                    _ => [po * domain.tilt[1], po * domain.tilt[2], po * domain.size[2]],
+                    _ => [
+                        po * domain.tilt[1],
+                        po * domain.tilt[2],
+                        po * domain.size[2],
+                    ],
                 };
                 // Lees–Edwards streaming-velocity shift on ghosts that wrap across the
                 // moving (sheared) y face. Zero for an orthogonal box (boundary_vel = 0).
                 let vel_shift = if dim == 1 {
-                    [po * domain.boundary_vel[0], po * domain.boundary_vel[1], po * domain.boundary_vel[2]]
+                    [
+                        po * domain.boundary_vel[0],
+                        po * domain.boundary_vel[1],
+                        po * domain.boundary_vel[2],
+                    ]
                 } else {
                     [0.0; 3]
                 };
@@ -1225,7 +1460,13 @@ pub fn borders(
 /// Accumulate ghost forces from owner atoms received back into local force, for
 /// one swap's MPI receive. The k-th returned force belongs to `swap.send_indices[k]`
 /// (the same stable ghost→origin mapping `forward_comm` relies on).
-fn reverse_accumulate(swap: &SwapData, recv: &[f64], atoms: &mut Atom, registry: &AtomDataRegistry, per_atom: usize) {
+fn reverse_accumulate(
+    swap: &SwapData,
+    recv: &[f64],
+    atoms: &mut Atom,
+    registry: &AtomDataRegistry,
+    per_atom: usize,
+) {
     for k in 0..swap.send_indices.len() {
         let base = k * per_atom;
         let origin = swap.send_indices[k];
@@ -1244,9 +1485,18 @@ fn reverse_accumulate(swap: &SwapData, recv: &[f64], atoms: &mut Atom, registry:
 /// forces flow back from `from_proc` toward `to_proc`).
 /// Append one swap's ghost forces (+ registry reverse fields) to `buf`, in
 /// ghost-index order over the swap's received-ghost region.
-fn pack_reverse_into(swap: &SwapData, buf: &mut Vec<f64>, atoms: &Atom, registry: &AtomDataRegistry) {
+fn pack_reverse_into(
+    swap: &SwapData,
+    buf: &mut Vec<f64>,
+    atoms: &Atom,
+    registry: &AtomDataRegistry,
+) {
     for i in swap.recv_start..(swap.recv_start + swap.recv_count) {
-        debug_assert!(atoms.is_ghost[i], "reverse_send_force: atom {} is not ghost", i);
+        debug_assert!(
+            atoms.is_ghost[i],
+            "reverse_send_force: atom {} is not ghost",
+            i
+        );
         buf.push(atoms.force[i][0] as f64);
         buf.push(atoms.force[i][1] as f64);
         buf.push(atoms.force[i][2] as f64);
@@ -1279,7 +1529,11 @@ fn reverse_prepare_swap<'s>(
     // MPI: we receive forces for exactly the atoms we sent to `to_proc`
     // (swap.send_indices), in order. `-1` disables the corresponding half.
     let source = swap.to_proc;
-    let recv_len = if source != -1 { swap.send_indices.len() * per_atom } else { 0 };
+    let recv_len = if source != -1 {
+        swap.send_indices.len() * per_atom
+    } else {
+        0
+    };
     scratch.recv.resize(recv_len, 0.0);
     Some(SendRecvOp {
         dest: swap.from_proc,
@@ -1345,7 +1599,9 @@ fn reverse_send_force_impl(
             {
                 let scratch = &mut pool[start];
                 scratch.send.clear();
-                scratch.send.reserve((lo.recv_count + hi.recv_count) * per_atom);
+                scratch
+                    .send
+                    .reserve((lo.recv_count + hi.recv_count) * per_atom);
                 pack_reverse_into(lo, &mut scratch.send, atoms, registry);
                 pack_reverse_into(hi, &mut scratch.send, atoms, registry);
                 let recv_len = (lo.send_indices.len() + hi.send_indices.len()) * per_atom;
@@ -1365,13 +1621,22 @@ fn reverse_send_force_impl(
             let round = &mut pool[start..end];
             let (first, rest) = round.split_first_mut().unwrap();
             let mut ops: Vec<SendRecvOp> = Vec::with_capacity(2);
-            if let Some(op) = reverse_prepare_swap(&swaps[start], first, atoms, registry, rank, per_atom) {
+            if let Some(op) =
+                reverse_prepare_swap(&swaps[start], first, atoms, registry, rank, per_atom)
+            {
                 ops.push(op);
                 jobs[njobs] = start;
                 njobs += 1;
             }
             if end > start + 1 {
-                if let Some(op) = reverse_prepare_swap(&swaps[start + 1], &mut rest[0], atoms, registry, rank, per_atom) {
+                if let Some(op) = reverse_prepare_swap(
+                    &swaps[start + 1],
+                    &mut rest[0],
+                    atoms,
+                    registry,
+                    rank,
+                    per_atom,
+                ) {
                     ops.push(op);
                     jobs[njobs] = start + 1;
                     njobs += 1;
@@ -1391,7 +1656,6 @@ fn reverse_send_force_impl(
         }
         end = start;
     }
-
 }
 
 // ── Exchange (MPI only) ──────────────────────────────────────────────────────
@@ -1421,8 +1685,18 @@ fn exchange_same_neighbor(
     let recv_hi_len = recv_meta[3] as usize;
     recv_buff.resize(recv_lo_len + recv_hi_len, 0.0);
     comm.sendrecv_f64_into(peer, aggregate, peer, recv_buff);
-    unpack_exchanged(atoms, registry, &recv_buff[..recv_lo_len], recv_meta[0] as usize);
-    unpack_exchanged(atoms, registry, &recv_buff[recv_lo_len..], recv_meta[2] as usize);
+    unpack_exchanged(
+        atoms,
+        registry,
+        &recv_buff[..recv_lo_len],
+        recv_meta[0] as usize,
+    );
+    unpack_exchanged(
+        atoms,
+        registry,
+        &recv_buff[recv_lo_len..],
+        recv_meta[2] as usize,
+    );
 }
 
 #[cfg(feature = "mpi_backend")]
@@ -1512,7 +1786,11 @@ pub fn exchange(
         for i in (0..atoms.len()).rev() {
             let pr = atoms.pos[i];
             let pf = [pr[0] as f64, pr[1] as f64, pr[2] as f64];
-            let coord = if triclinic { domain.x2lamda(pf)[dim] } else { pf[dim] };
+            let coord = if triclinic {
+                domain.x2lamda(pf)[dim]
+            } else {
+                pf[dim]
+            };
             let disp_lo = min_image(coord - sub_lo);
             let disp_hi = min_image(coord - sub_hi);
             if disp_lo < 0.0 {
@@ -1541,7 +1819,18 @@ pub fn exchange(
         // faces. Send [lo | hi] in one meta/payload pair instead of two pairs.
         if lo_proc != -1 && lo_proc == hi_proc {
             let (lo_hi, aggregate) = atoms_buff.split_at_mut(2);
-            exchange_same_neighbor(&**comm, lo_proc, &mut atoms, &registry, &lo_hi[0], lo_count, &lo_hi[1], hi_count, &mut aggregate[0], &mut recv_buff);
+            exchange_same_neighbor(
+                &**comm,
+                lo_proc,
+                &mut atoms,
+                &registry,
+                &lo_hi[0],
+                lo_count,
+                &lo_hi[1],
+                hi_count,
+                &mut aggregate[0],
+                &mut recv_buff,
+            );
             continue;
         }
 
@@ -1636,7 +1925,11 @@ pub fn exchange(
                 continue;
             }
             let (coord, lo, hi) = match lam {
-                Some(l) => (l[dim], domain.sub_lamda_low[dim], domain.sub_lamda_high[dim]),
+                Some(l) => (
+                    l[dim],
+                    domain.sub_lamda_low[dim],
+                    domain.sub_lamda_high[dim],
+                ),
                 None => (
                     atoms.pos[i][dim] as f64,
                     domain.sub_domain_low[dim],
@@ -1680,13 +1973,25 @@ mod tests {
     }
 
     impl CommBackend for CountingComm {
-        fn rank(&self) -> i32 { 0 }
-        fn size(&self) -> i32 { 2 }
-        fn processor_decomposition(&self) -> [i32; 3] { [2, 1, 1] }
-        fn processor_position(&self) -> [i32; 3] { [0, 0, 0] }
+        fn rank(&self) -> i32 {
+            0
+        }
+        fn size(&self) -> i32 {
+            2
+        }
+        fn processor_decomposition(&self) -> [i32; 3] {
+            [2, 1, 1]
+        }
+        fn processor_position(&self) -> [i32; 3] {
+            [0, 0, 0]
+        }
         fn set_processor_grid(&mut self, _decomp: [i32; 3], _position: [i32; 3]) {}
-        fn all_reduce_sum_f64(&self, local: f64) -> f64 { local }
-        fn all_reduce_min_f64(&self, local: f64) -> f64 { local }
+        fn all_reduce_sum_f64(&self, local: f64) -> f64 {
+            local
+        }
+        fn all_reduce_min_f64(&self, local: f64) -> f64 {
+            local
+        }
         fn barrier(&self) {}
         fn send_f64(&self, _dest: i32, _buf: &[f64]) {
             unreachable!("CountingComm only supports sendrecv in comm aggregation tests");
@@ -1700,7 +2005,13 @@ mod tests {
         fn sendrecv_f64(&self, _dest: i32, _send_buf: &[f64], _source: i32) -> Vec<f64> {
             unreachable!("CountingComm only supports sendrecv_f64_into in comm aggregation tests");
         }
-        fn sendrecv_f64_into(&self, _dest: i32, send_buf: &[f64], _source: i32, recv_buf: &mut [f64]) {
+        fn sendrecv_f64_into(
+            &self,
+            _dest: i32,
+            send_buf: &[f64],
+            _source: i32,
+            recv_buf: &mut [f64],
+        ) {
             self.sendrecv_into_calls.fetch_add(1, Ordering::SeqCst);
             assert_eq!(send_buf.len(), recv_buf.len());
             recv_buf.copy_from_slice(send_buf);
@@ -1845,17 +2156,33 @@ mod tests {
         let box_size = 16.0;
         // Rank 0: [0,4). An atom that left at x<0 is PBC-wrapped to ≈15.9.
         // It must be routed LO (to the far-high-edge rank), not HI.
-        assert_eq!(classify(15.9, 0.0, 4.0, box_size, true), -1, "wrapped low→ lo");
+        assert_eq!(
+            classify(15.9, 0.0, 4.0, box_size, true),
+            -1,
+            "wrapped low→ lo"
+        );
         // A genuine forward migrant just past sub_high stays HI.
         assert_eq!(classify(4.1, 0.0, 4.0, box_size, true), 1, "forward → hi");
         // Interior atom stays local.
-        assert_eq!(classify(2.0, 0.0, 4.0, box_size, true), 0, "interior → local");
+        assert_eq!(
+            classify(2.0, 0.0, 4.0, box_size, true),
+            0,
+            "interior → local"
+        );
 
         // Rank 3 (high edge): [12,16). An atom that left at x≥16 is wrapped to ≈0.1
         // and must be routed HI (to rank 0), not LO.
-        assert_eq!(classify(0.1, 12.0, 16.0, box_size, true), 1, "wrapped high → hi");
+        assert_eq!(
+            classify(0.1, 12.0, 16.0, box_size, true),
+            1,
+            "wrapped high → hi"
+        );
         // Backward migrant just below sub_low stays LO.
-        assert_eq!(classify(11.9, 12.0, 16.0, box_size, true), -1, "backward → lo");
+        assert_eq!(
+            classify(11.9, 12.0, 16.0, box_size, true),
+            -1,
+            "backward → lo"
+        );
     }
 
     #[test]
@@ -1935,7 +2262,11 @@ mod tests {
 
         forward_comm(&mut atoms, &registry, &topo, &comm, &mut pool);
 
-        assert_eq!(comm.sendrecv_into_calls(), 1, "two same-neighbor swaps use one message");
+        assert_eq!(
+            comm.sendrecv_into_calls(),
+            1,
+            "two same-neighbor swaps use one message"
+        );
         assert_eq!(atoms.pos[2], [11.0 as Real, 0.0, 0.0]);
         assert_eq!(atoms.pos[3], [22.0 as Real, 0.0, 0.0]);
         assert_eq!(atoms.vel[2], [0.1 as Real, 0.2 as Real, 0.3 as Real]);
@@ -1952,7 +2283,11 @@ mod tests {
 
         reverse_send_force_impl(&comm, &topo, &mut atoms, &registry, &mut pool);
 
-        assert_eq!(comm.sendrecv_into_calls(), 1, "two same-neighbor reverse swaps use one message");
+        assert_eq!(
+            comm.sendrecv_into_calls(),
+            1,
+            "two same-neighbor reverse swaps use one message"
+        );
         assert_eq!(atoms.force[0], [1.0 as Accum, 2.0 as Accum, 3.0 as Accum]);
         assert_eq!(atoms.force[1], [4.0 as Accum, 5.0 as Accum, 6.0 as Accum]);
     }
@@ -1975,11 +2310,30 @@ mod tests {
         let comm = CountingComm::default();
         let mut aggregate = Vec::new();
         let mut recv = Vec::new();
-        exchange_same_neighbor(&comm, 1, &mut atoms, &registry, &lo, 1.0, &hi, 1.0, &mut aggregate, &mut recv);
+        exchange_same_neighbor(
+            &comm,
+            1,
+            &mut atoms,
+            &registry,
+            &lo,
+            1.0,
+            &hi,
+            1.0,
+            &mut aggregate,
+            &mut recv,
+        );
 
-        assert_eq!(comm.sendrecv_into_calls(), 2, "same-neighbor exchange uses one meta message and one payload message");
+        assert_eq!(
+            comm.sendrecv_into_calls(),
+            2,
+            "same-neighbor exchange uses one meta message and one payload message"
+        );
         assert_eq!(atoms.len(), 2);
-        assert_eq!(atoms.tag, vec![10, 20], "lo payload is unpacked before hi payload, matching the old path");
+        assert_eq!(
+            atoms.tag,
+            vec![10, 20],
+            "lo payload is unpacked before hi payload, matching the old path"
+        );
     }
 
     /// Build a 2-local + 1-ghost atom set and a single self-send periodic swap
@@ -2033,14 +2387,36 @@ mod tests {
             let mut overlap = |_a: &mut Atom| {
                 ran = true;
             };
-            forward_comm_overlap(&mut atoms, &registry2, &topo2, &comm, &mut pool2, &mut overlap);
+            forward_comm_overlap(
+                &mut atoms,
+                &registry2,
+                &topo2,
+                &comm,
+                &mut pool2,
+                &mut overlap,
+            );
         }
 
-        assert!(ran, "overlap closure must execute during forward_comm_overlap");
+        assert!(
+            ran,
+            "overlap closure must execute during forward_comm_overlap"
+        );
         // Ghost position = local atom 0 shifted by the periodic offset; velocity copied.
-        assert_eq!(atoms.pos[2], ref_atoms.pos[2], "ghost pos must match forward_comm");
-        assert_eq!(atoms.vel[2], ref_atoms.vel[2], "ghost vel must match forward_comm");
-        assert_eq!(atoms.pos[2][0] as f64, 11.0, "pos[0]+offset applied to ghost");
-        assert_eq!(atoms.vel[2][0] as f64, 0.1, "ghost velocity copied from owner");
+        assert_eq!(
+            atoms.pos[2], ref_atoms.pos[2],
+            "ghost pos must match forward_comm"
+        );
+        assert_eq!(
+            atoms.vel[2], ref_atoms.vel[2],
+            "ghost vel must match forward_comm"
+        );
+        assert_eq!(
+            atoms.pos[2][0] as f64, 11.0,
+            "pos[0]+offset applied to ghost"
+        );
+        assert_eq!(
+            atoms.vel[2][0] as f64, 0.1,
+            "ghost velocity copied from owner"
+        );
     }
 }

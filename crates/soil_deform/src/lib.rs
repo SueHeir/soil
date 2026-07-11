@@ -85,8 +85,8 @@ use grass_scheduler::prelude::*;
 use serde::Deserialize;
 use soil_core::Neighbor;
 use soil_core::{
-    Atom, CommResource, Config, Domain, ParticleSimScheduleSet, Real, ScheduleSetupSet,
-    StageOverrides,
+    stage_tables, Atom, CommResource, Config, Domain, ParticleSimScheduleSet, Real,
+    ScheduleSetupSet, StageOverrides,
 };
 use std::fmt;
 
@@ -216,11 +216,6 @@ impl fmt::Display for DeformConfigError {
 
 impl std::error::Error for DeformConfigError {}
 
-fn exit_deform_error(err: DeformConfigError) -> ! {
-    eprintln!("ERROR: {err}");
-    std::process::exit(1);
-}
-
 /// Per-axis deformation state.
 #[derive(Clone, Debug)]
 pub struct AxisDeform {
@@ -292,26 +287,56 @@ impl Plugin for DeformPlugin {
     }
 
     fn build(&self, app: &mut App) {
+        Config::load::<DeformConfig>(app, "deform");
+        install_deform(app);
+    }
+
+    fn try_build(&self, app: &mut App) -> Result<(), AppError> {
+        if let Some(config) = app.get_resource_ref::<Config>() {
+            let domain = config
+                .try_section::<soil_core::DomainConfig>("domain")
+                .map_err(|e| AppError::message(format!("failed to parse [domain] section: {e}")))?;
+            let domain =
+                soil_core::decompose_domain(&domain, &soil_core::SingleProcessComm::default());
+            let ranks = app
+                .get_resource_ref::<CommResource>()
+                .map_or(1, |comm| comm.size());
+            for table in stage_tables(&config).map_err(|e| AppError::message(e.to_string()))? {
+                let config = Config::from_table(table)
+                    .try_section::<DeformConfig>("deform")
+                    .map_err(|e| {
+                        AppError::message(format!("failed to parse [deform] section: {e}"))
+                    })?;
+                validate_deform_config(&config, &domain, ranks)
+                    .map_err(|e| AppError::message(e.to_string()))?;
+            }
+        }
         // Register a default (empty) DeformState. The setup system re-reads
         // the merged stage-aware config each stage, so we don't parse axes here.
-        Config::load::<DeformConfig>(app, "deform");
+        Config::try_load::<DeformConfig>(app, "deform")
+            .map_err(|e| AppError::message(e.to_string()))?;
 
-        let state = DeformState {
-            axes: [None, None, None],
-            shear_xy_rate: None,
-            shear_initialized: false,
-            remap: true,
-            step: 0,
-            initialized: false,
-        };
-
-        // Always register systems — the setup system reads per-stage config and
-        // populates axes (or clears them) accordingly. The update system early-
-        // returns when no axes are active.
-        app.add_resource(state)
-            .add_setup_system(setup_deform, ScheduleSetupSet::PostSetup)
-            .add_update_system(apply_deform, ParticleSimScheduleSet::PreInitialIntegration);
+        install_deform(app);
+        Ok(())
     }
+}
+
+fn install_deform(app: &mut App) {
+    let state = DeformState {
+        axes: [None, None, None],
+        shear_xy_rate: None,
+        shear_initialized: false,
+        remap: true,
+        step: 0,
+        initialized: false,
+    };
+
+    // Always register systems — the setup system reads per-stage config and
+    // populates axes (or clears them) accordingly. The update system early-
+    // returns when no axes are active.
+    app.add_resource(state)
+        .add_setup_system(setup_deform, ScheduleSetupSet::PostSetup)
+        .add_update_system(apply_deform, ParticleSimScheduleSet::PreInitialIntegration);
 }
 
 /// Parse an optional axis definition from config into a runtime [`AxisDeform`].
@@ -536,7 +561,7 @@ fn setup_deform(
 
     // Parse axis definitions fresh from this stage's config.
     let (axes, shear_xy_rate) = validate_deform_config(&config, &domain, comm.size())
-        .unwrap_or_else(|err| exit_deform_error(err));
+        .expect("DeformPlugin validated every declared stage before the scheduler started");
     state.axes = axes;
     state.shear_xy_rate = shear_xy_rate;
     state.shear_initialized = false;
@@ -626,7 +651,7 @@ fn apply_deform(
     // matching entry rather than silently treating missing data as a one-step run.
     let total_steps = if needs_stage_total_steps(&state) {
         current_stage_total_steps(run_state.as_deref(), scheduler_manager.as_deref())
-            .unwrap_or_else(|err| exit_deform_error(err))
+            .expect("DeformPlugin validated the declared run stages before the scheduler started")
     } else {
         0
     };
@@ -644,7 +669,9 @@ fn apply_deform(
         let old_size = old_hi - old_lo;
 
         let (new_lo, new_hi) = next_axis_bounds(axis, AXIS_NAMES[dim], dt, step, total_steps)
-            .unwrap_or_else(|err| exit_deform_error(err));
+            .expect(
+                "DeformPlugin validated declared deformation bounds before the scheduler started",
+            );
 
         let new_size = new_hi - new_lo;
 
@@ -729,6 +756,7 @@ fn apply_deform(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use grass_app::App;
     use soil_core::BoundaryType;
     use soil_core::RunState;
 
@@ -743,6 +771,25 @@ mod tests {
         atom.natoms = n as u64;
         atom.dt = 0.001;
         atom
+    }
+
+    #[test]
+    fn malformed_deform_is_returned_by_fallible_plugin_registration() {
+        let mut app = App::new();
+        app.add_resource(Config::from_str(
+            r#"[deform]
+x = { style = "erate" }
+"#,
+        ));
+
+        let error = match app.try_add_plugins(DeformPlugin) {
+            Ok(_) => panic!("malformed configuration unexpectedly registered"),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains("requires a 'rate' field"),
+            "unexpected error: {error}"
+        );
     }
 
     fn make_domain(lo: [f64; 3], hi: [f64; 3]) -> Domain {

@@ -117,12 +117,14 @@ impl GroupRegistry {
         self.try_get(name).unwrap_or_else(|err| panic!("{err}"))
     }
 
-    /// Validate that a group name exists. Prints an error and exits if not found.
-    pub fn validate_name(&self, name: &str, context: &str) {
-        if let Err(err) = self.try_get(name) {
-            eprintln!("ERROR: {context}: {err}");
-            std::process::exit(1);
-        }
+    /// Validate that a group name exists with contextual diagnostics.
+    pub fn validate_name(&self, name: &str, context: &str) -> Result<(), GroupLookupError> {
+        self.try_get(name)
+            .map(|_| ())
+            .map_err(|error| GroupLookupError {
+                name: format!("{context}: {error}"),
+                available: Vec::new(),
+            })
     }
 
     /// Return the mask for a named group, or `None` if no group is specified (meaning "all atoms").
@@ -215,9 +217,20 @@ impl Plugin for GroupPlugin {
     }
 
     fn build(&self, app: &mut App) {
+        self.try_build(app)
+            .unwrap_or_else(|error| panic!("invalid [[group]] configuration: {error}"));
+    }
+
+    fn try_build(&self, app: &mut App) -> Result<(), AppError> {
+        if let Some(config) = app.get_resource_ref::<Config>() {
+            config
+                .try_parse_array::<GroupDef>("group")
+                .map_err(|error| AppError::message(error.to_string()))?;
+        }
         app.add_resource(GroupRegistry::new())
             .add_setup_system(setup_groups, ScheduleSetupSet::PostSetup)
             .add_update_system(rebuild_groups, ParticleSimScheduleSet::PreForce);
+        Ok(())
     }
 }
 

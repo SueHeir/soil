@@ -45,10 +45,24 @@ interval = 0"#,
     }
 
     fn build(&self, app: &mut App) {
-        Config::load::<DumpConfig>(app, "dump");
-        Config::load::<RestartConfig>(app, "restart");
-        Config::load::<VtpConfig>(app, "vtp");
-        Config::load::<ThermoConfig>(app, "thermo");
+        self.try_build(app)
+            .unwrap_or_else(|error| panic!("invalid output configuration: {error}"));
+    }
+
+    fn try_build(&self, app: &mut App) -> Result<(), AppError> {
+        Config::try_load::<DumpConfig>(app, "dump")
+            .map_err(|e| AppError::message(e.to_string()))?;
+        let restart = Config::try_load::<RestartConfig>(app, "restart")
+            .map_err(|e| AppError::message(e.to_string()))?;
+        if restart.format != "bincode" && restart.format != "json" {
+            return Err(AppError::message(format!(
+                "[restart] format must be 'bincode' or 'json', got '{}'",
+                restart.format
+            )));
+        }
+        Config::try_load::<VtpConfig>(app, "vtp").map_err(|e| AppError::message(e.to_string()))?;
+        Config::try_load::<ThermoConfig>(app, "thermo")
+            .map_err(|e| AppError::message(e.to_string()))?;
 
         // Built-in dump formats, registered through the same public extension
         // point (`register_format`) any plugin uses — core just ships three.
@@ -75,6 +89,7 @@ interval = 0"#,
                 check_stage_end_save.before("update_cycle"),
                 ParticleSimScheduleSet::PostFinalIntegration,
             );
+        Ok(())
     }
 }
 

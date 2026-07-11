@@ -85,8 +85,8 @@ use grass_scheduler::prelude::*;
 use serde::Deserialize;
 use soil_core::Neighbor;
 use soil_core::{
-    Atom, CommResource, Config, Domain, ParticleSimScheduleSet, Real, ScheduleSetupSet,
-    StageOverrides,
+    stage_tables, Atom, CommResource, Config, Domain, ParticleSimScheduleSet, Real,
+    ScheduleSetupSet, StageOverrides,
 };
 use std::fmt;
 
@@ -292,9 +292,26 @@ impl Plugin for DeformPlugin {
     }
 
     fn build(&self, app: &mut App) {
+        self.try_build(app)
+            .unwrap_or_else(|error| panic!("invalid [deform] configuration: {error}"));
+    }
+
+    fn try_build(&self, app: &mut App) -> Result<(), AppError> {
+        if let Some(config) = app.get_resource_ref::<Config>() {
+            for table in stage_tables(&config).map_err(|e| AppError::message(e.to_string()))? {
+                let config = Config::from_table(table)
+                    .try_section::<DeformConfig>("deform")
+                    .map_err(|e| {
+                        AppError::message(format!("failed to parse [deform] section: {e}"))
+                    })?;
+                validate_deform_config(&config, &Domain::new(), 1)
+                    .map_err(|e| AppError::message(e.to_string()))?;
+            }
+        }
         // Register a default (empty) DeformState. The setup system re-reads
         // the merged stage-aware config each stage, so we don't parse axes here.
-        Config::load::<DeformConfig>(app, "deform");
+        Config::try_load::<DeformConfig>(app, "deform")
+            .map_err(|e| AppError::message(e.to_string()))?;
 
         let state = DeformState {
             axes: [None, None, None],
@@ -311,6 +328,7 @@ impl Plugin for DeformPlugin {
         app.add_resource(state)
             .add_setup_system(setup_deform, ScheduleSetupSet::PostSetup)
             .add_update_system(apply_deform, ParticleSimScheduleSet::PreInitialIntegration);
+        Ok(())
     }
 }
 

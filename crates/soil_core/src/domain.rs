@@ -6,13 +6,16 @@
 //! - [`decompose_domain`]: uniform Cartesian grid decomposition across MPI ranks
 //! - [`DomainPlugin`]: registers setup, PBC wrapping, and shrink-wrap systems
 
-use std::{fmt, process::exit};
+use std::fmt;
 
 use grass_app::prelude::*;
 use grass_scheduler::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use crate::{Atom, AtomDataRegistry, CommBackend, CommResource, CommState, Config, ParticleSimScheduleSet, Real, ScheduleSetupSet};
+use crate::{
+    Atom, AtomDataRegistry, CommBackend, CommResource, CommState, Config, ParticleSimScheduleSet,
+    Real, ScheduleSetupSet,
+};
 use grass_scheduler::prelude::CurrentState;
 
 fn default_one_f64() -> f64 {
@@ -232,7 +235,11 @@ impl Domain {
 
     /// Return periodic flags as a `[bool; 3]` array (convenience for bulk assignment).
     pub fn periodic_flags(&self) -> [bool; 3] {
-        [self.is_periodic(0), self.is_periodic(1), self.is_periodic(2)]
+        [
+            self.is_periodic(0),
+            self.is_periodic(1),
+            self.is_periodic(2),
+        ]
     }
 
     /// Convert a real-space point to fractional (lamda) box coordinates, where the
@@ -384,7 +391,11 @@ pub fn balanced_planes(hist: &[f64], lo: f64, hi: f64, px: usize) -> Vec<f64> {
             cum += hist[b];
             b += 1;
         }
-        let frac = if b < nbins && hist[b] > 0.0 { (target - cum) / hist[b] } else { 0.0 };
+        let frac = if b < nbins && hist[b] > 0.0 {
+            (target - cum) / hist[b]
+        } else {
+            0.0
+        };
         planes[r] = (lo + (b as f64 + frac) * w).clamp(lo, hi);
     }
     planes
@@ -460,7 +471,10 @@ pub struct LoadBalancePlugin {
 
 impl Plugin for LoadBalancePlugin {
     fn build(&self, app: &mut App) {
-        app.add_resource(LoadBalanceConfig { every: self.every, nbins: self.nbins });
+        app.add_resource(LoadBalanceConfig {
+            every: self.every,
+            nbins: self.nbins,
+        });
         app.add_resource(LoadBalanceCounter(0));
         app.add_update_system(load_balance_system, ParticleSimScheduleSet::PreExchange);
     }
@@ -492,16 +506,24 @@ boundary_z = "periodic"
     }
 
     fn build(&self, app: &mut App) {
-        Config::load::<DomainConfig>(app, "domain");
+        self.try_build(app)
+            .unwrap_or_else(|error| panic!("invalid [domain] configuration: {error}"));
+    }
 
+    fn try_build(&self, app: &mut App) -> Result<(), AppError> {
+        let config = Config::try_load::<DomainConfig>(app, "domain")
+            .map_err(|error| AppError::message(error.to_string()))?;
+        if let Some(comm) = app.get_resource_ref::<CommResource>() {
+            validate_domain_config(&config, &**comm)
+                .map_err(|error| AppError::message(error.to_string()))?;
+        }
         app.add_resource(Domain::new())
-            // First stage only: re-running this every stage would re-apply the
-            // `[domain]` config and clobber any box deformation accumulated by a
-            // previous stage (e.g. `[deform]` compression/shear) — breaking
-            // multi-stage `fix deform`. Matches `comm_read_input`/`comm_setup`,
-            // which are likewise first-stage-only. Per-stage box changes are the
-            // job of the deform plugin, not a domain re-read.
-            .add_setup_system(domain_read_input.label("domain_read_input").run_if(first_stage_only()), ScheduleSetupSet::Setup)
+            .add_setup_system(
+                domain_read_input
+                    .label("domain_read_input")
+                    .run_if(first_stage_only()),
+                ScheduleSetupSet::Setup,
+            )
             .add_update_system(
                 shrink_wrap.label("shrink_wrap").before("pbc"),
                 ParticleSimScheduleSet::PreExchange,
@@ -510,6 +532,7 @@ boundary_z = "periodic"
                 pbc.label("pbc").run_if(in_state(CommState::FullRebuild)),
                 ParticleSimScheduleSet::PreExchange,
             );
+        Ok(())
     }
 }
 
@@ -531,12 +554,8 @@ pub fn domain_read_input(
 
     let has_shrink_wrap = boundary_types.contains(&BoundaryType::ShrinkWrap);
 
-    if let Err(err) = validate_domain_config(&config, &**comm) {
-        if comm.rank() == 0 {
-            eprintln!("ERROR: {err}");
-        }
-        exit(1);
-    }
+    validate_domain_config(&config, &**comm)
+        .expect("DomainPlugin validates configuration before setup");
 
     if comm.rank() == 0 {
         println!(
@@ -551,7 +570,10 @@ pub fn domain_read_input(
         );
         if has_shrink_wrap {
             if config.shrink_wrap_padding > 0.0 {
-                println!("Domain: shrink-wrap padding = {}", config.shrink_wrap_padding);
+                println!(
+                    "Domain: shrink-wrap padding = {}",
+                    config.shrink_wrap_padding
+                );
             } else {
                 println!("Domain: shrink-wrap padding = auto (ghost cutoff)");
             }
@@ -570,7 +592,8 @@ pub fn domain_read_input(
 /// `domain_read_input`). Future MPI support would need `all_reduce_min/max` for
 /// global extremes and correct sub-domain bound updates per rank.
 pub fn shrink_wrap_update(domain: &mut Domain, positions: &[[f64; 3]], nlocal: usize) -> bool {
-    let any_shrink = domain.is_shrink_wrap(0) || domain.is_shrink_wrap(1) || domain.is_shrink_wrap(2);
+    let any_shrink =
+        domain.is_shrink_wrap(0) || domain.is_shrink_wrap(1) || domain.is_shrink_wrap(2);
     if !any_shrink || nlocal == 0 {
         return false;
     }
@@ -586,7 +609,11 @@ pub fn shrink_wrap_update(domain: &mut Domain, positions: &[[f64; 3]], nlocal: u
         // ghost_cutoff not yet set (shrink_wrap runs before neighbor_setup on first step).
         // Use 1% of the current domain size as a unit-independent fallback.
         let max_size = domain.size[0].max(domain.size[1]).max(domain.size[2]);
-        if max_size > 0.0 { max_size * 0.01 } else { 1.0 }
+        if max_size > 0.0 {
+            max_size * 0.01
+        } else {
+            1.0
+        }
     };
 
     let mut changed = false;
@@ -637,10 +664,7 @@ pub fn shrink_wrap_update(domain: &mut Domain, positions: &[[f64; 3]], nlocal: u
 /// ECS system wrapper: update shrink-wrap boundaries each step.
 ///
 /// Runs at `PreExchange` before `pbc`. Delegates to [`shrink_wrap_update`].
-pub fn shrink_wrap(
-    atoms: Res<Atom>,
-    mut domain: ResMut<Domain>,
-) {
+pub fn shrink_wrap(atoms: Res<Atom>, mut domain: ResMut<Domain>) {
     // shrink_wrap_update works in f64; convert the local `Real` positions at the
     // boundary (shrink-wrap is single-process and rare, so the copy is cheap).
     let nlocal = atoms.nlocal as usize;
@@ -947,8 +971,9 @@ mod tests {
 
         // Snapshot the "before" set: tag → stored position (positions must be
         // carried through redecomposition untouched).
-        let before: std::collections::HashMap<u32, [Real; 3]> =
-            (0..n as usize).map(|i| (atoms.tag[i], atoms.pos[i])).collect();
+        let before: std::collections::HashMap<u32, [Real; 3]> = (0..n as usize)
+            .map(|i| (atoms.tag[i], atoms.pos[i]))
+            .collect();
         let global_count = n as usize;
 
         // Drive `rebalance_x` once per rank — exactly the call
@@ -986,10 +1011,15 @@ mod tests {
         // a gap loses atoms, an overlap duplicates them. This contiguity is the
         // conservation precondition the subsequent exchange relies on.
         assert_eq!(sub_lo[0], lo, "rank 0 must start at the global low edge");
-        assert_eq!(sub_hi[px - 1], hi, "last rank must end at the global high edge");
+        assert_eq!(
+            sub_hi[px - 1],
+            hi,
+            "last rank must end at the global high edge"
+        );
         for r in 0..px - 1 {
             assert_eq!(
-                sub_hi[r], sub_lo[r + 1],
+                sub_hi[r],
+                sub_lo[r + 1],
                 "ranks {r}/{} subdomains must be contiguous (no gap/overlap)",
                 r + 1,
             );
@@ -1029,10 +1059,18 @@ mod tests {
         for r in 0..px {
             for &i in &owned[r] {
                 let prev = after.insert(atoms.tag[i], atoms.pos[i]);
-                assert!(prev.is_none(), "atom tag {} owned by two ranks", atoms.tag[i]);
+                assert!(
+                    prev.is_none(),
+                    "atom tag {} owned by two ranks",
+                    atoms.tag[i]
+                );
             }
         }
-        assert_eq!(after.len(), before.len(), "atom id set size changed across rebalance");
+        assert_eq!(
+            after.len(),
+            before.len(),
+            "atom id set size changed across rebalance"
+        );
         for (tag, pos) in &before {
             assert_eq!(
                 after.get(tag),
@@ -1163,7 +1201,11 @@ mod tests {
 
         assert_eq!(
             domain.boundary_type,
-            [BoundaryType::Periodic, BoundaryType::Fixed, BoundaryType::Periodic],
+            [
+                BoundaryType::Periodic,
+                BoundaryType::Fixed,
+                BoundaryType::Periodic
+            ],
         );
         assert_eq!(domain.sub_domain_low, [4.0, 0.0, 0.0]);
         assert_eq!(domain.sub_domain_high, [8.0, 1.0, 1.0]);
@@ -1180,7 +1222,14 @@ mod tests {
             ..Default::default()
         };
         let types = config.boundary_types();
-        assert_eq!(types, [BoundaryType::Periodic, BoundaryType::Fixed, BoundaryType::ShrinkWrap]);
+        assert_eq!(
+            types,
+            [
+                BoundaryType::Periodic,
+                BoundaryType::Fixed,
+                BoundaryType::ShrinkWrap
+            ]
+        );
     }
 
     #[test]
@@ -1222,7 +1271,14 @@ mod tests {
         "#;
         let config: DomainConfig = toml::from_str(toml_str).unwrap();
         let types = config.boundary_types();
-        assert_eq!(types, [BoundaryType::Periodic, BoundaryType::Fixed, BoundaryType::ShrinkWrap]);
+        assert_eq!(
+            types,
+            [
+                BoundaryType::Periodic,
+                BoundaryType::Fixed,
+                BoundaryType::ShrinkWrap
+            ]
+        );
     }
 
     // ── Shrink-wrap update tests ────────────────────────────────────────────
@@ -1238,14 +1294,14 @@ mod tests {
         domain.sub_domain_high = [10.0, 10.0, 10.0];
         domain.size = [10.0, 10.0, 10.0];
         domain.sub_length = [10.0, 10.0, 10.0];
-        domain.boundary_type = [BoundaryType::Periodic, BoundaryType::Periodic, BoundaryType::ShrinkWrap];
+        domain.boundary_type = [
+            BoundaryType::Periodic,
+            BoundaryType::Periodic,
+            BoundaryType::ShrinkWrap,
+        ];
         domain.shrink_wrap_padding = 0.5;
 
-        let positions = vec![
-            [1.0, 2.0, 3.0],
-            [5.0, 5.0, 8.0],
-            [9.0, 1.0, 1.0],
-        ];
+        let positions = vec![[1.0, 2.0, 3.0], [5.0, 5.0, 8.0], [9.0, 1.0, 1.0]];
 
         let changed = super::shrink_wrap_update(&mut domain, &positions, 3);
         assert!(changed);
@@ -1270,15 +1326,15 @@ mod tests {
         domain.sub_domain_high = [10.0, 10.0, 8.5];
         domain.size = [10.0, 10.0, 8.0];
         domain.sub_length = [10.0, 10.0, 8.0];
-        domain.boundary_type = [BoundaryType::Periodic, BoundaryType::Periodic, BoundaryType::ShrinkWrap];
+        domain.boundary_type = [
+            BoundaryType::Periodic,
+            BoundaryType::Periodic,
+            BoundaryType::ShrinkWrap,
+        ];
         domain.shrink_wrap_padding = 0.5;
         domain.bounds_changed = false;
 
-        let positions = vec![
-            [1.0, 2.0, 3.0],
-            [5.0, 5.0, 8.0],
-            [9.0, 1.0, 1.0],
-        ];
+        let positions = vec![[1.0, 2.0, 3.0], [5.0, 5.0, 8.0], [9.0, 1.0, 1.0]];
 
         let changed = super::shrink_wrap_update(&mut domain, &positions, 3);
         assert!(!changed);
@@ -1288,7 +1344,11 @@ mod tests {
     #[test]
     fn shrink_wrap_no_atoms_is_noop() {
         let mut domain = Domain::new();
-        domain.boundary_type = [BoundaryType::ShrinkWrap, BoundaryType::ShrinkWrap, BoundaryType::ShrinkWrap];
+        domain.boundary_type = [
+            BoundaryType::ShrinkWrap,
+            BoundaryType::ShrinkWrap,
+            BoundaryType::ShrinkWrap,
+        ];
         domain.bounds_changed = false;
         let positions: Vec<[f64; 3]> = vec![];
 
@@ -1305,13 +1365,14 @@ mod tests {
         domain.sub_domain_high = [100.0, 100.0, 100.0];
         domain.size = [100.0, 100.0, 100.0];
         domain.sub_length = [100.0, 100.0, 100.0];
-        domain.boundary_type = [BoundaryType::ShrinkWrap, BoundaryType::ShrinkWrap, BoundaryType::ShrinkWrap];
+        domain.boundary_type = [
+            BoundaryType::ShrinkWrap,
+            BoundaryType::ShrinkWrap,
+            BoundaryType::ShrinkWrap,
+        ];
         domain.shrink_wrap_padding = 1.0;
 
-        let positions = vec![
-            [10.0, 20.0, 30.0],
-            [50.0, 60.0, 70.0],
-        ];
+        let positions = vec![[10.0, 20.0, 30.0], [50.0, 60.0, 70.0]];
 
         let changed = super::shrink_wrap_update(&mut domain, &positions, 2);
         assert!(changed);
@@ -1338,7 +1399,11 @@ mod tests {
         domain.sub_domain_high = [10.0, 10.0, 10.0];
         domain.size = [10.0, 10.0, 10.0];
         domain.sub_length = [10.0, 10.0, 10.0];
-        domain.boundary_type = [BoundaryType::Periodic, BoundaryType::Periodic, BoundaryType::ShrinkWrap];
+        domain.boundary_type = [
+            BoundaryType::Periodic,
+            BoundaryType::Periodic,
+            BoundaryType::ShrinkWrap,
+        ];
         domain.shrink_wrap_padding = 0.0; // no explicit padding
         domain.ghost_cutoff = 2.0; // should use this as fallback
 
@@ -1371,7 +1436,12 @@ mod tests {
             let lam = d.x2lamda(r);
             let back = d.lamda2x(lam);
             for k in 0..3 {
-                assert!((back[k] - r[k]).abs() < 1e-12, "roundtrip {:?} -> {:?}", r, back);
+                assert!(
+                    (back[k] - r[k]).abs() < 1e-12,
+                    "roundtrip {:?} -> {:?}",
+                    r,
+                    back
+                );
             }
         }
         // A point on the y-high face maps to lamda y = 1.
@@ -1399,13 +1469,29 @@ mod tests {
 
         // Position tolerance is precision-aware: under mixed/single, pos is stored
         // as f32 so the f64 wrap result round-trips with ~1e-7 error.
-        let pos_tol = if cfg!(feature = "precision-double") { 1e-9 } else { 1e-4 };
+        let pos_tol = if cfg!(feature = "precision-double") {
+            1e-9
+        } else {
+            1e-4
+        };
         // y wrapped down by Ly = 3.0
-        assert!((atoms.pos[0][1] - 0.03).abs() < pos_tol, "y={}", atoms.pos[0][1]);
+        assert!(
+            (atoms.pos[0][1] - 0.03).abs() < pos_tol,
+            "y={}",
+            atoms.pos[0][1]
+        );
         // x shifted by -xy = -1.2 (the tilt carried by the b lattice vector)
-        assert!((atoms.pos[0][0] - 0.8).abs() < pos_tol, "x={}", atoms.pos[0][0]);
+        assert!(
+            (atoms.pos[0][0] - 0.8).abs() < pos_tol,
+            "x={}",
+            atoms.pos[0][0]
+        );
         // velocity remapped: vx -= Δv
-        assert!((atoms.vel[0][0] - 2.0).abs() < 1e-12, "vx={}", atoms.vel[0][0]);
+        assert!(
+            (atoms.vel[0][0] - 2.0).abs() < 1e-12,
+            "vx={}",
+            atoms.vel[0][0]
+        );
         assert_eq!(atoms.image[0][1], 1);
     }
 

@@ -185,15 +185,14 @@ pub fn setup_thermo(
     for col in thermo.columns.iter() {
         if let Some(ref gname) = col.group_name {
             match groups.as_ref() {
-                Some(groups) => {
-                    groups.validate_name(gname, &format!("thermo column '{}'", col.raw))
-                }
+                Some(groups) => groups
+                    .validate_name(gname, &format!("thermo column '{}'", col.raw))
+                    .expect("thermo group references are validated during startup"),
                 None => {
-                    eprintln!(
-                        "ERROR: thermo column '{}': group '{}' not found; no groups are currently registered",
-                        col.raw, gname
+                    panic!(
+                        "thermo group reference survived startup validation: {}",
+                        col.raw
                     );
-                    std::process::exit(1);
                 }
             }
         }

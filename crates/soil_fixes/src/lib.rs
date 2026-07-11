@@ -150,19 +150,24 @@ impl Plugin for SoilFixesPlugin {
     }
 
     fn build(&self, app: &mut App) {
-        let config = app
-            .get_resource_ref::<Config>()
-            .expect("Config resource must exist before SoilFixesPlugin");
+        self.try_build(app)
+            .unwrap_or_else(|error| panic!("invalid [[pin]] configuration: {error}"));
+    }
 
-        let registry = PinRegistry {
-            pins: config.parse_array::<PinDef>("pin"),
+    fn try_build(&self, app: &mut App) -> Result<(), AppError> {
+        let registry = if let Some(config) = app.get_resource_ref::<Config>() {
+            PinRegistry {
+                pins: config
+                    .try_parse_array::<PinDef>("pin")
+                    .map_err(|error| AppError::message(error.to_string()))?,
+            }
+        } else {
+            PinRegistry { pins: Vec::new() }
         };
-
-        drop(config);
 
         if registry.pins.is_empty() {
             app.add_resource(registry);
-            return;
+            return Ok(());
         }
 
         app.add_resource(registry)
@@ -178,13 +183,16 @@ impl Plugin for SoilFixesPlugin {
         // re-enforce, ensuring FinalIntegration has f=0 and the next step's
         // InitialIntegration has v=0.
         app.add_update_system(apply_pin_post, ParticleSimScheduleSet::PostForce);
+        Ok(())
     }
 }
 
 /// Validates pin group names at setup time and prints a summary on rank 0.
 fn setup_pins(registry: Res<PinRegistry>, comm: Res<CommResource>, groups: Res<GroupRegistry>) {
     for f in &registry.pins {
-        groups.validate_name(&f.group, "fix pin");
+        groups
+            .validate_name(&f.group, "fix pin")
+            .expect("pin group names are validated before simulation setup");
     }
     if comm.rank() != 0 {
         return;

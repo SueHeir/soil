@@ -81,6 +81,7 @@ pub mod group;
 pub mod input;
 pub mod region;
 pub mod schedule;
+pub mod startup;
 pub mod neighbor;
 pub mod precision;
 pub mod tree;
@@ -116,6 +117,7 @@ pub use grass_io::{
 pub use grass_io::deep_merge;
 
 pub use schedule::*;
+pub use startup::stage_tables;
 pub use neighbor::*;
 pub use precision::{Accum, Real};
 pub use tree::{Monopole, Octree, OctreeNode};

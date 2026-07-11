@@ -254,20 +254,14 @@ pub fn read_restart(
     }
 
     let file = File::open(&filename).unwrap_or_else(|e| {
-        eprintln!("ERROR: Failed to open restart file '{}': {}", filename, e);
-        std::process::exit(1);
+        panic!("restart file disappeared after startup validation '{filename}': {e}")
     });
     let data: RestartData = match ext {
         "json" => serde_json::from_reader(std::io::BufReader::new(file)).unwrap_or_else(|e| {
-            eprintln!("ERROR: Failed to parse restart JSON '{}': {}", filename, e);
-            std::process::exit(1);
+            panic!("restart JSON changed after startup validation '{filename}': {e}")
         }),
         _ => bincode::deserialize_from(std::io::BufReader::new(file)).unwrap_or_else(|e| {
-            eprintln!(
-                "ERROR: Failed to deserialize restart bincode '{}': {}",
-                filename, e
-            );
-            std::process::exit(1);
+            panic!("restart binary changed after startup validation '{filename}': {e}")
         }),
     };
 

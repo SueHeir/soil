@@ -85,8 +85,8 @@ use grass_scheduler::prelude::*;
 use serde::Deserialize;
 
 use soil_core::{
-    Atom, CommResource, Config, GroupLookupError, GroupRegistry, ParticleSimScheduleSet, Real,
-    ScheduleSetupSet,
+    stage_tables, Atom, CommResource, Config, GroupLookupError, GroupRegistry,
+    ParticleSimScheduleSet, Real, ScheduleSetupSet,
 };
 
 /// Pins atoms in a group at their starting positions — a **hard translational
@@ -175,11 +175,19 @@ impl Plugin for SoilFixesPlugin {
         // them while the caller can still receive an AppError; the scheduled
         // system below may then treat a missing name as an internal ordering bug.
         if let Some(config) = app.get_resource_ref::<Config>() {
-            let groups = config
-                .try_parse_array::<soil_core::GroupDef>("group")
+            let groups = stage_tables(&config)
+                .map_err(|error| AppError::message(error.to_string()))?
+                .into_iter()
+                .map(Config::from_table)
+                .map(|stage| stage.try_parse_array::<soil_core::GroupDef>("group"))
+                .collect::<Result<Vec<_>, _>>()
                 .map_err(|error| AppError::message(error.to_string()))?;
             for pin in &registry.pins {
-                if pin.group != "all" && !groups.iter().any(|group| group.name == pin.group) {
+                if pin.group != "all"
+                    && !groups
+                        .iter()
+                        .any(|stage| stage.iter().any(|group| group.name == pin.group))
+                {
                     return Err(AppError::message(format!(
                         "fix pin: group '{}' is not declared in [[group]]",
                         pin.group

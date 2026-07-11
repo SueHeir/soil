@@ -1,6 +1,6 @@
 use grass_app::prelude::*;
 use grass_scheduler::prelude::*;
-use soil_core::{Config, ParticleSimScheduleSet, ScheduleSetupSet};
+use soil_core::{stage_tables, Config, ParticleSimScheduleSet, ScheduleSetupSet};
 
 use crate::thermo::parse_thermo_column;
 use crate::{
@@ -69,13 +69,21 @@ interval = 0"#,
             .map_err(|e| AppError::message(e.to_string()))?;
 
         if let Some(config) = app.get_resource_ref::<Config>() {
-            let groups = config
-                .try_parse_array::<soil_core::GroupDef>("group")
+            let groups = stage_tables(&config)
+                .map_err(|error| AppError::message(error.to_string()))?
+                .into_iter()
+                .map(Config::from_table)
+                .map(|stage| stage.try_parse_array::<soil_core::GroupDef>("group"))
+                .collect::<Result<Vec<_>, _>>()
                 .map_err(|error| AppError::message(error.to_string()))?;
             for column in thermo.columns.as_deref().unwrap_or(&[]) {
                 let parsed = parse_thermo_column(column);
                 if let Some(group) = parsed.group_name {
-                    if group != "all" && !groups.iter().any(|candidate| candidate.name == group) {
+                    if group != "all"
+                        && !groups
+                            .iter()
+                            .any(|stage| stage.iter().any(|candidate| candidate.name == group))
+                    {
                         return Err(AppError::message(format!(
                             "thermo column '{}': group '{}' is not declared in [[group]]",
                             column, group

@@ -1,31 +1,31 @@
 # SOIL
 
 <!-- disclaimer-banner -->
-> This code was fully written via **Claude 4.6,4.8 and Fable 5**, and stands as a proof of concept for a **bevy-like** ecosystem for physics simulation research, with the goal of testing if one scheduler/framework (**GRASS**) works for most scientific codes. **SOIL** and **FIELD** are particle- and mesh-based substrates for physics such as **DIRT** (DEM) or **dev_field_efvm**. Note that all other physics based repos I have start with **dev_**, as I do **NOT** know these methods. Please read, evaluate, use with a grain of salt, I have not personally read or reviewed everything here.
+> **Research-software status:** This ecosystem is AI-authored and under active evaluation. GRASS, SOIL, and DIRT are the core architecture and DEM implementation; repositories prefixed `dev_` are experimental method demonstrations outside the author's domain expertise. Treat claims according to their linked evidence and documented limitations. See [DISCLAIMER.md](DISCLAIMER.md).
 <!-- /disclaimer-banner -->
 
 
-**Write your own particle method — a force law, an SPH kernel, a peridynamic
-bond model — without hand-writing domain decomposition, halo exchange, atom
-migration, or neighbor lists. Declare your per-particle state once, and SOIL
-carries it through all of them.**
+**Write the particle method you need without making it a closed application.
+Declare per-particle state once; SOIL carries it through neighbors, migration,
+restart, and MPI, while GRASS keeps the resulting solver composable with other
+codes.**
 
-SOIL — the *Substrate for Off-lattice Interacting Lagrangians* — is the
-method-agnostic particle tier in the **GRASS → SOIL → physics** stack. It owns
-the base `Atom`, domain decomposition, ghost/halo communication, atom migration,
-and neighbor-list construction — everything *every* particle method needs
-regardless of physics — and knows nothing about contact forces, bonds, or
-damage. It rides [GRASS](https://github.com/SueHeir/grass) for the
-`App`/scheduler/coupling machinery, and [DIRT](https://github.com/SueHeir/dirt)
-(granular DEM) is the physics tier that proves it.
+A new particle method should begin with its particles and interactions — not a
+private implementation of domain decomposition, ghost exchange, atom migration,
+neighbor lists, output, and lifecycle.
 
-Everything SOIL provides is itself a GRASS **plugin** — decomposition, halo
-exchange, migration, and neighbor lists are ordinary systems and resources, not a
-privileged core. So a physics tier adds, removes, or swaps any of them the same
-way it adds its own force law, and the substrate work you'd otherwise rewrite per
-method is written once here and reused by all of them.
+SOIL — the *Substrate for Off-lattice Interacting Lagrangians* — is the shared
+particle substrate for GRASS solvers. A physics code declares its per-particle
+state through `AtomData` and writes its kernels as scheduled systems. SOIL handles
+the reusable particle infrastructure, and because that infrastructure uses the
+same GRASS resource, plugin, and schedule model as the physics, the completed
+solver can run alone or participate in a coupled application.
 
-## A particle method is one `AtomData` column plus a force function
+The point is not merely to save communication code once. It is to prevent each
+particle method from becoming another isolated executable with a different
+internal world.
+
+## One declaration is the parallel contract
 
 You extend a particle by declaring a struct of per-particle columns and deriving
 `AtomData`. Three field attributes tell the substrate *who needs each field*, and
@@ -63,6 +63,19 @@ substrate does the rest.
 
 The full semantics, invariants, and per-step ordering are in
 [The AtomData Contract](docs/SOIL_ATOMDATA_CONTRACT.md).
+
+## When SOIL is worth using
+
+Use SOIL when you are building an off-lattice particle method that may share
+infrastructure or couple with other simulation components. If the method will
+remain a small standalone calculation forever, a purpose-built loop may be
+simpler. SOIL is most valuable when the solver is intended to become one
+participant in a larger research-software ecosystem.
+
+DIRT demonstrates a full DEM tier on this substrate. The MD, SPH, and
+peridynamics examples test whether the same particle contract survives methods
+with different state and interaction semantics. Their purpose here is
+architectural: to show that the substrate boundary is not secretly DEM-specific.
 
 ## One substrate, many methods
 

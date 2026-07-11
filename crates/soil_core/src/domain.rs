@@ -506,8 +506,8 @@ boundary_z = "periodic"
     }
 
     fn build(&self, app: &mut App) {
-        self.try_build(app)
-            .unwrap_or_else(|error| panic!("invalid [domain] configuration: {error}"));
+        Config::load::<DomainConfig>(app, "domain");
+        install_domain(app);
     }
 
     fn try_build(&self, app: &mut App) -> Result<(), AppError> {
@@ -517,6 +517,12 @@ boundary_z = "periodic"
             validate_domain_config(&config, &**comm)
                 .map_err(|error| AppError::message(error.to_string()))?;
         }
+        install_domain(app);
+        Ok(())
+    }
+}
+
+fn install_domain(app: &mut App) {
         app.add_resource(Domain::new())
             .add_setup_system(
                 domain_read_input
@@ -532,8 +538,6 @@ boundary_z = "periodic"
                 pbc.label("pbc").run_if(in_state(CommState::FullRebuild)),
                 ParticleSimScheduleSet::PreExchange,
             );
-        Ok(())
-    }
 }
 
 fn boundary_type_char(bt: BoundaryType) -> char {

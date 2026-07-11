@@ -292,8 +292,8 @@ impl Plugin for DeformPlugin {
     }
 
     fn build(&self, app: &mut App) {
-        self.try_build(app)
-            .unwrap_or_else(|error| panic!("invalid [deform] configuration: {error}"));
+        Config::load::<DeformConfig>(app, "deform");
+        install_deform(app);
     }
 
     fn try_build(&self, app: &mut App) -> Result<(), AppError> {
@@ -313,6 +313,12 @@ impl Plugin for DeformPlugin {
         Config::try_load::<DeformConfig>(app, "deform")
             .map_err(|e| AppError::message(e.to_string()))?;
 
+        install_deform(app);
+        Ok(())
+    }
+}
+
+fn install_deform(app: &mut App) {
         let state = DeformState {
             axes: [None, None, None],
             shear_xy_rate: None,
@@ -328,8 +334,6 @@ impl Plugin for DeformPlugin {
         app.add_resource(state)
             .add_setup_system(setup_deform, ScheduleSetupSet::PostSetup)
             .add_update_system(apply_deform, ParticleSimScheduleSet::PreInitialIntegration);
-        Ok(())
-    }
 }
 
 /// Parse an optional axis definition from config into a runtime [`AxisDeform`].
@@ -747,6 +751,7 @@ fn apply_deform(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use grass_app::App;
     use soil_core::BoundaryType;
     use soil_core::RunState;
 
@@ -761,6 +766,25 @@ mod tests {
         atom.natoms = n as u64;
         atom.dt = 0.001;
         atom
+    }
+
+    #[test]
+    fn malformed_deform_is_returned_by_fallible_plugin_registration() {
+        let mut app = App::new();
+        app.add_resource(Config::from_str(
+            r#"[deform]
+x = { style = "erate" }
+"#,
+        ));
+
+        let error = match app.try_add_plugins(DeformPlugin) {
+            Ok(_) => panic!("malformed configuration unexpectedly registered"),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains("requires a 'rate' field"),
+            "unexpected error: {error}"
+        );
     }
 
     fn make_domain(lo: [f64; 3], hi: [f64; 3]) -> Domain {

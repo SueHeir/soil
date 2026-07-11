@@ -45,8 +45,11 @@ interval = 0"#,
     }
 
     fn build(&self, app: &mut App) {
-        self.try_build(app)
-            .unwrap_or_else(|error| panic!("invalid output configuration: {error}"));
+        Config::load::<DumpConfig>(app, "dump");
+        Config::load::<RestartConfig>(app, "restart");
+        Config::load::<VtpConfig>(app, "vtp");
+        Config::load::<ThermoConfig>(app, "thermo");
+        install_print(app);
     }
 
     fn try_build(&self, app: &mut App) -> Result<(), AppError> {
@@ -64,6 +67,12 @@ interval = 0"#,
         Config::try_load::<ThermoConfig>(app, "thermo")
             .map_err(|e| AppError::message(e.to_string()))?;
 
+        install_print(app);
+        Ok(())
+    }
+}
+
+fn install_print(app: &mut App) {
         // Built-in dump formats, registered through the same public extension
         // point (`register_format`) any plugin uses — core just ships three.
         let dump_reg = DumpRegistry::new();
@@ -89,7 +98,22 @@ interval = 0"#,
                 check_stage_end_save.before("update_cycle"),
                 ParticleSimScheduleSet::PostFinalIntegration,
             );
-        Ok(())
+}
+
+#[cfg(test)]
+mod fallible_tests {
+    use super::*;
+
+    #[test]
+    fn invalid_restart_format_is_returned_by_fallible_plugin_registration() {
+        let mut app = App::new();
+        app.add_resource(Config::from_str("[restart]\nformat = \"yaml\"\n"));
+
+        let error = match app.try_add_plugins(PrintPlugin) {
+            Ok(_) => panic!("invalid restart format unexpectedly registered"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("[restart] format"), "unexpected error: {error}");
     }
 }
 

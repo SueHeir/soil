@@ -150,8 +150,12 @@ impl Plugin for SoilFixesPlugin {
     }
 
     fn build(&self, app: &mut App) {
-        self.try_build(app)
-            .unwrap_or_else(|error| panic!("invalid [[pin]] configuration: {error}"));
+        let config = app
+            .get_resource_ref::<Config>()
+            .expect("Config resource must exist before SoilFixesPlugin");
+        let registry = PinRegistry { pins: config.parse_array::<PinDef>("pin") };
+        drop(config);
+        install_pins(app, registry);
     }
 
     fn try_build(&self, app: &mut App) -> Result<(), AppError> {
@@ -165,9 +169,15 @@ impl Plugin for SoilFixesPlugin {
             PinRegistry { pins: Vec::new() }
         };
 
+        install_pins(app, registry);
+        Ok(())
+    }
+}
+
+fn install_pins(app: &mut App, registry: PinRegistry) {
         if registry.pins.is_empty() {
             app.add_resource(registry);
-            return Ok(());
+            return;
         }
 
         app.add_resource(registry)
@@ -183,8 +193,6 @@ impl Plugin for SoilFixesPlugin {
         // re-enforce, ensuring FinalIntegration has f=0 and the next step's
         // InitialIntegration has v=0.
         app.add_update_system(apply_pin_post, ParticleSimScheduleSet::PostForce);
-        Ok(())
-    }
 }
 
 /// Validates pin group names at setup time and prints a summary on rank 0.

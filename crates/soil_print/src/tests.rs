@@ -107,7 +107,7 @@ fn thermo_systems_do_not_require_group_registry_without_group_columns() {
 // (de)serialization primitives in isolation.
 
 use soil_core::{
-    apply_permutation_in_place, Accum, Atom, AtomData, AtomDataRegistry, Domain, Real,
+    apply_permutation_in_place, Accum, Atom, AtomData, AtomDataRegistry, Domain, Input, Real,
 };
 use std::any::Any;
 
@@ -452,6 +452,68 @@ fn substrate_restart_roundtrip_bincode_bit_identical() {
 #[test]
 fn substrate_restart_roundtrip_json_bit_identical() {
     restart_file_roundtrip_case("json");
+}
+
+/// Exercise the setup system itself, rather than rebuilding its replacement
+/// atom in this test module.  In particular, periodic image counters are not
+/// persisted by the restart wire format, but `read_restart` must still provide
+/// zero-filled image rows to `ParticleStore::replace_from_restart`.
+#[test]
+fn production_read_restart_constructs_complete_zero_image_rows() {
+    let (src, src_reg) = build_source();
+    assert!(src.image.iter().any(|&image| image != [0; 3]));
+    let step = 317usize;
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let uniq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let output_dir = std::env::temp_dir().join(format!(
+        "soil_production_restart_{}_{}",
+        std::process::id(),
+        uniq
+    ));
+    let restart_dir = output_dir.join("restart");
+    fs::create_dir_all(&restart_dir).unwrap();
+
+    let config = RestartConfig {
+        interval: 1,
+        format: "bincode".to_string(),
+        read: true,
+    };
+    let data = RestartData::from_atoms(&src, &src_reg, step);
+    write_restart_inner(&data, restart_dir.to_str().unwrap(), step, 0, &config)
+        .expect("restart write");
+
+    // Run the actual production setup system.  A plain Scheduler is enough to
+    // supply its real Res/ResMut parameters without duplicating read_restart.
+    let mut scheduler = Scheduler::default();
+    scheduler.add_resource(config);
+    scheduler.add_resource(CommResource(Box::new(SingleProcessComm::new())));
+    scheduler.add_resource(Input {
+        filename: "production-restart-test.toml".to_string(),
+        output_dir: Some(output_dir.to_string_lossy().into_owned()),
+    });
+    scheduler.add_resource(Atom::new());
+    scheduler.add_resource(registry_with_column());
+    scheduler.add_resource(RunState::new());
+    scheduler.add_setup_system(read_restart, ScheduleSetupSet::PostSetup);
+    scheduler.organize_systems();
+    scheduler.setup();
+
+    let restored = scheduler.get_resource_ref::<Atom>().unwrap();
+    let registry = scheduler.get_resource_ref::<AtomDataRegistry>().unwrap();
+    let n = src.nlocal as usize;
+    assert!(restored.validate_rows(), "all Atom core rows are aligned");
+    assert!(registry.validate_rows(n), "extension rows are aligned");
+    assert_eq!(restored.image, vec![[0; 3]; n]);
+    assert_restart_fields_bit_identical(&src, &src_reg, &restored, &registry);
+    assert_eq!(
+        scheduler
+            .get_resource_ref::<RunState>()
+            .unwrap()
+            .total_cycle,
+        step
+    );
+
+    let _ = fs::remove_dir_all(&output_dir);
 }
 
 /// Force an atom migration across a subdomain boundary and assert the base

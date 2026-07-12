@@ -20,6 +20,14 @@ migration, and all-or-nothing rollback for a trailing-payload failure.
 
 ![ParticleStore facade communication validation](particle_store_facade/plots/particle_store_facade.png)
 
+## particleswith_queries
+
+Generic `ParticlesWith` typed extension-query validation: tuple order and
+mutability, optional data, preparation errors, scheduler resource access, and
+a zero-allocation hot-loop guard.
+
+![ParticlesWith query validation](particleswith_queries/plots/particleswith_queries.png)
+
 ## virial_thermo_crossrank
 
 MPI validation that `VirialStress` pair-force contributions reach the

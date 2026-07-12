@@ -1,0 +1,3 @@
+# Declarative acceptance gates for the generic particle-extension query API.
+expected_query_cases = 5
+expected_hot_loop_allocations = 0

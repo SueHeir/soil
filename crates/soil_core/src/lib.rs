@@ -84,6 +84,7 @@ pub mod domain;
 pub mod group;
 pub mod input;
 pub mod neighbor;
+pub mod partition;
 pub mod precision;
 pub mod query;
 pub mod region;
@@ -109,6 +110,7 @@ pub use comm::*;
 pub use domain::*;
 pub use group::{group_includes, Group, GroupDef, GroupLookupError, GroupPlugin, GroupRegistry};
 pub use input::{load_toml, print_banner, Config, Input, InputPlugin};
+pub use partition::ParticlePartitionDirectory;
 pub use query::*;
 pub use region::{Axis, Region, RegionSampleError, SurfaceResult};
 

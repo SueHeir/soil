@@ -634,6 +634,9 @@ fn unpack_ghost_payload(atoms: &mut Atom, registry: &AtomDataRegistry, data: &[f
 
 /// Unpack `count` migrated (non-ghost) atoms from a count-first exchange payload
 /// (no trailing count element). Mirrors [`unpack_ghost_payload`] for [`exchange`].
+// Only called from the `mpi_backend`-gated `exchange` fn; gate the definition to
+// match so a no-MPI build doesn't flag it as dead code.
+#[cfg_attr(not(feature = "mpi_backend"), allow(dead_code))]
 fn unpack_exchanged(atoms: &mut Atom, registry: &AtomDataRegistry, data: &[f64], count: usize) {
     ParticleStore::new(atoms, registry)
         .append_migrant_records(data, count)

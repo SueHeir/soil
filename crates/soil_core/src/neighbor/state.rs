@@ -175,10 +175,6 @@ impl Neighbor {
     }
 }
 
-/// Plugin that registers neighbor list construction and rebuild systems.
-///
-/// Uses spatial binning with CSR layout for O(N) expected neighbor finding.
-
 /// Classify each LOCAL atom as **boundary** (has at least one ghost neighbour,
 /// index >= `nlocal`) or **interior** (all neighbours local). Building block for
 /// interior/boundary overlap (roadmap step 4): interior forces need no fresh

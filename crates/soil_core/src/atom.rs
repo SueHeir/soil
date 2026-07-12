@@ -361,6 +361,13 @@ impl Default for AtomDataRegistry {
 }
 
 impl AtomDataRegistry {
+    /// Whether an extension of the specified concrete type is registered.
+    ///
+    /// This supports typed query preparation; ordinary callers should use
+    /// [`get`](Self::get) or [`get_mut`](Self::get_mut).
+    pub(crate) fn has_type(&self, id: TypeId) -> bool {
+        self.stores.iter().any(|(stored, _)| *stored == id)
+    }
     /// Create an empty registry with no extensions registered.
     pub fn new() -> Self {
         AtomDataRegistry {

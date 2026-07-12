@@ -25,6 +25,25 @@ The point is not merely to save communication code once. It is to prevent each
 particle method from becoming another isolated executable with a different
 internal world.
 
+## From one particle solver to a coupled participant
+
+SOIL owns the particle data model and its migration/halo rules. GRASS holds the
+registered `AtomData` resources and schedules their systems; it does not define
+what a particle is. A coupling plugin can therefore mount an unchanged SOIL
+solver beside a FIELD solver and translate between their public resources.
+
+The local teaching case is
+[`hello_dem_cfd`](https://github.com/SueHeir/dev_couple_dem_cfd/tree/main/examples/hello_dem_cfd).
+The distributed counterpart is the runnable
+[`routed_3x2`](https://github.com/SueHeir/dev_couple_dem_cfd/blob/main/crates/dem_cfd/tests/routed_3x2.rs)
+test: one TOML topology assigns 3 DEM and 2 CFD ranks to the same binary, while
+the coupling layer uses particle positions and FIELD ownership to address each
+record. GRASS transports those records but knows neither particles nor meshes.
+
+Cross-solver access stays on the parent between child ticks or exported
+scheduler seams. Systems inside a SOIL child continue to use ordinary
+`Res`/`ResMut` for their own resources.
+
 ## One declaration is the parallel contract
 
 You extend a particle by declaring a struct of per-particle columns and deriving

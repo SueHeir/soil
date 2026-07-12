@@ -85,6 +85,7 @@ pub mod group;
 pub mod input;
 pub mod neighbor;
 pub mod precision;
+pub mod query;
 pub mod region;
 pub mod schedule;
 pub mod startup;
@@ -108,6 +109,7 @@ pub use comm::*;
 pub use domain::*;
 pub use group::{group_includes, Group, GroupDef, GroupLookupError, GroupPlugin, GroupRegistry};
 pub use input::{load_toml, print_banner, Config, Input, InputPlugin};
+pub use query::*;
 pub use region::{Axis, Region, RegionSampleError, SurfaceResult};
 
 // Multi-stage run machinery now lives in grass_io. Re-exported so

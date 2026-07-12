@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Run the typed particle-query checks and plot measured acceptance gates."""
+"""Run the typed particle-query checks and plot their measured results.
+
+Invoke with ``uv run --with matplotlib python`` so plotting does not depend on
+whichever Python happens to be installed on the host.
+"""
 import csv
 import os
 import re
@@ -43,9 +47,29 @@ def load_gate():
 def main():
     gate = load_gate()
     print("[test] generic tuple/optional/access validation")
-    unit = run(["cargo", "test", "-p", "soil_core", "query"])
+    unit = run([
+        "cargo",
+        "test",
+        "-p",
+        "soil_core",
+        "--no-default-features",
+        "--features",
+        "precision-double",
+        "--lib",
+        "query::tests::",
+    ])
     print("[test] zero-allocation hot-loop guard")
-    hot = run(["cargo", "test", "-p", "soil_core", "--test", "query_hot_loop"])
+    hot = run([
+        "cargo",
+        "test",
+        "-p",
+        "soil_core",
+        "--no-default-features",
+        "--features",
+        "precision-double",
+        "--test",
+        "query_hot_loop",
+    ])
     observed_cases = passed_count(unit)
     if observed_cases != gate["expected_query_cases"] or "1 passed" not in hot:
         raise SystemExit("ParticlesWith acceptance gate failed")

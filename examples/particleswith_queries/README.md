@@ -10,8 +10,12 @@ allocations.
 Run from the repository root:
 
 ```sh
-python examples/particleswith_queries/sweep.py
+uv run --with matplotlib python examples/particleswith_queries/sweep.py
 ```
+
+`uv` supplies the plotting interpreter and `matplotlib`; the driver itself
+selects SOIL's non-MPI, precision-double Cargo configuration, so it does not
+depend on a system MPI toolchain.
 
 ![ParticlesWith acceptance checks](plots/particleswith_queries.png)
 

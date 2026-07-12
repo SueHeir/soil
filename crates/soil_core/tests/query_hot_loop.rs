@@ -1,8 +1,8 @@
 //! Integration-level allocation guard for `ParticlesWith`.
 
 use std::{
-    any::{Any, TypeId},
     alloc::{GlobalAlloc, Layout, System},
+    any::{Any, TypeId},
     cell::{Cell, RefCell},
     collections::HashMap,
 };

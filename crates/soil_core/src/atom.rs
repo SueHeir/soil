@@ -107,33 +107,43 @@ pub const ATOM_PACK_SIZE: usize = 17;
 ///
 /// let mut app = App::new();
 /// app.add_plugins(AtomPlugin);            // registers the AtomDataRegistry
-/// register_atom_data!(app, Charge::default());
+/// register_atom_data!(&mut app, Charge::default());
 /// ```
 #[macro_export]
 macro_rules! register_atom_data {
-    ($app:expr, $value:expr) => {
-        let atom_count =
-            if let Some(cell) = $app.get_mut_resource(::std::any::TypeId::of::<$crate::Atom>()) {
-                cell.borrow()
-                    .downcast_ref::<$crate::Atom>()
-                    .expect("Failed to downcast Atom — this is a bug in SOIL")
-                    .len()
-            } else {
-                panic!("Atom not found — AtomPlugin must be added first");
-            };
-        if let Some(cell) =
-            $app.get_mut_resource(::std::any::TypeId::of::<$crate::AtomDataRegistry>())
-        {
-            let mut binder = cell.borrow_mut();
-            binder
-                .downcast_mut::<$crate::AtomDataRegistry>()
-                .expect("Failed to downcast AtomDataRegistry — this is a bug in SOIL")
-                .try_register($value, atom_count)
-                .unwrap_or_else(|error| panic!("failed to register AtomData: {error}"));
-        } else {
-            panic!("AtomDataRegistry not found — AtomPlugin must be added first");
-        }
+    (&mut $app:ident, $value:expr) => {
+        $crate::register_atom_data_in_app(&mut $app, $value)
     };
+    ($app:expr, $value:expr) => {
+        $crate::register_atom_data_in_app($app, $value)
+    };
+}
+
+/// Register an extension while deriving its required row count from the
+/// authoritative [`Atom`] resource in `app`.
+///
+/// This is the function behind [`register_atom_data!`]. It is public only so
+/// plugin crates can register data during setup; it intentionally does not
+/// accept a caller-supplied row count.
+pub fn register_atom_data_in_app<T: AtomData + 'static>(app: &mut App, data: T) {
+    let atom_count = if let Some(cell) = app.get_mut_resource(TypeId::of::<Atom>()) {
+        cell.borrow()
+            .downcast_ref::<Atom>()
+            .expect("Failed to downcast Atom — this is a bug in SOIL")
+            .len()
+    } else {
+        panic!("Atom not found — AtomPlugin must be added first");
+    };
+    if let Some(cell) = app.get_mut_resource(TypeId::of::<AtomDataRegistry>()) {
+        let mut binder = cell.borrow_mut();
+        binder
+            .downcast_mut::<AtomDataRegistry>()
+            .expect("Failed to downcast AtomDataRegistry — this is a bug in SOIL")
+            .try_register(data, atom_count)
+            .unwrap_or_else(|error| panic!("failed to register AtomData: {error}"));
+    } else {
+        panic!("AtomDataRegistry not found — AtomPlugin must be added first");
+    }
 }
 
 /// Apply `perm[0..n]` to `values[0..n]` in place, with `perm[new_i] = old_i`.
@@ -437,9 +447,23 @@ impl AtomDataRegistry {
         }
     }
 
+    /// Register an extension against the supplied live core store.
+    ///
+    /// Unlike the internal registration primitive, this API never accepts a
+    /// caller-provided row count: the required count comes directly from
+    /// `atoms`.  Use it only while setting up a matched Atom/registry pair;
+    /// regular plugin setup should prefer [`register_atom_data!`].
+    pub fn register_for_atoms<T: AtomData + 'static>(
+        &mut self,
+        data: T,
+        atoms: &Atom,
+    ) -> Result<(), AtomDataRegistrationError> {
+        self.try_register(data, atoms.len())
+    }
+
     /// Register a new extension, enforcing one row for every current atom.
     /// Empty stores are default-filled; nonempty stores must already match.
-    pub fn try_register<T: AtomData + 'static>(
+    pub(crate) fn try_register<T: AtomData + 'static>(
         &mut self,
         mut data: T,
         atom_count: usize,
@@ -2241,7 +2265,7 @@ mod tests {
             atoms.push_test_atom(1, [0.0; 3], 1.0, 1.0);
             atoms.push_test_atom(2, [1.0; 3], 1.0, 1.0);
         }
-        register_atom_data!(app, DerivedRows::default());
+        register_atom_data!(&mut app, DerivedRows::default());
         let cell = app
             .get_mut_resource(TypeId::of::<AtomDataRegistry>())
             .unwrap();

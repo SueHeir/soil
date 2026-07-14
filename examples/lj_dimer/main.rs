@@ -187,7 +187,7 @@ skin_fraction = 1.3
         .add_plugins(CommunicationPlugin);
 
     // Register the non-DEM per-atom column (must come after AtomPlugin).
-    register_atom_data!(app, LjEnergy::default());
+    register_atom_data!(&mut app, LjEnergy::default());
 
     // Pairwise LJ + damping in the Force phase; Verlet brackets it.
     app.add_update_system(lj_force_and_damp, ParticleSimScheduleSet::Force);

@@ -233,7 +233,8 @@ fn fixture_atoms() -> (
 /// Register a `GenericColumn` on a fresh registry.
 fn registry_with_column() -> AtomDataRegistry {
     let mut reg = AtomDataRegistry::new();
-    reg.try_register(GenericColumn::default(), 0).unwrap();
+    reg.register_for_atoms(GenericColumn::default(), &Atom::new())
+        .unwrap();
     reg
 }
 

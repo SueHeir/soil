@@ -7,7 +7,7 @@ use crate::{
 };
 use grass_app::prelude::*;
 use grass_scheduler::prelude::*;
-use soil_core::{Config, ParticleSimScheduleSet, ScheduleSetupSet};
+use soil_core::{Config, ParticleSimScheduleSet, ScheduleSetupSet, UPDATE_CYCLE};
 
 /// Main output plugin — registers thermo, dump, restart, and VTP systems.
 ///
@@ -79,7 +79,7 @@ fn install_print(app: &mut App) {
         .add_update_system(dump_atoms, ParticleSimScheduleSet::PostFinalIntegration)
         .add_update_system(write_restart, ParticleSimScheduleSet::PostFinalIntegration)
         .add_update_system(
-            check_stage_end_save.before("update_cycle"),
+            check_stage_end_save.before(UPDATE_CYCLE),
             ParticleSimScheduleSet::PostFinalIntegration,
         );
 }

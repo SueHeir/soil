@@ -140,6 +140,10 @@ pub fn verlet_schedule_warnings(phase_names: &[&str]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use grass_scheduler::prelude::*;
+
+    fn schedule_probe() {}
+    fn schedule_consumer() {}
 
     #[test]
     fn warns_no_force_systems() {
@@ -194,5 +198,67 @@ mod tests {
             "Expected no warnings for custom schedule, got: {:?}",
             warnings
         );
+    }
+
+    #[test]
+    fn public_system_keys_preserve_stable_schedule_names() {
+        assert_eq!(crate::DOMAIN_READ_INPUT.name(), "domain_read_input");
+        assert_eq!(crate::SHRINK_WRAP.name(), "shrink_wrap");
+        assert_eq!(crate::PBC.name(), "pbc");
+        assert_eq!(crate::NEIGHBOR_SETUP.name(), "neighbor_setup");
+        assert_eq!(crate::DECIDE_REBUILD.name(), "decide_rebuild");
+        assert_eq!(crate::SORT_ATOMS.name(), "sort_atoms");
+        assert_eq!(crate::BORDERS.name(), "borders");
+        assert_eq!(crate::EXCHANGE.name(), "exchange");
+        assert_eq!(crate::REVERSE_SEND_FORCE.name(), "reverse_send_force");
+        assert_eq!(crate::UPDATE_CYCLE.name(), "update_cycle");
+    }
+
+    #[test]
+    fn required_typed_provider_is_validated() {
+        let panic = std::panic::catch_unwind(|| {
+            let mut scheduler = Scheduler::default();
+            scheduler.add_update_system(
+                schedule_probe.requires(crate::PBC),
+                ParticleSimScheduleSet::PreExchange,
+            );
+            scheduler.organize_systems();
+        })
+        .expect_err("missing required typed provider must fail schedule validation");
+
+        let message = panic
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| panic.downcast_ref::<&str>().copied())
+            .unwrap_or("non-string panic");
+        assert!(
+            message.contains("pbc"),
+            "unexpected validation error: {message}"
+        );
+    }
+
+    #[test]
+    fn required_typed_provider_orders_successfully() {
+        let mut scheduler = Scheduler::default();
+        scheduler.add_update_system(
+            schedule_probe.label(crate::PBC),
+            ParticleSimScheduleSet::PreExchange,
+        );
+        scheduler.add_update_system(
+            schedule_consumer.requires(crate::PBC),
+            ParticleSimScheduleSet::PreExchange,
+        );
+        scheduler.organize_systems();
+    }
+
+    #[test]
+    fn substrate_plugins_register_their_required_typed_schedule_seams() {
+        let mut app = grass_app::App::new();
+        app.add_plugins(crate::AtomPlugin)
+            .add_plugins(crate::DomainPlugin)
+            .add_plugins(crate::NeighborPlugin)
+            .add_plugins(crate::CommunicationPlugin);
+
+        app.prepare();
     }
 }

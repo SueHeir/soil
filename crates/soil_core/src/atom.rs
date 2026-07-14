@@ -340,6 +340,39 @@ impl std::fmt::Display for ParticleStoreError {
 
 impl std::error::Error for ParticleStoreError {}
 
+/// Assert the complete particle-store invariant at a phase boundary.
+///
+/// This is intentionally a debug-build check: production force and communication
+/// kernels keep their direct SoA access and do not pay a per-step scan. Boundary
+/// systems call it before handing rows to communication or rebuild code, where a
+/// violated invariant would otherwise become an indexing error far from the
+/// structural mutation that caused it.
+#[cfg(debug_assertions)]
+pub(crate) fn debug_assert_particle_invariant(
+    atoms: &Atom,
+    registry: &AtomDataRegistry,
+    boundary: &str,
+) {
+    let rows = atoms.len();
+    let ownership = (atoms.nlocal as usize).checked_add(atoms.nghost as usize) == Some(rows);
+    assert!(
+        atoms.validate_rows() && registry.validate_rows(rows) && ownership,
+        "particle invariant violated at {boundary}: core_rows={rows}, nlocal={}, nghost={}, extensions_aligned={}",
+        atoms.nlocal,
+        atoms.nghost,
+        registry.validate_rows(rows),
+    );
+}
+
+#[cfg(not(debug_assertions))]
+#[inline]
+pub(crate) fn debug_assert_particle_invariant(
+    _atoms: &Atom,
+    _registry: &AtomDataRegistry,
+    _boundary: &str,
+) {
+}
+
 // ── AtomDataRegistry ─────────────────────────────────────────────────────────
 
 /// Dynamic registry of [`AtomData`] extensions, keyed by `TypeId`.
@@ -1499,12 +1532,15 @@ impl Plugin for AtomPlugin {
 /// Truncate ghost atoms before the next communication phase.
 /// Gated by `run_if(in_state(CommState::FullRebuild))` — only runs on full rebuild steps.
 pub fn remove_ghost_atoms(mut atoms: ResMut<Atom>, registry: Res<AtomDataRegistry>) {
+    debug_assert_particle_invariant(&atoms, &registry, "pre-rebuild ghost removal");
     ParticleStore::new(&mut atoms, &registry)
         .discard_ghosts()
         .expect("AtomPlugin found misaligned particle columns");
+    debug_assert_particle_invariant(&atoms, &registry, "post-rebuild ghost removal");
 }
 
 fn zero_all_forces(mut atoms: ResMut<Atom>, registry: Res<AtomDataRegistry>) {
+    debug_assert_particle_invariant(&atoms, &registry, "force reset");
     let n = atoms.len();
     atoms
         .force
@@ -2075,6 +2111,24 @@ mod tests {
             Err(ParticleStoreError::InvalidStructuralOperation)
         );
         assert!(wire.is_empty());
+    }
+
+    #[test]
+    #[should_panic(expected = "particle invariant violated at deliberate test boundary")]
+    fn debug_boundary_check_reports_extension_row_desynchronization() {
+        let mut atoms = Atom::new();
+        atoms.push_test_atom(10, [0.0; 3], 1.0, 1.0);
+        atoms.nlocal = 1;
+        let mut registry = AtomDataRegistry::new();
+        registry
+            .try_register(ManualRows { rows: vec![4.0] }, atoms.len())
+            .unwrap();
+
+        // This simulates a legacy/out-of-band extension mutation. It is not a
+        // supported structural route; the debug boundary identifies it before
+        // communication can index a mismatched row.
+        registry.get_mut::<ManualRows>().unwrap().rows.push(9.0);
+        debug_assert_particle_invariant(&atoms, &registry, "deliberate test boundary");
     }
 
     #[test]

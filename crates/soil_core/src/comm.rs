@@ -24,8 +24,8 @@ pub use grass_mpi::{finalize_mpi, CommBackend, CommResource, SendRecvOp, SingleP
 pub use grass_mpi::{get_mpi_world, MpiCommBackend};
 
 use crate::{
-    Accum, Atom, AtomDataRegistry, CommState, Config, Domain, Neighbor, ParticleSimScheduleSet,
-    ParticleStore, Real, ScheduleSetupSet,
+    debug_assert_particle_invariant, Accum, Atom, AtomDataRegistry, CommState, Config, Domain,
+    Neighbor, ParticleSimScheduleSet, ParticleStore, Real, ScheduleSetupSet,
 };
 
 /// Type-level label for [`borders`].
@@ -1158,6 +1158,7 @@ pub fn forward_comm_borders(
     registry: Res<AtomDataRegistry>,
     mut buffers: ResMut<CommBuffers>,
 ) {
+    debug_assert_particle_invariant(&atoms, &registry, "forward ghost communication (entry)");
     let mut pool = std::mem::take(&mut buffers.forward_scratch);
     match config.forward_precision {
         ForwardCommPrecision::F64 => forward_comm(&mut atoms, &registry, &topo, &**comm, &mut pool),
@@ -1166,6 +1167,7 @@ pub fn forward_comm_borders(
         }
     }
     buffers.forward_scratch = pool;
+    debug_assert_particle_invariant(&atoms, &registry, "forward ghost communication (exit)");
 }
 
 /// Forward ghost comm that runs `overlap(atoms)` *while the first round's swaps are
@@ -1278,6 +1280,7 @@ pub fn borders(
     registry: Res<AtomDataRegistry>,
     mut buffers: ResMut<CommBuffers>,
 ) {
+    debug_assert_particle_invariant(&atoms, &registry, "ghost rebuild (entry)");
     let mut send_buff = std::mem::take(&mut buffers.border_send_buff);
     let mut recv_buff = std::mem::take(&mut buffers.border_recv_buff);
 
@@ -1472,6 +1475,7 @@ pub fn borders(
 
     buffers.border_send_buff = send_buff;
     buffers.border_recv_buff = recv_buff;
+    debug_assert_particle_invariant(&atoms, &registry, "ghost rebuild (exit)");
 }
 
 // ── Unified reverse send force ────────────────────────────────────────────────
@@ -1732,6 +1736,7 @@ pub fn exchange(
     registry: Res<AtomDataRegistry>,
     mut buffers: ResMut<CommBuffers>,
 ) {
+    debug_assert_particle_invariant(&atoms, &registry, "particle exchange (entry)");
     let decomp = comm.processor_decomposition();
 
     // Reuse persistent exchange buffers: lo, hi, and a same-neighbor aggregate
@@ -1974,6 +1979,7 @@ pub fn exchange(
             comm.rank()
         );
     }
+    debug_assert_particle_invariant(&atoms, &registry, "particle exchange (exit)");
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

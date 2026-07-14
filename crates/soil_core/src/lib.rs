@@ -21,6 +21,10 @@
 //! migration go through [`ParticleStore`]; the raw core/registry structural
 //! helpers are crate-private. Read-only access and direct mutable access to an
 //! existing row's SoA value remain available for hot kernels.
+//! Debug builds also check the full row and local/ghost partition invariant at
+//! force-reset and communication/rebuild boundaries, so an unsafe or legacy
+//! out-of-band mutation fails at its next substrate boundary rather than
+//! silently corrupting a later kernel.
 //!
 //! ## Migrating construction code
 //!

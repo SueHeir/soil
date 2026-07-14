@@ -58,9 +58,9 @@ impl RestartData {
     ///
     /// Only local atoms (indices `0..nlocal`) are included; ghost atoms are excluded.
     pub(crate) fn from_atoms(atoms: &Atom, registry: &AtomDataRegistry, step: usize) -> Self {
-        let nlocal = atoms.nlocal as usize;
+        let nlocal = atoms.nlocal() as usize;
         RestartData {
-            natoms: atoms.natoms,
+            natoms: atoms.natoms(),
             total_cycle: step,
             dt: atoms.dt,
             tag: atoms.tag[..nlocal].to_vec(),

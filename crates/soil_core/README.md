@@ -51,6 +51,25 @@ app.run();
 
 Plugins register per-atom data through the `AtomDataRegistry`; use `#[derive(AtomData)]` (from `soil_derive`) to extend `Atom` with custom fields.
 
+## Particle-store migration
+
+`ParticleStore` is the public structural boundary for `Atom` plus registered
+`AtomData` columns. Use it for insertion, removal, ghost rebuilding, spatial
+permutation, migration, and restart replacement. The matching raw operations
+are crate-private, preventing a caller from changing core and extension row
+counts independently. The extension trait's row-changing callbacks are also
+`unsafe`, so a safe `AtomDataRegistry::get_mut` borrow retains existing-row
+kernel access but cannot invoke a structural callback. Force and analysis
+kernels retain direct SoA access to existing rows, including `ParticlesWith`
+views; changing a value in an existing row is not a structural operation.
+
+Downstream code that only reads ownership should use `Atom::nlocal()`,
+`Atom::nghost()`, and `Atom::natoms()`. Register a late extension with
+`AtomDataRegistry::register_for_atoms(data, &atom)` so its default rows are
+backfilled against the live core store; do not supply a separate row count.
+Only extension-free test fixtures may use `Atom::set_layout_unchecked`, and
+must establish a complete core layout before any extension is registered.
+
 ## Features
 
 - `mpi_backend` (default): Enable MPI; disable for serial-only builds

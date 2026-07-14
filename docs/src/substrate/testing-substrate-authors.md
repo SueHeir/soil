@@ -27,9 +27,11 @@ Add substrate plugins explicitly:
   accumulation. In serial tests, its default backend is enough.
 
 Register method state through `register_atom_data!` after `AtomPlugin` has
-installed the registry. Seed local particles with `Atom::push_test_atom`, then
-set `nlocal` and `natoms`; `push_test_atom` appends base columns only, so any
-registered extension columns must be extended to the same local length.
+installed the registry. Seed local particles through `ParticleStore`; each
+append updates the core, every registered extension, and the local ownership
+count together. `Atom::push_test_atom` remains an explicitly unsafe legacy
+fixture helper only for a core-only store; it must not be used after extension
+registration.
 
 Schedule systems into the phase that matches their role:
 
@@ -59,7 +61,7 @@ use grass_scheduler::prelude::*;
 use soil_core::{
     register_atom_data, verlet_schedule_warnings, Atom, AtomData, AtomDataRegistry, AtomPlugin,
     CommunicationPlugin, Config, DomainPlugin, InputPlugin, Neighbor, NeighborPlugin,
-    ParticleSimScheduleSet, ScheduleSetupSet,
+    ParticleSimScheduleSet, ParticleStore, ScheduleSetupSet,
 };
 use soil_derive::AtomData;
 
@@ -140,28 +142,29 @@ skin_fraction = 1.2
     app.set_warning_fn(verlet_schedule_warnings);
 
     {
-        let cell = app
+        let atom_cell = app
             .get_mut_resource(TypeId::of::<Atom>())
             .expect("AtomPlugin registers Atom");
-        let mut binder = cell.borrow_mut();
-        let atoms = binder.downcast_mut::<Atom>().unwrap();
-
-        atoms.push_test_atom(10, [0.25, 0.5, 0.5], 0.30, 1.0);
-        atoms.push_test_atom(20, [0.50, 0.5, 0.5], 0.30, 1.0);
-        atoms.nlocal = 2;
-        atoms.natoms = 2;
-    }
-
-    {
-        let cell = app
+        let registry_cell = app
             .get_mut_resource(TypeId::of::<AtomDataRegistry>())
             .expect("AtomPlugin registers AtomDataRegistry");
-        let mut binder = cell.borrow_mut();
-        let registry = binder.downcast_mut::<AtomDataRegistry>().unwrap();
-        let mut marker = registry.get_mut::<Marker>().unwrap();
+        let mut atom_binder = atom_cell.borrow_mut();
+        let atoms = atom_binder.downcast_mut::<Atom>().unwrap();
+        let registry_binder = registry_cell.borrow();
+        let registry = registry_binder.downcast_ref::<AtomDataRegistry>().unwrap();
 
-        marker.phase.extend([2.0, 3.0]);
-        marker.work.resize(2, 0.0);
+        let mut particles = ParticleStore::new(atoms, registry);
+        for (tag, pos) in [(10, [0.25, 0.5, 0.5]), (20, [0.50, 0.5, 0.5])] {
+            particles.push_default_local(2).unwrap();
+            let i = particles.atoms().len() - 1;
+            let atom = particles.atoms_mut();
+            atom.tag[i] = tag;
+            atom.pos[i] = pos;
+            atom.cutoff_radius[i] = 0.30;
+        }
+
+        let mut marker = registry.get_mut::<Marker>().unwrap();
+        marker.phase.copy_from_slice(&[2.0, 3.0]);
     }
 
     app.prepare();
@@ -178,9 +181,10 @@ skin_fraction = 1.2
 
 Keep test fixtures small and declarative. Inline TOML is fine for unit tests;
 example configs should live as `examples/<name>/config.toml`, not as scripts.
-Use `push_test_atom` only for hand-built tests and examples where the atom
-population is part of the fixture. For production-style examples, prefer a
-plain config/data file plus the same plugin path the user will run.
+Use `ParticleStore` for hand-built fixtures once an extension is registered.
+`push_test_atom` is only for an explicitly unsafe core-only fixture. For
+production-style examples, prefer a plain config/data file plus the same plugin
+path the user will run.
 
 When a test needs a new per-particle quantity, put it in a downstream
 `AtomData` extension. Do not add method-specific fields to `Atom`; SOIL's base

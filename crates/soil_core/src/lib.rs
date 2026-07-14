@@ -17,13 +17,21 @@
 //! vectors is indexed by the same atom index `i`.** The invariant the whole
 //! crate rests on: any *structural* operation must be applied identically across
 //! the base [`Atom`] **and** every registered extension, so the arrays never
-//! desync. The structural ops are [`swap_remove`](Atom::swap_remove) (remove one
-//! atom), `apply_permutation` (spatial re-sort), and `truncate` (drop ghosts) —
-//! mirrored on the registry by
-//! [`swap_remove_all`](AtomDataRegistry::swap_remove_all),
-//! [`apply_permutation_all`](AtomDataRegistry::apply_permutation_all), and
-//! [`truncate_all`](AtomDataRegistry::truncate_all). A new extension gets this
-//! for free from `#[derive(AtomData)]`.
+//! desync. Public construction, removal, ghost rebuild, permutation, and
+//! migration go through [`ParticleStore`]; the raw core/registry structural
+//! helpers are crate-private. Read-only access and direct mutable access to an
+//! existing row's SoA value remain available for hot kernels.
+//! Debug builds also check the full row and local/ghost partition invariant at
+//! force-reset and communication/rebuild boundaries, so an unsafe or legacy
+//! out-of-band mutation fails at its next substrate boundary rather than
+//! silently corrupting a later kernel.
+//!
+//! ## Migrating construction code
+//!
+//! Register extensions during setup, then use [`ParticleStore`] for any change
+//! in particle count or ordering. Do not push, truncate, swap-remove, or
+//! permute base and extension vectors independently. Existing-row kernels may
+//! continue to use the public SoA columns and typed [`ParticlesWith`] queries.
 //!
 //! ## Local atoms and ghosts
 //!

@@ -101,7 +101,7 @@ fn print_vtp_inner(
     let mut file = File::create(&filename)?;
 
     let n = atoms.len();
-    let nlocal = atoms.nlocal as usize;
+    let nlocal = atoms.nlocal() as usize;
 
     // XML header and PolyData opening
     write!(&mut file, "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<VTKFile type=\"PolyData\" version=\"0.1\" byte_order=\"LittleEndian\">\n<PolyData>\n")?;

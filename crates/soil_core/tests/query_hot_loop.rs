@@ -8,7 +8,7 @@ use std::{
 };
 
 use grass_scheduler::SystemParam;
-use soil_core::{AtomData, AtomDataRegistry, ParticlesWith, Read, Write};
+use soil_core::{Atom, AtomData, AtomDataRegistry, ParticleStore, ParticlesWith, Read, Write};
 use soil_derive::AtomData as DeriveAtomData;
 
 struct CountingAllocator;
@@ -46,12 +46,17 @@ struct Velocity {
 
 #[test]
 fn particles_with_hot_loop_allocates_nothing() {
+    let mut atoms = Atom::new();
     let mut registry = AtomDataRegistry::new();
+    {
+        let mut store = ParticleStore::new(&mut atoms, &registry);
+        store.push_default_local(1).unwrap();
+    }
     registry
-        .try_register(Position { values: vec![1.0] }, 1)
+        .register_for_atoms(Position { values: vec![1.0] }, &atoms)
         .unwrap();
     registry
-        .try_register(Velocity { values: vec![2.0] }, 1)
+        .register_for_atoms(Velocity { values: vec![2.0] }, &atoms)
         .unwrap();
     let resources = vec![RefCell::new(Box::new(registry) as Box<dyn Any>)];
     let index = 0;

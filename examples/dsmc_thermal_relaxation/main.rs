@@ -23,7 +23,8 @@ use grass_app::prelude::*;
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use serde::Deserialize;
 use soil_core::{
-    Atom, AtomPlugin, CommunicationPlugin, Config, DomainPlugin, Neighbor, NeighborPlugin,
+    Atom, AtomDataRegistry, AtomPlugin, CommunicationPlugin, Config, DomainPlugin, Neighbor,
+    NeighborPlugin, ParticleStore,
 };
 
 #[derive(Deserialize)]
@@ -60,38 +61,42 @@ fn seed_atoms(app: &mut App, cfg: DsmcConfig) {
     let mut rng = StdRng::seed_from_u64(cfg.seed);
     let cell_width = 1.0 / cfg.cells_x as f64;
     let n = cfg.cells_x * cfg.particles_per_cell;
+    let registry_cell = app
+        .resource_cell(TypeId::of::<AtomDataRegistry>())
+        .expect("AtomPlugin registers AtomDataRegistry before prepare");
+    let registry_binder = registry_cell.borrow();
+    let registry = registry_binder.downcast_ref::<AtomDataRegistry>().unwrap();
     let cell = app
-        .get_mut_resource(TypeId::of::<Atom>())
+        .resource_cell(TypeId::of::<Atom>())
         .expect("AtomPlugin registers Atom before prepare");
     let mut binder = cell.borrow_mut();
     let atoms = binder.downcast_mut::<Atom>().unwrap();
-    atoms.reserve(n);
     atoms.dt = 1.0;
+    let mut store = ParticleStore::new(atoms, registry);
+    store.reserve(n);
 
     for c in 0..cfg.cells_x {
         for p in 0..cfg.particles_per_cell {
             let tag = (c * cfg.particles_per_cell + p) as u32;
             let fx = (p as f64 + 0.5) / cfg.particles_per_cell as f64;
-            atoms.push_test_atom(
-                tag,
-                [
-                    (c as f64 + fx) * cell_width,
-                    0.5 * cell_width,
-                    0.5 * cell_width,
-                ],
-                0.5 * cell_width,
-                1.0,
-            );
-            let i = atoms.len() - 1;
+            store.push_default_local(n as u64).unwrap();
+            let i = store.atoms().len() - 1;
+            drop(store);
+            atoms.tag[i] = tag;
+            atoms.pos[i] = [
+                ((c as f64 + fx) * cell_width) as soil_core::Real,
+                (0.5 * cell_width) as soil_core::Real,
+                (0.5 * cell_width) as soil_core::Real,
+            ];
+            atoms.cutoff_radius[i] = (0.5 * cell_width) as soil_core::Real;
             atoms.vel[i] = [
                 gaussian(&mut rng, cfg.tx0.sqrt()) as soil_core::Real,
                 gaussian(&mut rng, cfg.ty0.sqrt()) as soil_core::Real,
                 gaussian(&mut rng, cfg.tz0.sqrt()) as soil_core::Real,
             ];
+            store = ParticleStore::new(atoms, registry);
         }
     }
-    atoms.nlocal = n as u32;
-    atoms.natoms = n as u64;
 }
 
 fn soil_cells(neighbor: &Neighbor, nlocal: usize) -> Vec<Vec<usize>> {
@@ -166,7 +171,7 @@ fn collide_cell(
 }
 
 fn temperatures(atoms: &Atom) -> [f64; 3] {
-    let n = atoms.nlocal as usize;
+    let n = atoms.nlocal() as usize;
     let mut mean = [0.0; 3];
     for v in atoms.vel[..n].iter() {
         mean[0] += v[0] as f64;
@@ -204,9 +209,10 @@ fn fit_decay(collision_time: &[f64], ratio: &[f64]) -> f64 {
 }
 
 fn main() {
-    let cfg_path = env::args_os().nth(1).map(PathBuf::from).unwrap_or_else(|| {
-        PathBuf::from("examples/dsmc_thermal_relaxation/cfg.toml")
-    });
+    let cfg_path = env::args_os()
+        .nth(1)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("examples/dsmc_thermal_relaxation/cfg.toml"));
     let toml = fs::read_to_string(&cfg_path).expect("read declarative TOML case file");
     let case: CaseFile = toml::from_str(&toml).expect("parse [dsmc] case config");
     let cfg = case.dsmc;
@@ -221,7 +227,7 @@ fn main() {
     app.prepare();
     app.run();
 
-    let nlocal = app.get_resource_ref::<Atom>().unwrap().nlocal as usize;
+    let nlocal = app.get_resource_ref::<Atom>().unwrap().nlocal() as usize;
     let cells = {
         let neighbor = app.get_resource_ref::<Neighbor>().unwrap();
         soil_cells(&neighbor, nlocal)

@@ -364,7 +364,7 @@ pub fn derive_atom_data(input: TokenStream) -> TokenStream {
 
             fn len(&self) -> usize { #first_len }
 
-            fn push_default(&mut self) {
+            unsafe fn push_default(&mut self) {
                 #(#default_stmts)*
             }
 
@@ -373,11 +373,11 @@ pub fn derive_atom_data(input: TokenStream) -> TokenStream {
                 Ok(())
             }
 
-            fn truncate(&mut self, n: usize) {
+            unsafe fn truncate(&mut self, n: usize) {
                 #(#truncate_stmts)*
             }
 
-            fn swap_remove(&mut self, i: usize) {
+            unsafe fn swap_remove(&mut self, i: usize) {
                 #(#swap_remove_stmts)*
             }
 
@@ -385,17 +385,17 @@ pub fn derive_atom_data(input: TokenStream) -> TokenStream {
                 #(#pack_stmts)*
             }
 
-            fn unpack(&mut self, buf: &[f64]) -> usize {
+            unsafe fn unpack(&mut self, buf: &[f64]) -> usize {
                 #(#unpack_stmts)*
                 #total_size
             }
 
-            fn apply_permutation(&mut self, perm: &[usize], n: usize) {
+            unsafe fn apply_permutation(&mut self, perm: &[usize], n: usize) {
                 let mut visited = Vec::new();
-                self.apply_permutation_with_scratch(perm, n, &mut visited);
+                unsafe { self.apply_permutation_with_scratch(perm, n, &mut visited) };
             }
 
-            fn apply_permutation_with_scratch(
+            unsafe fn apply_permutation_with_scratch(
                 &mut self,
                 perm: &[usize],
                 n: usize,

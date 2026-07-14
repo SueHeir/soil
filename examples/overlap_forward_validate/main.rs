@@ -128,7 +128,7 @@ struct OverlapAudit {
 /// a self-contained sum in neighbour-list order, so partitioning `i` by the
 /// boundary mask reproduces the single-pass force exactly.
 fn lj_force_pass<F: Fn(usize) -> bool>(atoms: &mut Atom, neighbor: &Neighbor, want: F) {
-    let nlocal = atoms.nlocal as usize;
+    let nlocal = atoms.nlocal() as usize;
     let cutoff2 = CUTOFF * CUTOFF;
     let sigma2 = SIGMA * SIGMA;
     for (i, j) in neighbor.pairs(nlocal) {
@@ -175,7 +175,7 @@ fn force_overlap(
     mut buffers: ResMut<CommBuffers>,
     mut audit: ResMut<OverlapAudit>,
 ) {
-    let nlocal = atoms.nlocal as usize;
+    let nlocal = atoms.nlocal() as usize;
     // `mask[i] == true`  → atom i has ≥1 ghost neighbour (needs the halo).
     // `mask[i] == false` → all neighbours local (interior, halo-independent).
     let mask = classify_boundary_atoms(&neighbor, nlocal);
@@ -222,8 +222,8 @@ fn force_overlap(
 // soil_core crate (soil_verlet depends on soil_core, so it cannot be a dep). ──
 fn initial_integration(mut atoms: ResMut<Atom>) {
     let dt = atoms.dt as Accum;
-    let nlocal = atoms.nlocal as usize;
-    for i in 0..nlocal {
+    let nlocal = atoms.nlocal() as usize;
+    for i in 0..nlocal() {
         let half_dt_over_m = 0.5 * dt * atoms.inv_mass[i] as Accum;
         for k in 0..3 {
             let v = atoms.vel[i][k] as Accum + half_dt_over_m * atoms.force[i][k];
@@ -234,8 +234,8 @@ fn initial_integration(mut atoms: ResMut<Atom>) {
 }
 fn final_integration(mut atoms: ResMut<Atom>) {
     let dt = atoms.dt as Accum;
-    let nlocal = atoms.nlocal as usize;
-    for i in 0..nlocal {
+    let nlocal = atoms.nlocal() as usize;
+    for i in 0..nlocal() {
         let half_dt_over_m = 0.5 * dt * atoms.inv_mass[i] as Accum;
         for k in 0..3 {
             atoms.vel[i][k] =
@@ -299,7 +299,7 @@ fn main() {
         let mut binder = cell.borrow_mut();
         let atoms = binder.downcast_mut::<Atom>().unwrap();
         atoms.dt = DT;
-        atoms.natoms = (NCELL * NCELL * NCELL) as u64;
+        atoms.natoms() = (NCELL * NCELL * NCELL) as u64;
         // One PRNG stream, drawn identically on every rank so all ranks agree on
         // the global system; each rank keeps only atoms inside its subdomain.
         let mut rng: u64 = SEED;
@@ -329,7 +329,7 @@ fn main() {
                 }
             }
         }
-        atoms.nlocal = local;
+        atoms.nlocal() = local;
     }
 
     // Time-step the gas.
@@ -352,7 +352,7 @@ fn main() {
         let atoms = app.get_resource_ref::<Atom>().unwrap();
         let mut f = fs::File::create(&path).expect("cannot create state csv");
         writeln!(f, "tag,x,y,z,vx,vy,vz").unwrap();
-        for i in 0..atoms.nlocal as usize {
+        for i in 0..atoms.nlocal() as usize {
             writeln!(
                 f,
                 "{},{:.17e},{:.17e},{:.17e},{:.17e},{:.17e},{:.17e}",

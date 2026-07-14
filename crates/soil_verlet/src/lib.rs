@@ -132,14 +132,14 @@ impl Plugin for VelocityVerletPlugin {
 /// This runs at [`ParticleSimScheduleSet::InitialIntegration`], **before** force computation.
 pub fn initial_integration(mut atoms: ResMut<Atom>) {
     let dt = atoms.dt;
-    let nlocal = atoms.nlocal as usize;
+    let nlocal = atoms.nlocal() as usize;
     // SAFETY: i < nlocal <= len for all arrays (inv_mass, force, vel, pos).
     // Raw pointers avoid borrow-checker conflicts when mutating vel/pos while
     // reading inv_mass/force from the same struct.
     let inv_mass_ptr = atoms.inv_mass.as_ptr();
     let force_ptr = atoms.force.as_ptr();
-    let vel_ptr = atoms.vel.as_mut_ptr();
-    let pos_ptr = atoms.pos.as_mut_ptr();
+    let vel_ptr = unsafe { atoms.vel.as_mut_ptr() };
+    let pos_ptr = unsafe { atoms.pos.as_mut_ptr() };
     // Integration math runs in `Accum` (drift-safe), results stored back as `Real`.
     let dt_a = dt as Accum;
     for i in 0..nlocal {
@@ -176,11 +176,11 @@ pub fn initial_integration(mut atoms: ResMut<Atom>) {
 /// This runs at [`ParticleSimScheduleSet::FinalIntegration`], **after** force computation.
 pub fn final_integration(mut atoms: ResMut<Atom>) {
     let dt = atoms.dt;
-    let nlocal = atoms.nlocal as usize;
+    let nlocal = atoms.nlocal() as usize;
     // SAFETY: i < nlocal <= len for all arrays (inv_mass, force, vel).
     let inv_mass_ptr = atoms.inv_mass.as_ptr();
     let force_ptr = atoms.force.as_ptr();
-    let vel_ptr = atoms.vel.as_mut_ptr();
+    let vel_ptr = unsafe { atoms.vel.as_mut_ptr() };
     let dt_a = dt as Accum;
     for i in 0..nlocal {
         unsafe {
@@ -211,11 +211,10 @@ mod tests {
     fn make_atom() -> Atom {
         let mut atom = Atom::new();
         atom.dt = 0.01;
-        atom.push_test_atom(0, [0.0; 3], 0.001, 1.0);
+        unsafe { atom.push_test_atom(0, [0.0; 3], 0.001, 1.0) };
         atom.vel[0][0] = 1.0;
         atom.force[0][0] = 2.0;
-        atom.nlocal = 1;
-        atom.natoms = 1;
+        unsafe { atom.set_layout_unchecked(1, 0, 1) };
         atom
     }
 
@@ -343,10 +342,9 @@ mod tests {
         let mut app = App::new();
         let mut atom = Atom::new();
         atom.dt = 0.001;
-        atom.push_test_atom(0, [0.0, 0.0, 0.0], 0.001, 1.0);
+        unsafe { atom.push_test_atom(0, [0.0, 0.0, 0.0], 0.001, 1.0) };
         atom.vel[0] = [1.5, -2.3, 0.7];
-        atom.nlocal = 1;
-        atom.natoms = 1;
+        unsafe { atom.set_layout_unchecked(1, 0, 1) };
 
         app.add_resource(atom);
         app.add_update_system(initial_integration, ParticleSimScheduleSet::InitialIntegration);

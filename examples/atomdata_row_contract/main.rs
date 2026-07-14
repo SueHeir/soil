@@ -1,5 +1,5 @@
 //! Executable validation for the `AtomData` row-count registration contract.
-use soil_core::{AtomData, AtomDataRegistrationError, AtomDataRegistry};
+use soil_core::{Atom, AtomData, AtomDataRegistrationError, AtomDataRegistry, ParticleStore};
 use soil_derive::AtomData as DeriveAtomData;
 use std::{any::Any, env, fs};
 
@@ -29,7 +29,7 @@ impl AtomData for ManualMultiColumn {
     fn len(&self) -> usize {
         self.scalar.len()
     }
-    fn push_default(&mut self) {
+    unsafe fn push_default(&mut self) {
         self.scalar.push(0.0);
         self.vector.push([0.0; 3]);
     }
@@ -45,11 +45,11 @@ impl AtomData for ManualMultiColumn {
         }
         Ok(())
     }
-    fn truncate(&mut self, n: usize) {
+    unsafe fn truncate(&mut self, n: usize) {
         self.scalar.truncate(n);
         self.vector.truncate(n);
     }
-    fn swap_remove(&mut self, i: usize) {
+    unsafe fn swap_remove(&mut self, i: usize) {
         self.scalar.swap_remove(i);
         self.vector.swap_remove(i);
     }
@@ -57,12 +57,12 @@ impl AtomData for ManualMultiColumn {
         buf.push(self.scalar[i]);
         buf.extend_from_slice(&self.vector[i]);
     }
-    fn unpack(&mut self, buf: &[f64]) -> usize {
+    unsafe fn unpack(&mut self, buf: &[f64]) -> usize {
         self.scalar.push(buf[0]);
         self.vector.push([buf[1], buf[2], buf[3]]);
         4
     }
-    fn apply_permutation(&mut self, _perm: &[usize], _n: usize) {}
+    unsafe fn apply_permutation(&mut self, _perm: &[usize], _n: usize) {}
 }
 
 fn main() {
@@ -76,9 +76,15 @@ fn main() {
         .expect("config contains atom_count")
         .parse::<usize>()
         .expect("atom_count is an unsigned integer");
+    let mut atoms = Atom::new();
     let mut registry = AtomDataRegistry::new();
+    for _ in 0..expected {
+        ParticleStore::new(&mut atoms, &registry)
+            .push_default_local(expected as u64)
+            .unwrap();
+    }
     registry
-        .try_register(DerivedColumn::default(), expected)
+        .register_for_atoms(DerivedColumn::default(), &atoms)
         .unwrap();
     let accepted_rows = registry.get::<DerivedColumn>().unwrap().len();
     println!("ATOMDATA_ROW case=late_derived expected={expected} observed={accepted_rows} accepted=true pass={}", accepted_rows == expected);
@@ -87,7 +93,7 @@ fn main() {
         vector: vec![[0.0; 3]; expected - 1],
     };
     let hidden_rows = malformed.vector.len();
-    let rejected = matches!(AtomDataRegistry::new().try_register(malformed, expected), Err(AtomDataRegistrationError::RowCountMismatch { actual, .. }) if actual == hidden_rows);
+    let rejected = matches!(AtomDataRegistry::new().register_for_atoms(malformed, &atoms), Err(AtomDataRegistrationError::RowCountMismatch { actual, .. }) if actual == hidden_rows);
     println!("ATOMDATA_ROW case=manual_multi_mismatch expected={expected} observed={hidden_rows} accepted=false pass={rejected}");
     assert_eq!(accepted_rows, expected);
     assert!(

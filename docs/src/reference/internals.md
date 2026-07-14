@@ -19,8 +19,12 @@ so the arrays never desync. The structural ops are:
 - `apply_permutation` — spatial re-sort,
 - `truncate` — drop ghosts.
 
-Each is mirrored on the registry by `swap_remove_all`, `apply_permutation_all`,
-and `truncate_all`. A new extension gets all of this for free from
+Only `ParticleStore` performs these operations: it applies the matching core
+and extension changes as one transaction, including ownership-counter updates.
+The lower-level core and registry helpers are crate-private.  Restart decoding
+uses `LocalAtomRows` as an off-store bundle; `Atom::from_local_rows` rejects a
+short core column before `ParticleStore::replace_from_restart` atomically pairs
+it with extension rows. A new extension gets the structural callbacks from
 `#[derive(AtomData)]` (see [The AtomData Contract](../substrate/atomdata-contract.md)).
 
 ## Local atoms and ghosts
@@ -35,9 +39,10 @@ full-rebuild step.
 > force (Newton's-third-law optimization on), guard it with
 > `if newton || j < nlocal { … }`: in a full list (`newton = false`) writing a
 > ghost force double-counts, because the pair appears from both atoms. Never
-> resize an `AtomData` column out of band — grow columns only through the
-> substrate's `unpack` (migration) and `zero` (per-step reset) paths; a stray
-> push or pop on one column desyncs every parallel array silently. And a field's
+> resize an `AtomData` column out of band — grow columns only through
+> `ParticleStore` construction/communication paths; debug builds assert the
+> full invariant at force and communication boundaries, so a legacy unsafe
+> mutation fails before it can be indexed. And a field's
 > attribute (`#[forward]` / `#[reverse]` / `#[zero]` / none) *is* its parallel
 > contract: misclassify it and the bug shows up only under MPI, as a silent
 > divergence between ranks, never as a crash.

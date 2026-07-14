@@ -163,7 +163,7 @@ pub(crate) fn dump_atoms_inner(
 
     // Build this rank's frame. With ghosts, range is all atoms; the IsGhost
     // column flags indices >= nlocal.
-    let nlocal = atoms.nlocal as usize;
+    let nlocal = atoms.nlocal() as usize;
     let count = if dump_config.ghost {
         atoms.len()
     } else {

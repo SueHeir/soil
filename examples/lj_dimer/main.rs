@@ -88,7 +88,7 @@ fn lj_force_and_damp(
     neighbor: Res<Neighbor>,
     registry: Res<AtomDataRegistry>,
 ) {
-    let nlocal = atoms.nlocal as usize;
+    let nlocal = atoms.nlocal() as usize;
     let ntot = atoms.len();
     let cutoff2 = CUTOFF * CUTOFF;
     let sigma2 = SIGMA * SIGMA;
@@ -187,7 +187,7 @@ skin_fraction = 1.3
         .add_plugins(CommunicationPlugin);
 
     // Register the non-DEM per-atom column (must come after AtomPlugin).
-    register_atom_data!(app, LjEnergy::default());
+    register_atom_data!(&mut app, LjEnergy::default());
 
     // Pairwise LJ + damping in the Force phase; Verlet brackets it.
     app.add_update_system(lj_force_and_damp, ParticleSimScheduleSet::Force);
@@ -207,10 +207,9 @@ skin_fraction = 1.3
         let mut binder = cell.borrow_mut();
         let atoms = binder.downcast_mut::<Atom>().unwrap();
         atoms.dt = 2e-3;
-        atoms.push_test_atom(0, [0.5, 5.0, 5.0], CUTOFF, 1.0);
-        atoms.push_test_atom(1, [9.4, 5.0, 5.0], CUTOFF, 1.0);
-        atoms.nlocal = 2;
-        atoms.natoms = 2;
+        unsafe { atoms.push_test_atom(0, [0.5, 5.0, 5.0], CUTOFF, 1.0) };
+        unsafe { atoms.push_test_atom(1, [9.4, 5.0, 5.0], CUTOFF, 1.0) };
+        unsafe { atoms.set_layout_unchecked(2, 0, 2) };
     }
 
     // Relax to force balance.
@@ -229,11 +228,11 @@ skin_fraction = 1.3
 
     // Total potential energy from the reverse-communicated per-atom column.
     let energy = registry.expect::<LjEnergy>("lj_dimer main");
-    let nlocal = atoms.nlocal as usize;
+    let nlocal = atoms.nlocal() as usize;
     let total_pe: f64 = energy.pe[..nlocal].iter().sum();
     let expected_pe = -EPSILON;
 
-    let nghost = atoms.nghost;
+    let nghost = atoms.nghost();
 
     println!("SOIL LJ-MD dimer (a non-DEM particle method on the SOIL substrate)");
     println!(

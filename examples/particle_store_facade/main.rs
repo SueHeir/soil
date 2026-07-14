@@ -22,7 +22,9 @@ fn config_value(source: &str, key: &str) -> usize {
 fn source(count: usize) -> (Atom, AtomDataRegistry, Vec<f64>) {
     let mut atoms = Atom::new();
     let mut registry = AtomDataRegistry::new();
-    registry.try_register(Marker::default(), 0).unwrap();
+    registry
+        .register_for_atoms(Marker::default(), &atoms)
+        .unwrap();
     {
         let mut store = ParticleStore::new(&mut atoms, &registry);
         store.reserve(count);
@@ -59,7 +61,9 @@ fn source(count: usize) -> (Atom, AtomDataRegistry, Vec<f64>) {
 fn receive(payload: &[f64], count: usize) -> (Atom, AtomDataRegistry) {
     let mut atoms = Atom::new();
     let mut registry = AtomDataRegistry::new();
-    registry.try_register(Marker::default(), 0).unwrap();
+    registry
+        .register_for_atoms(Marker::default(), &atoms)
+        .unwrap();
     ParticleStore::new(&mut atoms, &registry)
         .append_migrant_records(payload, count)
         .unwrap();
@@ -81,8 +85,8 @@ fn main() {
         && received.pos == source_atoms.pos
         && received_registry.get::<Marker>().unwrap().value
             == source_registry.get::<Marker>().unwrap().value
-        && received.nlocal as usize == count
-        && received.nghost == 0;
+        && received.nlocal() as usize == count
+        && received.nghost() == 0;
     println!(
         "PARTICLE_STORE case=framed_multi_record_parity expected={count} observed={} pass={parity}",
         received.len()

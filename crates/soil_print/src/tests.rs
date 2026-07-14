@@ -3,8 +3,8 @@ use crate::restart::{write_restart_inner, RestartData};
 use crate::thermo::{capitalize, default_columns, parse_thermo_column, print_thermo, setup_thermo};
 use grass_scheduler::Scheduler;
 use soil_core::{
-    CommResource, Neighbor, ParticleSimScheduleSet, RunConfig, RunState, ScheduleSetupSet,
-    SingleProcessComm,
+    CommResource, Neighbor, ParticleSimScheduleSet, ParticleStore, RunConfig, RunState,
+    ScheduleSetupSet, SingleProcessComm,
 };
 use std::fs::{self, File};
 
@@ -135,15 +135,15 @@ impl AtomData for GenericColumn {
     fn len(&self) -> usize {
         self.scalar.len()
     }
-    fn push_default(&mut self) {
+    unsafe fn push_default(&mut self) {
         self.scalar.push(0.0);
         self.vector.push([0.0; 3]);
     }
-    fn truncate(&mut self, n: usize) {
+    unsafe fn truncate(&mut self, n: usize) {
         self.scalar.truncate(n);
         self.vector.truncate(n);
     }
-    fn swap_remove(&mut self, i: usize) {
+    unsafe fn swap_remove(&mut self, i: usize) {
         self.scalar.swap_remove(i);
         self.vector.swap_remove(i);
     }
@@ -151,16 +151,16 @@ impl AtomData for GenericColumn {
         buf.push(self.scalar[i]);
         buf.extend_from_slice(&self.vector[i]);
     }
-    fn unpack(&mut self, buf: &[f64]) -> usize {
+    unsafe fn unpack(&mut self, buf: &[f64]) -> usize {
         self.scalar.push(buf[0]);
         self.vector.push([buf[1], buf[2], buf[3]]);
         4
     }
-    fn apply_permutation(&mut self, perm: &[usize], n: usize) {
+    unsafe fn apply_permutation(&mut self, perm: &[usize], n: usize) {
         let mut visited = Vec::new();
-        self.apply_permutation_with_scratch(perm, n, &mut visited);
+        unsafe { self.apply_permutation_with_scratch(perm, n, &mut visited) };
     }
-    fn apply_permutation_with_scratch(
+    unsafe fn apply_permutation_with_scratch(
         &mut self,
         perm: &[usize],
         n: usize,
@@ -233,7 +233,8 @@ fn fixture_atoms() -> (
 /// Register a `GenericColumn` on a fresh registry.
 fn registry_with_column() -> AtomDataRegistry {
     let mut reg = AtomDataRegistry::new();
-    reg.try_register(GenericColumn::default(), 0).unwrap();
+    reg.register_for_atoms(GenericColumn::default(), &Atom::new())
+        .unwrap();
     reg
 }
 
@@ -249,33 +250,24 @@ fn build_source() -> (Atom, AtomDataRegistry) {
     let (rows,) = fixture_atoms();
     let mut atoms = Atom::new();
     let reg = registry_with_column();
-    {
+    for (tag, atype, pos, vel, force, mass, cutoff, image, cs, cv) in &rows {
+        let mut store = ParticleStore::new(&mut atoms, &reg);
+        store.push_default_local(rows.len() as u64).unwrap();
+        let i = store.atoms().len() - 1;
+        drop(store);
+        atoms.tag[i] = *tag;
+        atoms.atom_type[i] = *atype;
+        atoms.pos[i] = [pos[0] as Real, pos[1] as Real, pos[2] as Real];
+        atoms.vel[i] = [vel[0] as Real, vel[1] as Real, vel[2] as Real];
+        atoms.force[i] = [force[0] as Accum, force[1] as Accum, force[2] as Accum];
+        atoms.mass[i] = *mass as Real;
+        atoms.inv_mass[i] = (1.0 / *mass) as Real;
+        atoms.cutoff_radius[i] = *cutoff as Real;
+        atoms.image[i] = *image;
         let mut col = reg.get_mut::<GenericColumn>().unwrap();
-        for (tag, atype, pos, vel, force, mass, cutoff, image, cs, cv) in &rows {
-            atoms.tag.push(*tag);
-            atoms.atom_type.push(*atype);
-            atoms.origin_index.push(0);
-            atoms.is_ghost.push(false);
-            atoms
-                .pos
-                .push([pos[0] as Real, pos[1] as Real, pos[2] as Real]);
-            atoms
-                .vel
-                .push([vel[0] as Real, vel[1] as Real, vel[2] as Real]);
-            atoms
-                .force
-                .push([force[0] as Accum, force[1] as Accum, force[2] as Accum]);
-            atoms.mass.push(*mass as Real);
-            atoms.inv_mass.push((1.0 / *mass) as Real);
-            atoms.cutoff_radius.push(*cutoff as Real);
-            atoms.image.push(*image);
-            col.scalar.push(*cs);
-            col.vector.push(*cv);
-        }
+        col.scalar[i] = *cs;
+        col.vector[i] = *cv;
     }
-    atoms.nlocal = rows.len() as u32;
-    atoms.natoms = rows.len() as u64;
-    atoms.nghost = 0;
     atoms.dt = 1.0 / 4096.0; // exactly representable, non-trivial
     (atoms, reg)
 }
@@ -298,9 +290,9 @@ fn assert_restart_fields_bit_identical(
     dst: &Atom,
     dst_reg: &AtomDataRegistry,
 ) {
-    let n = src.nlocal as usize;
-    assert_eq!(dst.nlocal, src.nlocal, "nlocal mismatch");
-    assert_eq!(dst.natoms, src.natoms, "natoms mismatch");
+    let n = src.nlocal() as usize;
+    assert_eq!(dst.nlocal(), src.nlocal(), "nlocal mismatch");
+    assert_eq!(dst.natoms(), src.natoms(), "natoms mismatch");
     assert_eq!(dst.dt.to_bits(), src.dt.to_bits(), "dt not bit-identical");
     for i in 0..n {
         assert_eq!(dst.tag[i], src.tag[i], "tag[{i}]");
@@ -346,53 +338,46 @@ fn assert_restart_fields_bit_identical(
 /// start from an empty store, else restored columns land at the wrong indices).
 #[allow(clippy::unnecessary_cast)] // precision-conditional casts; see build_source
 fn restore_from_restart(data: &RestartData) -> (Atom, AtomDataRegistry) {
-    let n = data.tag.len();
-    let mut atoms = Atom::new();
-    atoms.natoms = data.natoms;
-    atoms.nlocal = n as u32;
-    atoms.nghost = 0;
-    atoms.dt = data.dt;
-    atoms.tag = data.tag.clone();
-    atoms.atom_type = data.atom_type.clone();
-    atoms.origin_index = vec![0; n];
-    atoms.is_ghost = vec![false; n];
-    atoms.pos = data
-        .pos_x
-        .iter()
-        .zip(&data.pos_y)
-        .zip(&data.pos_z)
-        .map(|((&x, &y), &z)| [x as Real, y as Real, z as Real])
-        .collect();
-    atoms.vel = data
-        .vel_x
-        .iter()
-        .zip(&data.vel_y)
-        .zip(&data.vel_z)
-        .map(|((&x, &y), &z)| [x as Real, y as Real, z as Real])
-        .collect();
-    atoms.force = data
-        .force_x
-        .iter()
-        .zip(&data.force_y)
-        .zip(&data.force_z)
-        .map(|((&x, &y), &z)| [x as Accum, y as Accum, z as Accum])
-        .collect();
-    atoms.mass = data.mass.iter().map(|&m| m as Real).collect();
-    atoms.inv_mass = atoms.mass.iter().map(|&m| 1.0 / m).collect();
-    atoms.cutoff_radius = data.cutoff_radius.iter().map(|&r| r as Real).collect();
+    let rows = soil_core::LocalAtomRows {
+            tag: data.tag.clone(),
+            atom_type: data.atom_type.clone(),
+            pos: data
+                .pos_x
+                .iter()
+                .zip(&data.pos_y)
+                .zip(&data.pos_z)
+                .map(|((&x, &y), &z)| [x as Real, y as Real, z as Real])
+                .collect(),
+            vel: data
+                .vel_x
+                .iter()
+                .zip(&data.vel_y)
+                .zip(&data.vel_z)
+                .map(|((&x, &y), &z)| [x as Real, y as Real, z as Real])
+                .collect(),
+            force: data
+                .force_x
+                .iter()
+                .zip(&data.force_y)
+                .zip(&data.force_z)
+                .map(|((&x, &y), &z)| [x as Accum, y as Accum, z as Accum])
+                .collect(),
+            mass: data.mass.iter().map(|&mass| mass as Real).collect(),
+            cutoff_radius: data
+                .cutoff_radius
+                .iter()
+                .map(|&radius| radius as Real)
+                .collect(),
+    };
 
+    let mut atoms = Atom::new();
     let reg = registry_with_column();
-    // Reproduce the post-setup store state: sized to nlocal with sentinels.
-    {
-        let mut col = reg.get_mut::<GenericColumn>().unwrap();
-        for _ in 0..n {
-            col.scalar.push(f64::NAN);
-            col.vector.push([f64::NAN; 3]);
-        }
-    }
-    if !data.atom_data_buffers.is_empty() {
-        reg.unpack_all_from_restart(&data.atom_data_buffers);
-    }
+    // Register against the current (empty) core, then use the same atomic
+    // replacement boundary as production restart loading. No extension-only
+    // restart decoder is exposed to this test or downstream users.
+    ParticleStore::new(&mut atoms, &reg)
+        .replace_from_restart_rows(data.natoms, data.dt, rows, &data.atom_data_buffers)
+        .expect("test restart rows are aligned");
     (atoms, reg)
 }
 
@@ -500,7 +485,7 @@ fn production_read_restart_constructs_complete_zero_image_rows() {
 
     let restored = scheduler.get_resource_ref::<Atom>().unwrap();
     let registry = scheduler.get_resource_ref::<AtomDataRegistry>().unwrap();
-    let n = src.nlocal as usize;
+    let n = src.nlocal() as usize;
     assert!(restored.validate_rows(), "all Atom core rows are aligned");
     assert!(registry.validate_rows(n), "extension rows are aligned");
     assert_eq!(restored.image, vec![[0; 3]; n]);
@@ -570,11 +555,12 @@ fn substrate_migration_across_domain_boundary_bit_identical() {
 
     // ── Source rank: pack the migrant onto the exchange wire, then evict it ──
     let mut buf: Vec<f64> = Vec::new();
-    src.pack_exchange(migrant, &mut buf);
-    src_reg.pack_all(migrant, &mut buf);
-    src.swap_remove(migrant);
-    src_reg.swap_remove_all(migrant);
-    src.nlocal -= 1;
+    ParticleStore::new(&mut src, &src_reg)
+        .pack_migrant(migrant, &mut buf)
+        .unwrap();
+    ParticleStore::new(&mut src, &src_reg)
+        .swap_remove(migrant)
+        .unwrap();
     // Source no longer owns it.
     assert!(
         !src.tag.contains(&exp_tag),
@@ -582,17 +568,15 @@ fn substrate_migration_across_domain_boundary_bit_identical() {
     );
     assert_eq!(
         src_reg.get::<GenericColumn>().unwrap().scalar.len(),
-        src.nlocal as usize
+        src.nlocal() as usize
     );
 
     // ── Destination rank: unpack the migrant (mirrors comm::unpack_exchanged) ─
     let (mut dst, dst_reg) = build_source(); // pre-existing atoms on the dest rank
-    let dst_before = dst.nlocal as usize;
-    let mut pos = 0;
-    pos += dst.unpack_atom(&buf[pos..], /* is_ghost = */ false);
-    pos += dst_reg.unpack_all(&buf[pos..]);
-    assert_eq!(pos, buf.len(), "exchange payload fully consumed");
-    dst.nlocal += 1;
+    let dst_before = dst.nlocal() as usize;
+    ParticleStore::new(&mut dst, &dst_reg)
+        .append_migrant(&buf)
+        .unwrap();
 
     let j = dst.len() - 1; // migrated atom is appended last
     assert!(
@@ -622,7 +606,7 @@ fn substrate_migration_across_domain_boundary_bit_identical() {
     let dc = dst_reg.get::<GenericColumn>().unwrap();
     assert_eq!(
         dc.scalar.len(),
-        dst.nlocal as usize,
+        dst.nlocal() as usize,
         "column stays sized to nlocal"
     );
     assert_eq!(

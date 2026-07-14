@@ -41,7 +41,7 @@ fn main() {
         // A scalar column: speed |v|. The callback returns one value per LOCAL
         // atom; ghosts (if dumped) are padded automatically.
         dump_reg.register_scalar("speed", |atoms: &Atom, _reg: &AtomDataRegistry| {
-            let n = atoms.nlocal as usize;
+            let n = atoms.nlocal() as usize;
             (0..n)
                 .map(|i| {
                     let v = atoms.vel[i];
@@ -53,7 +53,7 @@ fn main() {
         // A 3-vector column: the force. Splits into force_x/_y/_z in CSV/LAMMPS,
         // appears as a 3-component array in VTP.
         dump_reg.register_vector("force", |atoms: &Atom, _reg: &AtomDataRegistry| {
-            let n = atoms.nlocal as usize;
+            let n = atoms.nlocal() as usize;
             (0..n).map(|i| atoms.force[i]).collect()
         });
 

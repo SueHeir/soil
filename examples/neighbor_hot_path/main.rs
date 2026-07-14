@@ -65,13 +65,12 @@ fn build_atoms(case: &CaseConfig) -> Atom {
                     margin + iy as f64 * case.spacing - 0.5 * wobble,
                     margin + iz as f64 * case.spacing + 0.25 * wobble,
                 ];
-                atoms.push_test_atom(tag, pos, radius_for(case, tag as usize), 1.0);
+                unsafe { atoms.push_test_atom(tag, pos, radius_for(case, tag as usize), 1.0) };
                 tag += 1;
             }
         }
     }
-    atoms.nlocal = tag;
-    atoms.natoms = tag as u64;
+    unsafe { atoms.set_layout_unchecked(tag, 0, tag as u64) };
     atoms
 }
 
@@ -119,7 +118,7 @@ fn neighbor_pairs(app: &App) -> Vec<(usize, usize)> {
     let neighbor = app.get_resource_ref::<Neighbor>().unwrap();
     let atoms = app.get_resource_ref::<Atom>().unwrap();
     let mut pairs: Vec<(usize, usize)> = neighbor
-        .pairs(atoms.nlocal as usize)
+        .pairs(atoms.nlocal() as usize)
         .map(|(i, j)| if i < j { (i, j) } else { (j, i) })
         .collect();
     pairs.sort_unstable();

@@ -3,7 +3,8 @@ use std::{fs, fs::File};
 use grass_scheduler::prelude::*;
 use serde::Deserialize;
 use soil_core::{
-    Accum, Atom, AtomDataRegistry, CommResource, Input, ParticleStore, Real, RunConfig, RunState,
+    Accum, Atom, AtomDataRegistry, CommResource, Input, LocalAtomRows, ParticleStore, Real,
+    RunConfig, RunState,
 };
 
 use crate::{dump::dump_atoms_inner, DumpConfig, DumpRegistry};
@@ -317,50 +318,46 @@ pub fn read_restart(
 
     let n = data.tag.len();
 
-    // Build a complete replacement off to the side.  The facade installs it
-    // only after every extension buffer has decoded to exactly n rows.
-    let mut restored = Atom::new();
-    restored.natoms = data.natoms;
-    restored.nlocal = n as u32;
-    restored.nghost = 0;
-    restored.dt = data.dt;
-
-    restored.tag = data.tag;
-    restored.atom_type = data.atom_type;
-    restored.origin_index = vec![0; n];
-    restored.is_ghost = vec![false; n];
-    // Restart intentionally does not persist periodic image counters: a restart
-    // begins with locally owned, unwrapped rows.  Still materialize the core
-    // column so the replacement passed to ParticleStore is structurally complete.
-    restored.image = vec![[0; 3]; n];
-    // Restart wire format is f64; convert back to the build's storage precision.
-    restored.pos = data
-        .pos_x
-        .iter()
-        .zip(data.pos_y.iter())
-        .zip(data.pos_z.iter())
-        .map(|((&x, &y), &z)| [x as Real, y as Real, z as Real])
-        .collect();
-    restored.vel = data
-        .vel_x
-        .iter()
-        .zip(data.vel_y.iter())
-        .zip(data.vel_z.iter())
-        .map(|((&x, &y), &z)| [x as Real, y as Real, z as Real])
-        .collect();
-    restored.force = data
-        .force_x
-        .iter()
-        .zip(data.force_y.iter())
-        .zip(data.force_z.iter())
-        .map(|((&x, &y), &z)| [x as Accum, y as Accum, z as Accum])
-        .collect();
-    restored.mass = data.mass.iter().map(|&m| m as Real).collect();
-    restored.inv_mass = restored.mass.iter().map(|&m| 1.0 / m).collect();
-    restored.cutoff_radius = data.cutoff_radius.iter().map(|&r| r as Real).collect();
-
+    // Decode into an off-store row bundle.  Atom validates every core column
+    // before this can become a live replacement; ParticleStore then couples it
+    // atomically to every registered extension buffer.
     ParticleStore::new(&mut atoms, &registry)
-        .replace_from_restart(restored, &data.atom_data_buffers)
+        .replace_from_restart_rows(
+        data.natoms,
+        data.dt,
+        LocalAtomRows {
+            tag: data.tag,
+            atom_type: data.atom_type,
+            pos: data
+                .pos_x
+                .iter()
+                .zip(data.pos_y.iter())
+                .zip(data.pos_z.iter())
+                .map(|((&x, &y), &z)| [x as Real, y as Real, z as Real])
+                .collect(),
+            vel: data
+                .vel_x
+                .iter()
+                .zip(data.vel_y.iter())
+                .zip(data.vel_z.iter())
+                .map(|((&x, &y), &z)| [x as Real, y as Real, z as Real])
+                .collect(),
+            force: data
+                .force_x
+                .iter()
+                .zip(data.force_y.iter())
+                .zip(data.force_z.iter())
+                .map(|((&x, &y), &z)| [x as Accum, y as Accum, z as Accum])
+                .collect(),
+            mass: data.mass.iter().map(|&mass| mass as Real).collect(),
+            cutoff_radius: data
+                .cutoff_radius
+                .iter()
+                .map(|&radius| radius as Real)
+                .collect(),
+        },
+        &data.atom_data_buffers,
+    )
         .unwrap_or_else(|error| panic!("restart particle-store import failed: {error}"));
 
     run_state.total_cycle = data.total_cycle;

@@ -325,39 +325,59 @@ pub fn read_restart(
     restored.nghost = 0;
     restored.dt = data.dt;
 
-    restored.tag = data.tag.into();
-    restored.atom_type = data.atom_type.into();
-    restored.origin_index = vec![0; n].into();
-    restored.is_ghost = vec![false; n].into();
+    // SAFETY: every decoded core column is installed below, and
+    // `replace_from_restart` validates it together with every extension before
+    // exposing the replacement.
+    restored.tag = unsafe { soil_core::AtomColumn::from_vec_unchecked(data.tag) };
+    restored.atom_type = unsafe { soil_core::AtomColumn::from_vec_unchecked(data.atom_type) };
+    restored.origin_index = unsafe { soil_core::AtomColumn::from_vec_unchecked(vec![0; n]) };
+    restored.is_ghost = unsafe { soil_core::AtomColumn::from_vec_unchecked(vec![false; n]) };
     // Restart intentionally does not persist periodic image counters: a restart
     // begins with locally owned, unwrapped rows.  Still materialize the core
     // column so the replacement passed to ParticleStore is structurally complete.
-    restored.image = vec![[0; 3]; n].into();
+    restored.image = unsafe { soil_core::AtomColumn::from_vec_unchecked(vec![[0; 3]; n]) };
     // Restart wire format is f64; convert back to the build's storage precision.
-    restored.pos = data
-        .pos_x
-        .iter()
-        .zip(data.pos_y.iter())
-        .zip(data.pos_z.iter())
-        .map(|((&x, &y), &z)| [x as Real, y as Real, z as Real])
-        .collect();
-    restored.vel = data
-        .vel_x
-        .iter()
-        .zip(data.vel_y.iter())
-        .zip(data.vel_z.iter())
-        .map(|((&x, &y), &z)| [x as Real, y as Real, z as Real])
-        .collect();
-    restored.force = data
-        .force_x
-        .iter()
-        .zip(data.force_y.iter())
-        .zip(data.force_z.iter())
-        .map(|((&x, &y), &z)| [x as Accum, y as Accum, z as Accum])
-        .collect();
-    restored.mass = data.mass.iter().map(|&m| m as Real).collect();
-    restored.inv_mass = restored.mass.iter().map(|&m| 1.0 / m).collect();
-    restored.cutoff_radius = data.cutoff_radius.iter().map(|&r| r as Real).collect();
+    restored.pos = unsafe {
+        soil_core::AtomColumn::from_vec_unchecked(
+            data.pos_x
+                .iter()
+                .zip(data.pos_y.iter())
+                .zip(data.pos_z.iter())
+                .map(|((&x, &y), &z)| [x as Real, y as Real, z as Real])
+                .collect(),
+        )
+    };
+    restored.vel = unsafe {
+        soil_core::AtomColumn::from_vec_unchecked(
+            data.vel_x
+                .iter()
+                .zip(data.vel_y.iter())
+                .zip(data.vel_z.iter())
+                .map(|((&x, &y), &z)| [x as Real, y as Real, z as Real])
+                .collect(),
+        )
+    };
+    restored.force = unsafe {
+        soil_core::AtomColumn::from_vec_unchecked(
+            data.force_x
+                .iter()
+                .zip(data.force_y.iter())
+                .zip(data.force_z.iter())
+                .map(|((&x, &y), &z)| [x as Accum, y as Accum, z as Accum])
+                .collect(),
+        )
+    };
+    restored.mass = unsafe {
+        soil_core::AtomColumn::from_vec_unchecked(data.mass.iter().map(|&m| m as Real).collect())
+    };
+    restored.inv_mass = unsafe {
+        soil_core::AtomColumn::from_vec_unchecked(restored.mass.iter().map(|&m| 1.0 / m).collect())
+    };
+    restored.cutoff_radius = unsafe {
+        soil_core::AtomColumn::from_vec_unchecked(
+            data.cutoff_radius.iter().map(|&r| r as Real).collect(),
+        )
+    };
 
     ParticleStore::new(&mut atoms, &registry)
         .replace_from_restart(restored, &data.atom_data_buffers)

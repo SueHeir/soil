@@ -52,9 +52,9 @@ fn main() {
             .expect("AtomPlugin registers the Atom resource");
         let mut binder = cell.borrow_mut();
         let atoms = binder.downcast_mut::<Atom>().unwrap();
-        atoms.push_test_atom(0, [0.25, 0.5, 0.5], 0.3, 1.0);
-        atoms.push_test_atom(1, [0.55, 0.5, 0.5], 0.3, 1.0);
-        atoms.push_test_atom(2, [0.85, 0.5, 0.5], 0.3, 1.0);
+        unsafe { atoms.push_test_atom(0, [0.25, 0.5, 0.5], 0.3, 1.0) };
+        unsafe { atoms.push_test_atom(1, [0.55, 0.5, 0.5], 0.3, 1.0) };
+        unsafe { atoms.push_test_atom(2, [0.85, 0.5, 0.5], 0.3, 1.0) };
         atoms.nlocal = 3;
         atoms.natoms = 3;
     }

@@ -325,7 +325,7 @@ mod tests {
     fn make_atoms(n: usize) -> Atom {
         let mut atom = Atom::new();
         for i in 0..n {
-            atom.push_test_atom(i as u32, [i as f64, 0.0, 0.0], 0.5, 1.0);
+            unsafe { atom.push_test_atom(i as u32, [i as f64, 0.0, 0.0], 0.5, 1.0) };
         }
         atom.nlocal = n as u32;
         atom.natoms = n as u64;

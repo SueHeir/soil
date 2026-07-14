@@ -65,7 +65,7 @@ fn build_atoms(case: &CaseConfig) -> Atom {
                     margin + iy as f64 * case.spacing - 0.5 * wobble,
                     margin + iz as f64 * case.spacing + 0.25 * wobble,
                 ];
-                atoms.push_test_atom(tag, pos, radius_for(case, tag as usize), 1.0);
+                unsafe { atoms.push_test_atom(tag, pos, radius_for(case, tag as usize), 1.0) };
                 tag += 1;
             }
         }

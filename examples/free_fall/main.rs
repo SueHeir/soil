@@ -44,15 +44,15 @@ fn main() {
     let mut atoms = Atom::new();
     atoms.dt = 1e-3;
     // Atom 0: a normal falling particle.
-    atoms.push_test_atom(0, [0.0, 0.0, 10.0], 0.1, 2.0);
+    unsafe { atoms.push_test_atom(0, [0.0, 0.0, 10.0], 0.1, 2.0) };
     atoms.vel[0] = [0.0, 0.0, 5.0]; // initial upward velocity v0
-    // Prime the force at t=0. Velocity Verlet's first half-kick reads the force
-    // present at the start of step 1; for the run to match the analytic parabola
-    // exactly, F(0) must already be gravity (the integrator runs before our force
-    // system on the very first step).
+                                    // Prime the force at t=0. Velocity Verlet's first half-kick reads the force
+                                    // present at the start of step 1; for the run to match the analytic parabola
+                                    // exactly, F(0) must already be gravity (the integrator runs before our force
+                                    // system on the very first step).
     atoms.force[0] = [0.0, 0.0, atoms.mass[0] * G];
     // Atom 1: pinned via infinite mass (inv_mass = 0) — never moves.
-    atoms.push_test_atom(1, [1.0, 0.0, 10.0], 0.1, 1.0);
+    unsafe { atoms.push_test_atom(1, [1.0, 0.0, 10.0], 0.1, 1.0) };
     atoms.inv_mass[1] = 0.0;
     atoms.nlocal = 2;
     atoms.natoms = 2;

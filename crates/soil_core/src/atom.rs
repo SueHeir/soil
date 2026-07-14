@@ -55,7 +55,7 @@
 use std::{
     any::{Any, TypeId},
     cell::{Ref, RefCell, RefMut},
-    ops::{Deref, DerefMut},
+    ops::{Deref, Index, IndexMut},
     panic::{catch_unwind, AssertUnwindSafe},
 };
 
@@ -744,6 +744,18 @@ macro_rules! for_each_atom_vec {
 /// let mut atoms = Atom::new();
 /// atoms.pos.push([0.0; 3]);
 /// ```
+///
+/// ```compile_fail
+/// use soil_core::Atom;
+/// let mut atoms = Atom::new();
+/// atoms.pos.reverse();
+/// ```
+///
+/// ```compile_fail
+/// use soil_core::Atom;
+/// let mut atoms = Atom::new();
+/// atoms.pos = vec![[0.0; 3]].into();
+/// ```
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct AtomColumn<T>(Vec<T>);
 impl<T> Deref for AtomColumn<T> {
@@ -752,9 +764,19 @@ impl<T> Deref for AtomColumn<T> {
         &self.0
     }
 }
-impl<T> DerefMut for AtomColumn<T> {
-    fn deref_mut(&mut self) -> &mut [T] {
-        &mut self.0
+impl<T, I> Index<I> for AtomColumn<T>
+where
+    Vec<T>: Index<I>,
+{
+    type Output = <Vec<T> as Index<I>>::Output;
+
+    fn index(&self, index: I) -> &Self::Output {
+        &self.0[index]
+    }
+}
+impl<T> IndexMut<usize> for AtomColumn<T> {
+    fn index_mut(&mut self, index: usize) -> &mut Self::Output {
+        &mut self.0[index]
     }
 }
 impl<T: PartialEq> PartialEq<Vec<T>> for AtomColumn<T> {
@@ -767,17 +789,44 @@ impl<T: PartialEq> PartialEq<AtomColumn<T>> for Vec<T> {
         *self == other.0
     }
 }
-impl<T> From<Vec<T>> for AtomColumn<T> {
-    fn from(v: Vec<T>) -> Self {
-        Self(v)
-    }
-}
-impl<T> FromIterator<T> for AtomColumn<T> {
-    fn from_iter<I: IntoIterator<Item = T>>(i: I) -> Self {
-        Self(i.into_iter().collect())
-    }
-}
 impl<T> AtomColumn<T> {
+    /// Returns a raw mutable pointer for allocation-free kernels.
+    ///
+    /// # Safety
+    ///
+    /// The pointer may only be used to update rows already present in this
+    /// column.  It must not be used to construct a slice with a different row
+    /// count or to perform a structural operation; use [`ParticleStore`] for
+    /// those operations.
+    pub unsafe fn as_mut_ptr(&mut self) -> *mut T {
+        self.0.as_mut_ptr()
+    }
+
+    /// Wrap an externally decoded complete column.
+    ///
+    /// # Safety
+    ///
+    /// The caller must install this only as part of a complete, aligned core
+    /// replacement which is validated by [`ParticleStore`].  Normal callers
+    /// must use `ParticleStore` structural operations instead.
+    pub unsafe fn from_vec_unchecked(values: Vec<T>) -> Self {
+        Self(values)
+    }
+
+    /// Iterate existing rows mutably without exposing structural operations.
+    pub fn iter_mut(&mut self) -> std::slice::IterMut<'_, T> {
+        self.0.iter_mut()
+    }
+
+    /// Mutably access one existing row without exposing structural operations.
+    pub fn get_mut(&mut self, index: usize) -> Option<&mut T> {
+        self.0.get_mut(index)
+    }
+
+    fn as_mut_slice(&mut self) -> &mut [T] {
+        &mut self.0
+    }
+
     fn push(&mut self, value: T) {
         self.0.push(value);
     }
@@ -911,7 +960,7 @@ macro_rules! impl_atom_apply_permutation {
             n: usize,
             visited: &mut Vec<bool>,
         ) {
-            $( apply_permutation_in_place(&mut self.$field, perm, n, visited); )*
+            $( apply_permutation_in_place(self.$field.as_mut_slice(), perm, n, visited); )*
         }
     };
 }
@@ -1015,8 +1064,15 @@ impl Atom {
         ATOM_PACK_SIZE
     }
 
-    /// Convenience method for tests: push a local atom with default velocity/force.
-    pub fn push_test_atom(&mut self, tag: u32, pos: [f64; 3], radius: f64, mass: f64) {
+    /// Internal test-only core-row helper.
+    ///
+    /// # Safety
+    ///
+    /// This bypasses the synchronized [`ParticleStore`] transaction and must
+    /// only be used when there are no registered extensions, followed by the
+    /// caller setting a matching ownership partition. Production code must use
+    /// `ParticleStore::push_default_local`.
+    unsafe fn push_test_atom_unchecked(&mut self, tag: u32, pos: [f64; 3], radius: f64, mass: f64) {
         self.tag.push(tag);
         self.atom_type.push(0);
         self.origin_index.push(0);
@@ -1029,6 +1085,26 @@ impl Atom {
         self.cutoff_radius.push(radius as Real);
         self.image.push([0, 0, 0]);
         self.is_ghost.push(false);
+    }
+
+    /// Internal test-only core-row helper.
+    ///
+    /// # Safety
+    ///
+    /// This bypasses the synchronized [`ParticleStore`] transaction and must
+    /// only be used when there are no registered extensions, followed by the
+    /// caller setting a matching ownership partition. Production code must use
+    /// `ParticleStore::push_default_local`.
+    #[cfg(not(test))]
+    pub unsafe fn push_test_atom(&mut self, tag: u32, pos: [f64; 3], radius: f64, mass: f64) {
+        unsafe { self.push_test_atom_unchecked(tag, pos, radius, mass) }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn push_test_atom(&mut self, tag: u32, pos: [f64; 3], radius: f64, mass: f64) {
+        // SAFETY: crate tests construct core-only fixtures and set their
+        // ownership partition before handing them to a ParticleStore.
+        unsafe { self.push_test_atom_unchecked(tag, pos, radius, mass) }
     }
 
     /// Append one local core row with substrate defaults.
@@ -1430,7 +1506,11 @@ pub fn remove_ghost_atoms(mut atoms: ResMut<Atom>, registry: Res<AtomDataRegistr
 
 fn zero_all_forces(mut atoms: ResMut<Atom>, registry: Res<AtomDataRegistry>) {
     let n = atoms.len();
-    atoms.force[..n].fill([0.0; 3]);
+    atoms
+        .force
+        .iter_mut()
+        .take(n)
+        .for_each(|force| *force = [0.0; 3]);
     registry.zero_all(n);
 }
 

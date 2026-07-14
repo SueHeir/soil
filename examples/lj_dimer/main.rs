@@ -207,8 +207,8 @@ skin_fraction = 1.3
         let mut binder = cell.borrow_mut();
         let atoms = binder.downcast_mut::<Atom>().unwrap();
         atoms.dt = 2e-3;
-        atoms.push_test_atom(0, [0.5, 5.0, 5.0], CUTOFF, 1.0);
-        atoms.push_test_atom(1, [9.4, 5.0, 5.0], CUTOFF, 1.0);
+        unsafe { atoms.push_test_atom(0, [0.5, 5.0, 5.0], CUTOFF, 1.0) };
+        unsafe { atoms.push_test_atom(1, [9.4, 5.0, 5.0], CUTOFF, 1.0) };
         atoms.nlocal = 2;
         atoms.natoms = 2;
     }

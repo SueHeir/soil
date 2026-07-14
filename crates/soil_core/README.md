@@ -63,6 +63,13 @@ kernel access but cannot invoke a structural callback. Force and analysis
 kernels retain direct SoA access to existing rows, including `ParticlesWith`
 views; changing a value in an existing row is not a structural operation.
 
+Downstream code that only reads ownership should use `Atom::nlocal()`,
+`Atom::nghost()`, and `Atom::natoms()`. Register a late extension with
+`AtomDataRegistry::register_for_atoms(data, &atom)` so its default rows are
+backfilled against the live core store; do not supply a separate row count.
+Only extension-free test fixtures may use `Atom::set_layout_unchecked`, and
+must establish a complete core layout before any extension is registered.
+
 ## Features
 
 - `mpi_backend` (default): Enable MPI; disable for serial-only builds

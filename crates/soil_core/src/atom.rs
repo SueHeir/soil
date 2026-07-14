@@ -838,6 +838,24 @@ macro_rules! for_each_atom_vec {
 /// ```
 ///
 /// ```compile_fail
+/// use soil_core::Atom;
+/// let mut atoms = Atom::new();
+/// atoms.pos.swap(0, 1);
+/// ```
+///
+/// ```compile_fail
+/// use soil_core::Atom;
+/// let mut atoms = Atom::new();
+/// atoms.pos.rotate_left(1);
+/// ```
+///
+/// ```compile_fail
+/// use soil_core::Atom;
+/// let mut atoms = Atom::new();
+/// atoms.push_test_atom(1, [0.0; 3], 1.0, 1.0);
+/// ```
+///
+/// ```compile_fail
 /// use soil_core::AtomColumn;
 /// let _column = AtomColumn::from_vec_unchecked(vec![[0.0; 3]]);
 /// ```

@@ -341,58 +341,42 @@ fn assert_restart_fields_bit_identical(
 #[allow(clippy::unnecessary_cast)] // precision-conditional casts; see build_source
 fn restore_from_restart(data: &RestartData) -> (Atom, AtomDataRegistry) {
     let n = data.tag.len();
-    let mut atoms = Atom::new();
-    atoms.natoms = data.natoms;
-    atoms.nlocal = n as u32;
-    atoms.nghost = 0;
-    atoms.dt = data.dt;
-    // SAFETY: this helper mirrors the complete decoded replacement and sends it
-    // immediately through `replace_from_restart`, which validates alignment.
-    atoms.tag = unsafe { soil_core::AtomColumn::from_vec_unchecked(data.tag.clone()) };
-    atoms.atom_type = unsafe { soil_core::AtomColumn::from_vec_unchecked(data.atom_type.clone()) };
-    atoms.origin_index = unsafe { soil_core::AtomColumn::from_vec_unchecked(vec![0; n]) };
-    atoms.is_ghost = unsafe { soil_core::AtomColumn::from_vec_unchecked(vec![false; n]) };
-    atoms.pos = unsafe {
-        soil_core::AtomColumn::from_vec_unchecked(
-            data.pos_x
+    let atoms = Atom::from_local_rows(
+        data.natoms,
+        data.dt,
+        soil_core::LocalAtomRows {
+            tag: data.tag.clone(),
+            atom_type: data.atom_type.clone(),
+            pos: data
+                .pos_x
                 .iter()
                 .zip(&data.pos_y)
                 .zip(&data.pos_z)
                 .map(|((&x, &y), &z)| [x as Real, y as Real, z as Real])
                 .collect(),
-        )
-    };
-    atoms.vel = unsafe {
-        soil_core::AtomColumn::from_vec_unchecked(
-            data.vel_x
+            vel: data
+                .vel_x
                 .iter()
                 .zip(&data.vel_y)
                 .zip(&data.vel_z)
                 .map(|((&x, &y), &z)| [x as Real, y as Real, z as Real])
                 .collect(),
-        )
-    };
-    atoms.force = unsafe {
-        soil_core::AtomColumn::from_vec_unchecked(
-            data.force_x
+            force: data
+                .force_x
                 .iter()
                 .zip(&data.force_y)
                 .zip(&data.force_z)
                 .map(|((&x, &y), &z)| [x as Accum, y as Accum, z as Accum])
                 .collect(),
-        )
-    };
-    atoms.mass = unsafe {
-        soil_core::AtomColumn::from_vec_unchecked(data.mass.iter().map(|&m| m as Real).collect())
-    };
-    atoms.inv_mass = unsafe {
-        soil_core::AtomColumn::from_vec_unchecked(atoms.mass.iter().map(|&m| 1.0 / m).collect())
-    };
-    atoms.cutoff_radius = unsafe {
-        soil_core::AtomColumn::from_vec_unchecked(
-            data.cutoff_radius.iter().map(|&r| r as Real).collect(),
-        )
-    };
+            mass: data.mass.iter().map(|&mass| mass as Real).collect(),
+            cutoff_radius: data
+                .cutoff_radius
+                .iter()
+                .map(|&radius| radius as Real)
+                .collect(),
+        },
+    )
+    .expect("test restart rows are complete");
 
     let reg = registry_with_column();
     // Reproduce the post-setup store state: sized to nlocal with sentinels.

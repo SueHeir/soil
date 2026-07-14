@@ -785,9 +785,8 @@ macro_rules! for_each_atom_vec {
 /// ```
 ///
 /// ```compile_fail
-/// use soil_core::Atom;
-/// let mut atoms = Atom::new();
-/// atoms.pos = vec![[0.0; 3]].into();
+/// use soil_core::AtomColumn;
+/// let _column = AtomColumn::from_vec_unchecked(vec![[0.0; 3]]);
 /// ```
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct AtomColumn<T>(Vec<T>);
@@ -833,17 +832,6 @@ impl<T> AtomColumn<T> {
     /// those operations.
     pub unsafe fn as_mut_ptr(&mut self) -> *mut T {
         self.0.as_mut_ptr()
-    }
-
-    /// Wrap an externally decoded complete column.
-    ///
-    /// # Safety
-    ///
-    /// The caller must install this only as part of a complete, aligned core
-    /// replacement which is validated by [`ParticleStore`].  Normal callers
-    /// must use `ParticleStore` structural operations instead.
-    pub unsafe fn from_vec_unchecked(values: Vec<T>) -> Self {
-        Self(values)
     }
 
     /// Iterate existing rows mutably without exposing structural operations.
@@ -916,6 +904,31 @@ pub struct Atom {
     pub inv_mass: AtomColumn<Real>,
     /// PBC image flags: number of times atom has crossed each periodic boundary.
     pub image: AtomColumn<[i32; 3]>,
+}
+
+/// All core columns required to restore a local, ghost-free atom store.
+///
+/// This is deliberately an off-store transport object: its vectors may be
+/// decoded independently, but they cannot become live [`Atom`] columns until
+/// [`Atom::from_local_rows`] verifies that every one has the same row count.
+/// [`ParticleStore::replace_from_restart`] then atomically pairs that complete
+/// core replacement with the registered extension rows.
+#[derive(Debug, Default)]
+pub struct LocalAtomRows {
+    /// Globally unique particle tags.
+    pub tag: Vec<u32>,
+    /// Per-particle type indices.
+    pub atom_type: Vec<u32>,
+    /// Particle positions.
+    pub pos: Vec<[Real; 3]>,
+    /// Particle velocities.
+    pub vel: Vec<[Real; 3]>,
+    /// Particle force accumulators.
+    pub force: Vec<[Accum; 3]>,
+    /// Particle masses.
+    pub mass: Vec<Real>,
+    /// Per-particle interaction cutoff radii.
+    pub cutoff_radius: Vec<Real>,
 }
 
 impl Default for Atom {
@@ -1005,6 +1018,50 @@ impl Atom {
     for_each_atom_vec!(impl_atom_reserve);
     for_each_atom_vec!(impl_atom_validate_rows);
     for_each_atom_vec!(impl_atom_apply_permutation);
+
+    /// Build a complete local core replacement from decoded rows.
+    ///
+    /// The resulting store has no ghosts and derives `inv_mass`, origin indices,
+    /// and image counters instead of accepting independently mutable versions of
+    /// those structural columns.  It is intentionally not an installation API:
+    /// use [`ParticleStore::replace_from_restart`] to pair it with extensions.
+    pub fn from_local_rows(
+        natoms: u64,
+        dt: f64,
+        rows: LocalAtomRows,
+    ) -> Result<Self, ParticleStoreError> {
+        let n = rows.tag.len();
+        if rows.atom_type.len() != n
+            || rows.pos.len() != n
+            || rows.vel.len() != n
+            || rows.force.len() != n
+            || rows.mass.len() != n
+            || rows.cutoff_radius.len() != n
+            || u32::try_from(n).is_err()
+        {
+            return Err(ParticleStoreError::InvalidStructuralOperation);
+        }
+
+        let inv_mass = rows.mass.iter().map(|&mass| 1.0 / mass).collect();
+        Ok(Self {
+            natoms,
+            nlocal: n as u32,
+            nghost: 0,
+            ntypes: 1,
+            dt,
+            tag: AtomColumn(rows.tag),
+            atom_type: AtomColumn(rows.atom_type),
+            origin_index: AtomColumn(vec![0; n]),
+            is_ghost: AtomColumn(vec![false; n]),
+            pos: AtomColumn(rows.pos),
+            vel: AtomColumn(rows.vel),
+            force: AtomColumn(rows.force),
+            cutoff_radius: AtomColumn(rows.cutoff_radius),
+            mass: AtomColumn(rows.mass),
+            inv_mass: AtomColumn(inv_mass),
+            image: AtomColumn(vec![[0; 3]; n]),
+        })
+    }
 
     /// Total number of atoms (local + ghost) currently stored.
     pub fn len(&self) -> usize {
@@ -2298,5 +2355,51 @@ mod tests {
         apply_permutation_in_place(&mut values, &[2, 0, 1], 3, &mut visited);
 
         assert_eq!(values, vec!["c", "a", "b", "ghost"]);
+    }
+
+    #[test]
+    fn complete_local_rows_rejects_one_short_core_column_before_installation() {
+        let rows = LocalAtomRows {
+            tag: vec![1, 2],
+            atom_type: vec![0, 0],
+            pos: vec![[0.0; 3]; 2],
+            vel: vec![[0.0; 3]; 2],
+            force: vec![[0.0; 3]; 2],
+            mass: vec![1.0, 1.0],
+            cutoff_radius: vec![1.0],
+        };
+
+        assert!(matches!(
+            Atom::from_local_rows(2, 0.01, rows),
+            Err(ParticleStoreError::InvalidStructuralOperation)
+        ));
+    }
+
+    #[test]
+    fn complete_local_rows_derives_nonserialized_columns() {
+        let atom = Atom::from_local_rows(
+            9,
+            0.25,
+            LocalAtomRows {
+                tag: vec![7],
+                atom_type: vec![3],
+                pos: vec![[1.0, 2.0, 3.0]],
+                vel: vec![[4.0, 5.0, 6.0]],
+                force: vec![[7.0, 8.0, 9.0]],
+                mass: vec![2.0],
+                cutoff_radius: vec![0.5],
+            },
+        )
+        .unwrap();
+
+        assert!(atom.validate_rows());
+        assert_eq!(
+            (atom.natoms, atom.nlocal, atom.nghost, atom.dt),
+            (9, 1, 0, 0.25)
+        );
+        assert_eq!(atom.inv_mass[..], [0.5]);
+        assert_eq!(atom.origin_index[..], [0]);
+        assert_eq!(atom.image[..], [[0; 3]]);
+        assert_eq!(atom.is_ghost[..], [false]);
     }
 }

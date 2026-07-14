@@ -325,14 +325,14 @@ pub fn read_restart(
     restored.nghost = 0;
     restored.dt = data.dt;
 
-    restored.tag = data.tag;
-    restored.atom_type = data.atom_type;
-    restored.origin_index = vec![0; n];
-    restored.is_ghost = vec![false; n];
+    restored.tag = data.tag.into();
+    restored.atom_type = data.atom_type.into();
+    restored.origin_index = vec![0; n].into();
+    restored.is_ghost = vec![false; n].into();
     // Restart intentionally does not persist periodic image counters: a restart
     // begins with locally owned, unwrapped rows.  Still materialize the core
     // column so the replacement passed to ParticleStore is structurally complete.
-    restored.image = vec![[0; 3]; n];
+    restored.image = vec![[0; 3]; n].into();
     // Restart wire format is f64; convert back to the build's storage precision.
     restored.pos = data
         .pos_x

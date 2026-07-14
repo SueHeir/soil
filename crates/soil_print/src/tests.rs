@@ -3,8 +3,8 @@ use crate::restart::{write_restart_inner, RestartData};
 use crate::thermo::{capitalize, default_columns, parse_thermo_column, print_thermo, setup_thermo};
 use grass_scheduler::Scheduler;
 use soil_core::{
-    CommResource, Neighbor, ParticleSimScheduleSet, RunConfig, RunState, ScheduleSetupSet,
-    SingleProcessComm,
+    CommResource, Neighbor, ParticleSimScheduleSet, ParticleStore, RunConfig, RunState,
+    ScheduleSetupSet, SingleProcessComm,
 };
 use std::fs::{self, File};
 
@@ -249,29 +249,23 @@ fn build_source() -> (Atom, AtomDataRegistry) {
     let (rows,) = fixture_atoms();
     let mut atoms = Atom::new();
     let reg = registry_with_column();
-    {
+    for (tag, atype, pos, vel, force, mass, cutoff, image, cs, cv) in &rows {
+        let mut store = ParticleStore::new(&mut atoms, &reg);
+        store.push_default_local(rows.len() as u64).unwrap();
+        let i = store.atoms().len() - 1;
+        let atoms = store.atoms_mut();
+        atoms.tag[i] = *tag;
+        atoms.atom_type[i] = *atype;
+        atoms.pos[i] = [pos[0] as Real, pos[1] as Real, pos[2] as Real];
+        atoms.vel[i] = [vel[0] as Real, vel[1] as Real, vel[2] as Real];
+        atoms.force[i] = [force[0] as Accum, force[1] as Accum, force[2] as Accum];
+        atoms.mass[i] = *mass as Real;
+        atoms.inv_mass[i] = (1.0 / *mass) as Real;
+        atoms.cutoff_radius[i] = *cutoff as Real;
+        atoms.image[i] = *image;
         let mut col = reg.get_mut::<GenericColumn>().unwrap();
-        for (tag, atype, pos, vel, force, mass, cutoff, image, cs, cv) in &rows {
-            atoms.tag.push(*tag);
-            atoms.atom_type.push(*atype);
-            atoms.origin_index.push(0);
-            atoms.is_ghost.push(false);
-            atoms
-                .pos
-                .push([pos[0] as Real, pos[1] as Real, pos[2] as Real]);
-            atoms
-                .vel
-                .push([vel[0] as Real, vel[1] as Real, vel[2] as Real]);
-            atoms
-                .force
-                .push([force[0] as Accum, force[1] as Accum, force[2] as Accum]);
-            atoms.mass.push(*mass as Real);
-            atoms.inv_mass.push((1.0 / *mass) as Real);
-            atoms.cutoff_radius.push(*cutoff as Real);
-            atoms.image.push(*image);
-            col.scalar.push(*cs);
-            col.vector.push(*cv);
-        }
+        col.scalar[i] = *cs;
+        col.vector[i] = *cv;
     }
     atoms.nlocal = rows.len() as u32;
     atoms.natoms = rows.len() as u64;
@@ -352,10 +346,10 @@ fn restore_from_restart(data: &RestartData) -> (Atom, AtomDataRegistry) {
     atoms.nlocal = n as u32;
     atoms.nghost = 0;
     atoms.dt = data.dt;
-    atoms.tag = data.tag.clone();
-    atoms.atom_type = data.atom_type.clone();
-    atoms.origin_index = vec![0; n];
-    atoms.is_ghost = vec![false; n];
+    atoms.tag = data.tag.clone().into();
+    atoms.atom_type = data.atom_type.clone().into();
+    atoms.origin_index = vec![0; n].into();
+    atoms.is_ghost = vec![false; n].into();
     atoms.pos = data
         .pos_x
         .iter()
@@ -570,11 +564,12 @@ fn substrate_migration_across_domain_boundary_bit_identical() {
 
     // ── Source rank: pack the migrant onto the exchange wire, then evict it ──
     let mut buf: Vec<f64> = Vec::new();
-    src.pack_exchange(migrant, &mut buf);
-    src_reg.pack_all(migrant, &mut buf);
-    src.swap_remove(migrant);
-    src_reg.swap_remove_all(migrant);
-    src.nlocal -= 1;
+    ParticleStore::new(&mut src, &src_reg)
+        .pack_migrant(migrant, &mut buf)
+        .unwrap();
+    ParticleStore::new(&mut src, &src_reg)
+        .swap_remove(migrant)
+        .unwrap();
     // Source no longer owns it.
     assert!(
         !src.tag.contains(&exp_tag),
@@ -588,11 +583,9 @@ fn substrate_migration_across_domain_boundary_bit_identical() {
     // ── Destination rank: unpack the migrant (mirrors comm::unpack_exchanged) ─
     let (mut dst, dst_reg) = build_source(); // pre-existing atoms on the dest rank
     let dst_before = dst.nlocal as usize;
-    let mut pos = 0;
-    pos += dst.unpack_atom(&buf[pos..], /* is_ghost = */ false);
-    pos += dst_reg.unpack_all(&buf[pos..]);
-    assert_eq!(pos, buf.len(), "exchange payload fully consumed");
-    dst.nlocal += 1;
+    ParticleStore::new(&mut dst, &dst_reg)
+        .append_migrant(&buf)
+        .unwrap();
 
     let j = dst.len() - 1; // migrated atom is appended last
     assert!(

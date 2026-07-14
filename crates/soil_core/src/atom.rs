@@ -55,6 +55,7 @@
 use std::{
     any::{Any, TypeId},
     cell::{Ref, RefCell, RefMut},
+    ops::{Deref, DerefMut},
     panic::{catch_unwind, AssertUnwindSafe},
 };
 
@@ -735,6 +736,62 @@ macro_rules! for_each_atom_vec {
 
 // ── Atom ──────────────────────────────────────────────────────────────────────
 
+/// Slice-shaped public SoA storage: hot kernels can update existing rows, but
+/// structural edits cannot bypass [`ParticleStore`].
+///
+/// ```compile_fail
+/// use soil_core::Atom;
+/// let mut atoms = Atom::new();
+/// atoms.pos.push([0.0; 3]);
+/// ```
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct AtomColumn<T>(Vec<T>);
+impl<T> Deref for AtomColumn<T> {
+    type Target = [T];
+    fn deref(&self) -> &[T] {
+        &self.0
+    }
+}
+impl<T> DerefMut for AtomColumn<T> {
+    fn deref_mut(&mut self) -> &mut [T] {
+        &mut self.0
+    }
+}
+impl<T: PartialEq> PartialEq<Vec<T>> for AtomColumn<T> {
+    fn eq(&self, other: &Vec<T>) -> bool {
+        self.0 == *other
+    }
+}
+impl<T: PartialEq> PartialEq<AtomColumn<T>> for Vec<T> {
+    fn eq(&self, other: &AtomColumn<T>) -> bool {
+        *self == other.0
+    }
+}
+impl<T> From<Vec<T>> for AtomColumn<T> {
+    fn from(v: Vec<T>) -> Self {
+        Self(v)
+    }
+}
+impl<T> FromIterator<T> for AtomColumn<T> {
+    fn from_iter<I: IntoIterator<Item = T>>(i: I) -> Self {
+        Self(i.into_iter().collect())
+    }
+}
+impl<T> AtomColumn<T> {
+    fn push(&mut self, value: T) {
+        self.0.push(value);
+    }
+    fn truncate(&mut self, len: usize) {
+        self.0.truncate(len);
+    }
+    fn swap_remove(&mut self, index: usize) -> T {
+        self.0.swap_remove(index)
+    }
+    fn reserve(&mut self, additional: usize) {
+        self.0.reserve(additional);
+    }
+}
+
 /// Struct-of-arrays storage for all per-atom fields (position, velocity, force, etc.).
 #[derive(Clone)]
 pub struct Atom {
@@ -752,31 +809,31 @@ pub struct Atom {
     pub dt: f64,
 
     /// Globally unique atom identifier (persists across migration/restart).
-    pub tag: Vec<u32>,
+    pub tag: AtomColumn<u32>,
     /// Per-atom type index in `0..ntypes`.
-    pub atom_type: Vec<u32>,
+    pub atom_type: AtomColumn<u32>,
     /// For a ghost, the local index of its owner atom on the sending rank
     /// (set during border packing so reverse comm can accumulate back).
-    pub origin_index: Vec<i32>,
+    pub origin_index: AtomColumn<i32>,
     /// `true` for ghost (halo) atoms, `false` for locally owned atoms.
-    pub is_ghost: Vec<bool>,
+    pub is_ghost: AtomColumn<bool>,
 
     // Interleaved arrays: field[i] = [x, y, z]
     /// Position `[x, y, z]` per atom.
-    pub pos: Vec<[Real; 3]>,
+    pub pos: AtomColumn<[Real; 3]>,
     /// Velocity `[vx, vy, vz]` per atom.
-    pub vel: Vec<[Real; 3]>,
+    pub vel: AtomColumn<[Real; 3]>,
     /// Force accumulator `[fx, fy, fz]` per atom (zeroed each step before force systems).
-    pub force: Vec<[Accum; 3]>,
+    pub force: AtomColumn<[Accum; 3]>,
 
     /// Per-atom interaction cutoff radius; feeds the neighbor skin/ghost-cutoff chain.
-    pub cutoff_radius: Vec<Real>,
+    pub cutoff_radius: AtomColumn<Real>,
     /// Per-atom mass.
-    pub mass: Vec<Real>,
+    pub mass: AtomColumn<Real>,
     /// Cached reciprocal mass `1/mass` (kept in sync with `mass`; avoids per-step division).
-    pub inv_mass: Vec<Real>,
+    pub inv_mass: AtomColumn<Real>,
     /// PBC image flags: number of times atom has crossed each periodic boundary.
-    pub image: Vec<[i32; 3]>,
+    pub image: AtomColumn<[i32; 3]>,
 }
 
 impl Default for Atom {
@@ -795,7 +852,7 @@ macro_rules! impl_atom_new {
                 nghost: 0,
                 ntypes: 1,
                 dt: 1.0,
-                $( $field: Vec::new(), )*
+                $( $field: AtomColumn::default(), )*
             }
         }
     };
@@ -1010,6 +1067,16 @@ impl<'a> ParticleStore<'a> {
             "particle core or extension rows are misaligned"
         );
         Self { atoms, registry }
+    }
+
+    /// Read the core SoA from a synchronized store.
+    pub fn atoms(&self) -> &Atom {
+        self.atoms
+    }
+
+    /// Update existing core rows; [`AtomColumn`] cannot change a row count.
+    pub fn atoms_mut(&mut self) -> &mut Atom {
+        self.atoms
     }
 
     /// Check the complete structural invariant, including ownership partition.
@@ -1778,7 +1845,7 @@ mod tests {
         let mut replacement = Atom::new();
         replacement.push_test_atom(20, [1.0; 3], 1.0, 2.0);
         replacement.nlocal = 1;
-        replacement.mass.clear();
+        replacement.mass.truncate(0);
         assert!(!replacement.validate_rows());
 
         assert_eq!(

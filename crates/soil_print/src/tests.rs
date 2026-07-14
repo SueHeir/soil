@@ -135,15 +135,15 @@ impl AtomData for GenericColumn {
     fn len(&self) -> usize {
         self.scalar.len()
     }
-    fn push_default(&mut self) {
+    unsafe fn push_default(&mut self) {
         self.scalar.push(0.0);
         self.vector.push([0.0; 3]);
     }
-    fn truncate(&mut self, n: usize) {
+    unsafe fn truncate(&mut self, n: usize) {
         self.scalar.truncate(n);
         self.vector.truncate(n);
     }
-    fn swap_remove(&mut self, i: usize) {
+    unsafe fn swap_remove(&mut self, i: usize) {
         self.scalar.swap_remove(i);
         self.vector.swap_remove(i);
     }
@@ -151,16 +151,16 @@ impl AtomData for GenericColumn {
         buf.push(self.scalar[i]);
         buf.extend_from_slice(&self.vector[i]);
     }
-    fn unpack(&mut self, buf: &[f64]) -> usize {
+    unsafe fn unpack(&mut self, buf: &[f64]) -> usize {
         self.scalar.push(buf[0]);
         self.vector.push([buf[1], buf[2], buf[3]]);
         4
     }
-    fn apply_permutation(&mut self, perm: &[usize], n: usize) {
+    unsafe fn apply_permutation(&mut self, perm: &[usize], n: usize) {
         let mut visited = Vec::new();
-        self.apply_permutation_with_scratch(perm, n, &mut visited);
+        unsafe { self.apply_permutation_with_scratch(perm, n, &mut visited) };
     }
-    fn apply_permutation_with_scratch(
+    unsafe fn apply_permutation_with_scratch(
         &mut self,
         perm: &[usize],
         n: usize,
@@ -340,8 +340,7 @@ fn assert_restart_fields_bit_identical(
 /// start from an empty store, else restored columns land at the wrong indices).
 #[allow(clippy::unnecessary_cast)] // precision-conditional casts; see build_source
 fn restore_from_restart(data: &RestartData) -> (Atom, AtomDataRegistry) {
-    let n = data.tag.len();
-    let atoms = Atom::from_local_rows(
+    let replacement = Atom::from_local_rows(
         data.natoms,
         data.dt,
         soil_core::LocalAtomRows {
@@ -378,18 +377,14 @@ fn restore_from_restart(data: &RestartData) -> (Atom, AtomDataRegistry) {
     )
     .expect("test restart rows are complete");
 
+    let mut atoms = Atom::new();
     let reg = registry_with_column();
-    // Reproduce the post-setup store state: sized to nlocal with sentinels.
-    {
-        let mut col = reg.get_mut::<GenericColumn>().unwrap();
-        for _ in 0..n {
-            col.scalar.push(f64::NAN);
-            col.vector.push([f64::NAN; 3]);
-        }
-    }
-    if !data.atom_data_buffers.is_empty() {
-        reg.unpack_all_from_restart(&data.atom_data_buffers);
-    }
+    // Register against the current (empty) core, then use the same atomic
+    // replacement boundary as production restart loading. No extension-only
+    // restart decoder is exposed to this test or downstream users.
+    ParticleStore::new(&mut atoms, &reg)
+        .replace_from_restart(replacement, &data.atom_data_buffers)
+        .expect("test restart rows are aligned");
     (atoms, reg)
 }
 

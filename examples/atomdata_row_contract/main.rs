@@ -29,7 +29,7 @@ impl AtomData for ManualMultiColumn {
     fn len(&self) -> usize {
         self.scalar.len()
     }
-    fn push_default(&mut self) {
+    unsafe fn push_default(&mut self) {
         self.scalar.push(0.0);
         self.vector.push([0.0; 3]);
     }
@@ -45,11 +45,11 @@ impl AtomData for ManualMultiColumn {
         }
         Ok(())
     }
-    fn truncate(&mut self, n: usize) {
+    unsafe fn truncate(&mut self, n: usize) {
         self.scalar.truncate(n);
         self.vector.truncate(n);
     }
-    fn swap_remove(&mut self, i: usize) {
+    unsafe fn swap_remove(&mut self, i: usize) {
         self.scalar.swap_remove(i);
         self.vector.swap_remove(i);
     }
@@ -57,12 +57,12 @@ impl AtomData for ManualMultiColumn {
         buf.push(self.scalar[i]);
         buf.extend_from_slice(&self.vector[i]);
     }
-    fn unpack(&mut self, buf: &[f64]) -> usize {
+    unsafe fn unpack(&mut self, buf: &[f64]) -> usize {
         self.scalar.push(buf[0]);
         self.vector.push([buf[1], buf[2], buf[3]]);
         4
     }
-    fn apply_permutation(&mut self, _perm: &[usize], _n: usize) {}
+    unsafe fn apply_permutation(&mut self, _perm: &[usize], _n: usize) {}
 }
 
 fn main() {

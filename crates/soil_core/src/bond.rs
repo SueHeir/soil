@@ -96,27 +96,27 @@ impl AtomData for BondStore {
         self.bonds.len()
     }
 
-    fn push_default(&mut self) {
+    unsafe fn push_default(&mut self) {
         self.bonds.push(Vec::new());
     }
 
-    fn truncate(&mut self, n: usize) {
+    unsafe fn truncate(&mut self, n: usize) {
         self.bonds.resize_with(n, Vec::new);
         self.bonds.truncate(n);
     }
 
-    fn swap_remove(&mut self, i: usize) {
+    unsafe fn swap_remove(&mut self, i: usize) {
         if i < self.bonds.len() {
             self.bonds.swap_remove(i);
         }
     }
 
-    fn apply_permutation(&mut self, perm: &[usize], n: usize) {
+    unsafe fn apply_permutation(&mut self, perm: &[usize], n: usize) {
         let mut visited = Vec::new();
-        self.apply_permutation_with_scratch(perm, n, &mut visited);
+        unsafe { self.apply_permutation_with_scratch(perm, n, &mut visited) };
     }
 
-    fn apply_permutation_with_scratch(
+    unsafe fn apply_permutation_with_scratch(
         &mut self,
         perm: &[usize],
         n: usize,
@@ -140,7 +140,7 @@ impl AtomData for BondStore {
         }
     }
 
-    fn unpack(&mut self, buf: &[f64]) -> usize {
+    unsafe fn unpack(&mut self, buf: &[f64]) -> usize {
         let count = buf[0] as usize;
         let mut list = Vec::with_capacity(count);
         let mut pos = 1;
@@ -222,7 +222,7 @@ mod tests {
         assert_eq!(buf.len(), 1 + 3 * 2); // count + 2 × (tag, type, r0)
 
         let mut store2 = BondStore::new();
-        let consumed = store2.unpack(&buf);
+        let consumed = unsafe { store2.unpack(&buf) };
         assert_eq!(consumed, buf.len());
         assert_eq!(store2.bonds.len(), 1);
         assert_eq!(store2.bonds[0].len(), 2);
@@ -242,7 +242,7 @@ mod tests {
         assert_eq!(buf[0] as usize, 0);
 
         let mut store2 = BondStore::new();
-        let consumed = store2.unpack(&buf);
+        let consumed = unsafe { store2.unpack(&buf) };
         assert_eq!(consumed, 1);
         assert_eq!(store2.bonds[0].len(), 0);
     }
@@ -300,7 +300,7 @@ mod tests {
         let mut store = make_store_with_bonds();
         assert_eq!(store.bonds.len(), 4);
         // Remove atom 1 (tag 20) — last element (atom 3) takes its place
-        store.swap_remove(1);
+        unsafe { store.swap_remove(1) };
         assert_eq!(store.bonds.len(), 3);
         // Index 1 should now be atom 3's data (empty bonds)
         assert_eq!(store.bonds[1].len(), 0);
@@ -311,7 +311,7 @@ mod tests {
     #[test]
     fn truncate_grows_and_shrinks() {
         let mut store = BondStore::new();
-        store.truncate(3);
+        unsafe { store.truncate(3) };
         assert_eq!(store.bonds.len(), 3);
         // Add some data to first entry
         store.bonds[0].push(BondEntry {
@@ -319,7 +319,7 @@ mod tests {
             bond_type: 0,
             r0: 2.0,
         });
-        store.truncate(1);
+        unsafe { store.truncate(1) };
         assert_eq!(store.bonds.len(), 1);
         assert_eq!(store.bonds[0][0].partner_tag, 5);
     }

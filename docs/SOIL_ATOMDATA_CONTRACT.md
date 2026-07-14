@@ -98,16 +98,16 @@ semantic contract — honor it or parallel runs diverge silently.
 
 Plus `apply_permutation` / `truncate` / `swap_remove` (keep every column in
 lockstep when the substrate reorders or culls atoms) — these the derive *does*
-generate.
+generate. Those, along with `push_default` and `unpack`, are `unsafe` trait
+hooks: extension authors implement them, but only `ParticleStore` may invoke
+them during normal operation because it owns the matching core transaction.
 
 Restart checkpointing reuses the migration `pack` / `unpack` rather than adding
-new per-extension methods. The derive does **not** emit `pack_all_for_restart`
-or `unpack_all_from_restart`. Those are methods on the **registry**
-(`AtomDataRegistry::pack_all_for_restart` / `unpack_all_from_restart`,
-`soil_core::atom`), driven by `soil_print`'s restart path: they walk every
-registered extension and call its derived `pack` / `unpack` per atom. So
-restart correctness rides entirely on `pack` / `unpack` — and therefore on the
-same field-declaration-order wire layout as migration.
+new per-extension methods. The registry provides read-only restart packing;
+`ParticleStore::replace_from_restart` is the only restart decoding boundary.
+It validates a complete core replacement, decodes every extension row, and
+commits all columns atomically. Restart correctness therefore rides entirely on
+the same field-declaration-order `pack` / `unpack` wire layout as migration.
 
 ### The canonical per-step ordering
 

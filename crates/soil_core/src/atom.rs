@@ -94,12 +94,12 @@ pub const ATOM_PACK_SIZE: usize = 17;
 ///     fn as_any_mut(&mut self) -> &mut dyn Any { self }
 ///     fn snapshot(&self) -> Box<dyn AtomData> { Box::new(Charge { q: self.q.clone() }) }
 ///     fn len(&self) -> usize { self.q.len() }
-///     fn push_default(&mut self) { self.q.push(0.0); }
-///     fn truncate(&mut self, n: usize) { self.q.truncate(n); }
-///     fn swap_remove(&mut self, i: usize) { self.q.swap_remove(i); }
+///     unsafe fn push_default(&mut self) { self.q.push(0.0); }
+///     unsafe fn truncate(&mut self, n: usize) { self.q.truncate(n); }
+///     unsafe fn swap_remove(&mut self, i: usize) { self.q.swap_remove(i); }
 ///     fn pack(&self, i: usize, buf: &mut Vec<f64>) { buf.push(self.q[i]); }
-///     fn unpack(&mut self, buf: &[f64]) -> usize { self.q.push(buf[0]); 1 }
-///     fn apply_permutation(&mut self, perm: &[usize], n: usize) {
+///     unsafe fn unpack(&mut self, buf: &[f64]) -> usize { self.q.push(buf[0]); 1 }
+///     unsafe fn apply_permutation(&mut self, perm: &[usize], n: usize) {
 ///         let mut visited = Vec::new();
 ///         apply_permutation_in_place(&mut self.q, perm, n, &mut visited);
 ///     }
@@ -200,7 +200,13 @@ pub trait AtomData: Any {
         self.len() == 0
     }
     /// Append one default row, used when an extension is registered late.
-    fn push_default(&mut self);
+    ///
+    /// # Safety
+    ///
+    /// The caller must append the matching core row and every other extension
+    /// row in the same structural transaction.  Ordinary simulation code must
+    /// use [`ParticleStore`] instead of calling this through a registry borrow.
+    unsafe fn push_default(&mut self);
     /// Reserve capacity for future rows. This is a capacity hint only; it does
     /// not change the extension's row count. The default keeps custom stores
     /// source-compatible.
@@ -223,16 +229,36 @@ pub trait AtomData: Any {
         }
     }
     /// Shrink all per-atom Vecs to length `n`, discarding trailing entries.
-    fn truncate(&mut self, n: usize);
+    ///
+    /// # Safety
+    ///
+    /// The caller must keep the core store and every registered extension
+    /// aligned.
+    unsafe fn truncate(&mut self, n: usize);
     /// Remove atom at index `i` by swapping with the last element.
-    fn swap_remove(&mut self, i: usize);
+    ///
+    /// # Safety
+    ///
+    /// The caller must perform the same removal in the core store and every
+    /// registered extension.
+    unsafe fn swap_remove(&mut self, i: usize);
     /// Serialize all fields for atom `i` into `buf` (exchange/border comm).
     fn pack(&self, i: usize, buf: &mut Vec<f64>);
     /// Deserialize one atom's fields from `buf`, appending to internal Vecs.
     /// Returns the number of `f64`s consumed.
-    fn unpack(&mut self, buf: &[f64]) -> usize;
+    ///
+    /// # Safety
+    ///
+    /// The caller must append one matching core row and a row in every other
+    /// extension, or roll the operation back.
+    unsafe fn unpack(&mut self, buf: &[f64]) -> usize;
     /// Reorder atoms according to `perm[0..n]` (used by spatial sorting).
-    fn apply_permutation(&mut self, perm: &[usize], n: usize);
+    ///
+    /// # Safety
+    ///
+    /// The caller must apply the same validated permutation to the core store
+    /// and every registered extension.
+    unsafe fn apply_permutation(&mut self, perm: &[usize], n: usize);
 
     /// Pack forward-comm fields (e.g. omega for DEM) into buf.
     fn pack_forward(&self, _i: usize, _buf: &mut Vec<f64>) {}
@@ -253,13 +279,13 @@ pub trait AtomData: Any {
     /// Implementations should use this when possible so spatial sorting can reuse
     /// one scratch allocation across all registered extensions. The default keeps
     /// older hand-written implementations source-compatible.
-    fn apply_permutation_with_scratch(
+    unsafe fn apply_permutation_with_scratch(
         &mut self,
         perm: &[usize],
         n: usize,
         _visited: &mut Vec<bool>,
     ) {
-        self.apply_permutation(perm, n);
+        unsafe { self.apply_permutation(perm, n) };
     }
     /// Number of f64s per atom in forward comm.
     fn forward_comm_size(&self) -> usize {
@@ -428,7 +454,10 @@ impl AtomDataRegistry {
         }
         if data.is_empty() {
             for _ in 0..atom_count {
-                data.push_default();
+                // SAFETY: registration is the only public setup boundary; it
+                // backfills this new extension to the already-fixed core row
+                // count before publishing it in the registry.
+                unsafe { data.push_default() };
             }
             match data.validate_rows(atom_count) {
                 Ok(()) => {}
@@ -477,6 +506,15 @@ impl AtomDataRegistry {
     }
 
     /// Borrow a registered [`AtomData`] extension mutably, or `None` if not registered.
+    /// Existing-row values remain mutable for force and analysis kernels. The
+    /// row-changing [`AtomData`] callbacks remain unsafe, so a safe registry
+    /// borrow cannot desynchronize this extension from the core store.
+    ///
+    /// ```compile_fail
+    /// use soil_core::{AtomData, AtomDataRegistry, BondStore};
+    /// let registry = AtomDataRegistry::new();
+    /// registry.get_mut::<BondStore>().unwrap().truncate(0);
+    /// ```
     pub fn get_mut<T: AtomData + 'static>(&self) -> Option<RefMut<'_, T>> {
         let id = TypeId::of::<T>();
         self.stores
@@ -522,7 +560,9 @@ impl AtomDataRegistry {
     /// the corresponding core operation by [`ParticleStore`].
     pub(crate) fn truncate_all(&self, n: usize) {
         for (_, cell) in &self.stores {
-            cell.borrow_mut().truncate(n);
+            // SAFETY: ParticleStore pairs this registry-wide operation with
+            // the matching core structural transaction.
+            unsafe { cell.borrow_mut().truncate(n) };
         }
     }
 
@@ -533,7 +573,9 @@ impl AtomDataRegistry {
     /// same transaction as the core SoA append.
     fn push_default_all(&self) {
         for (_, cell) in &self.stores {
-            cell.borrow_mut().push_default();
+            // SAFETY: called only from ParticleStore's core+extension
+            // transaction.
+            unsafe { cell.borrow_mut().push_default() };
         }
     }
 
@@ -571,7 +613,8 @@ impl AtomDataRegistry {
     /// Remove atom at index `i` from all registered extensions via swap-remove.
     pub(crate) fn swap_remove_all(&self, i: usize) {
         for (_, cell) in &self.stores {
-            cell.borrow_mut().swap_remove(i);
+            // SAFETY: ParticleStore mirrors this in every core column.
+            unsafe { cell.borrow_mut().swap_remove(i) };
         }
     }
 
@@ -586,7 +629,9 @@ impl AtomDataRegistry {
     pub(crate) fn unpack_all(&self, buf: &[f64]) -> usize {
         let mut pos = 0;
         for (_, cell) in &self.stores {
-            pos += cell.borrow_mut().unpack(&buf[pos..]);
+            // SAFETY: ParticleStore contains this legacy decoder behind an
+            // all-or-nothing transaction.
+            pos += unsafe { cell.borrow_mut().unpack(&buf[pos..]) };
         }
         pos
     }
@@ -612,8 +657,12 @@ impl AtomDataRegistry {
         visited: &mut Vec<bool>,
     ) {
         for (_, cell) in &self.stores {
-            cell.borrow_mut()
-                .apply_permutation_with_scratch(perm, n, visited);
+            // SAFETY: ParticleStore validates and applies this same
+            // permutation to all core and extension columns.
+            unsafe {
+                cell.borrow_mut()
+                    .apply_permutation_with_scratch(perm, n, visited)
+            };
         }
     }
 
@@ -699,26 +748,6 @@ impl AtomDataRegistry {
             .collect()
     }
 
-    /// Restore all extensions from restart file buffers (one buffer per extension).
-    ///
-    /// `unpack` is **push-based**: each call appends one atom's record to the
-    /// store. By the time a restart is read the stores have already been sized
-    /// to `nlocal` (empty per-atom slots) by `truncate_all` during setup, so we
-    /// must clear each store to length 0 first — otherwise the unpacked atoms
-    /// land at indices `[nlocal..2*nlocal)` and every atom reads a stale empty
-    /// slot at `[i]`, silently dropping restored per-atom state (e.g. rotational
-    /// `DemAtom` columns and per-contact tangential spring history).
-    pub fn unpack_all_from_restart(&self, buffers: &[Vec<f64>]) {
-        for ((_, cell), buf) in self.stores.iter().zip(buffers.iter()) {
-            let mut store = cell.borrow_mut();
-            store.truncate(0); // reset: push-based unpack must start from empty to stay index-aligned
-            let mut pos = 0;
-            while pos < buf.len() {
-                pos += store.unpack(&buf[pos..]);
-            }
-        }
-    }
-
     /// Decode an exact restart row count, rejecting under- and over-consumption.
     fn unpack_restart_rows(&self, expected_rows: usize, buffers: &[Vec<f64>]) -> bool {
         if buffers.len() != self.stores.len() {
@@ -726,10 +755,10 @@ impl AtomDataRegistry {
         }
         for ((_, cell), buf) in self.stores.iter().zip(buffers) {
             let mut store = cell.borrow_mut();
-            store.truncate(0);
+            unsafe { store.truncate(0) };
             let mut pos = 0;
             for _ in 0..expected_rows {
-                let used = store.unpack(&buf[pos..]);
+                let used = unsafe { store.unpack(&buf[pos..]) };
                 if used == 0 || used > buf.len().saturating_sub(pos) {
                     return false;
                 }
@@ -1641,27 +1670,27 @@ mod tests {
         fn len(&self) -> usize {
             self.rows.len()
         }
-        fn push_default(&mut self) {
+        unsafe fn push_default(&mut self) {
             self.rows.push(-1.0);
         }
-        fn truncate(&mut self, n: usize) {
+        unsafe fn truncate(&mut self, n: usize) {
             self.rows.truncate(n);
         }
-        fn swap_remove(&mut self, i: usize) {
+        unsafe fn swap_remove(&mut self, i: usize) {
             self.rows.swap_remove(i);
         }
         fn pack(&self, i: usize, buf: &mut Vec<f64>) {
             buf.push(self.rows[i]);
         }
-        fn unpack(&mut self, buf: &[f64]) -> usize {
+        unsafe fn unpack(&mut self, buf: &[f64]) -> usize {
             self.rows.push(buf[0]);
             1
         }
-        fn apply_permutation(&mut self, perm: &[usize], n: usize) {
+        unsafe fn apply_permutation(&mut self, perm: &[usize], n: usize) {
             let mut visited = Vec::new();
-            self.apply_permutation_with_scratch(perm, n, &mut visited);
+            unsafe { self.apply_permutation_with_scratch(perm, n, &mut visited) };
         }
-        fn apply_permutation_with_scratch(
+        unsafe fn apply_permutation_with_scratch(
             &mut self,
             perm: &[usize],
             n: usize,
@@ -1693,24 +1722,24 @@ mod tests {
         fn len(&self) -> usize {
             self.rows.len()
         }
-        fn push_default(&mut self) {
+        unsafe fn push_default(&mut self) {
             self.rows.push(0.0);
         }
-        fn truncate(&mut self, n: usize) {
+        unsafe fn truncate(&mut self, n: usize) {
             self.rows.truncate(n);
         }
-        fn swap_remove(&mut self, i: usize) {
+        unsafe fn swap_remove(&mut self, i: usize) {
             self.rows.swap_remove(i);
             panic!("simulated legacy extension failure");
         }
         fn pack(&self, i: usize, buf: &mut Vec<f64>) {
             buf.push(self.rows[i]);
         }
-        fn unpack(&mut self, buf: &[f64]) -> usize {
+        unsafe fn unpack(&mut self, buf: &[f64]) -> usize {
             self.rows.push(buf[0]);
             1
         }
-        fn apply_permutation(&mut self, _perm: &[usize], _n: usize) {}
+        unsafe fn apply_permutation(&mut self, _perm: &[usize], _n: usize) {}
     }
 
     /// A deliberately hostile legacy decoder: it corrupts an existing row and
@@ -1735,19 +1764,19 @@ mod tests {
         fn len(&self) -> usize {
             self.rows.len()
         }
-        fn push_default(&mut self) {
+        unsafe fn push_default(&mut self) {
             self.rows.push(0.0);
         }
-        fn truncate(&mut self, n: usize) {
+        unsafe fn truncate(&mut self, n: usize) {
             self.rows.truncate(n);
         }
-        fn swap_remove(&mut self, i: usize) {
+        unsafe fn swap_remove(&mut self, i: usize) {
             self.rows.swap_remove(i);
         }
         fn pack(&self, i: usize, buf: &mut Vec<f64>) {
             buf.push(self.rows[i]);
         }
-        fn unpack(&mut self, buf: &[f64]) -> usize {
+        unsafe fn unpack(&mut self, buf: &[f64]) -> usize {
             // A clean restart decode is valid, so the facade can recover via
             // the documented wire contract.  An incremental receive instead
             // corrupts existing state and reports an invalid record.
@@ -1759,7 +1788,7 @@ mod tests {
                 0
             }
         }
-        fn apply_permutation(&mut self, _perm: &[usize], _n: usize) {}
+        unsafe fn apply_permutation(&mut self, _perm: &[usize], _n: usize) {}
     }
 
     /// Decoder failure must not become the mechanism used to rebuild the old
@@ -1784,23 +1813,23 @@ mod tests {
         fn len(&self) -> usize {
             self.rows.len()
         }
-        fn push_default(&mut self) {
+        unsafe fn push_default(&mut self) {
             self.rows.push(0.0);
         }
-        fn truncate(&mut self, n: usize) {
+        unsafe fn truncate(&mut self, n: usize) {
             self.rows.truncate(n);
         }
-        fn swap_remove(&mut self, i: usize) {
+        unsafe fn swap_remove(&mut self, i: usize) {
             self.rows.swap_remove(i);
         }
         fn pack(&self, i: usize, buf: &mut Vec<f64>) {
             buf.push(self.rows[i]);
         }
-        fn unpack(&mut self, _buf: &[f64]) -> usize {
+        unsafe fn unpack(&mut self, _buf: &[f64]) -> usize {
             self.rows.push(-999.0);
             panic!("simulated decoder failure")
         }
-        fn apply_permutation(&mut self, _perm: &[usize], _n: usize) {}
+        unsafe fn apply_permutation(&mut self, _perm: &[usize], _n: usize) {}
     }
 
     /// A hand-written two-column store. Unlike a derive-generated store, a
@@ -1827,7 +1856,7 @@ mod tests {
         fn len(&self) -> usize {
             self.scalar.len()
         }
-        fn push_default(&mut self) {
+        unsafe fn push_default(&mut self) {
             self.scalar.push(0.0);
             self.vector.push([0.0; 3]);
         }
@@ -1843,11 +1872,11 @@ mod tests {
             }
             Ok(())
         }
-        fn truncate(&mut self, n: usize) {
+        unsafe fn truncate(&mut self, n: usize) {
             self.scalar.truncate(n);
             self.vector.truncate(n);
         }
-        fn swap_remove(&mut self, i: usize) {
+        unsafe fn swap_remove(&mut self, i: usize) {
             self.scalar.swap_remove(i);
             self.vector.swap_remove(i);
         }
@@ -1855,16 +1884,16 @@ mod tests {
             buf.push(self.scalar[i]);
             buf.extend_from_slice(&self.vector[i]);
         }
-        fn unpack(&mut self, buf: &[f64]) -> usize {
+        unsafe fn unpack(&mut self, buf: &[f64]) -> usize {
             self.scalar.push(buf[0]);
             self.vector.push([buf[1], buf[2], buf[3]]);
             4
         }
-        fn apply_permutation(&mut self, perm: &[usize], n: usize) {
+        unsafe fn apply_permutation(&mut self, perm: &[usize], n: usize) {
             let mut visited = Vec::new();
-            self.apply_permutation_with_scratch(perm, n, &mut visited);
+            unsafe { self.apply_permutation_with_scratch(perm, n, &mut visited) };
         }
-        fn apply_permutation_with_scratch(
+        unsafe fn apply_permutation_with_scratch(
             &mut self,
             perm: &[usize],
             n: usize,
@@ -1891,14 +1920,14 @@ mod tests {
         fn len(&self) -> usize {
             0
         }
-        fn push_default(&mut self) {}
-        fn truncate(&mut self, _: usize) {}
-        fn swap_remove(&mut self, _: usize) {}
+        unsafe fn push_default(&mut self) {}
+        unsafe fn truncate(&mut self, _: usize) {}
+        unsafe fn swap_remove(&mut self, _: usize) {}
         fn pack(&self, _: usize, _: &mut Vec<f64>) {}
-        fn unpack(&mut self, _: &[f64]) -> usize {
+        unsafe fn unpack(&mut self, _: &[f64]) -> usize {
             0
         }
-        fn apply_permutation(&mut self, _: &[usize], _: usize) {}
+        unsafe fn apply_permutation(&mut self, _: &[usize], _: usize) {}
     }
 
     #[test]

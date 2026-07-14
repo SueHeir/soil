@@ -57,9 +57,11 @@ Plugins register per-atom data through the `AtomDataRegistry`; use `#[derive(Ato
 `AtomData` columns. Use it for insertion, removal, ghost rebuilding, spatial
 permutation, migration, and restart replacement. The matching raw operations
 are crate-private, preventing a caller from changing core and extension row
-counts independently. Force and analysis kernels retain direct SoA access to
-existing rows, including `ParticlesWith` views; changing a value in an existing
-row is not a structural operation.
+counts independently. The extension trait's row-changing callbacks are also
+`unsafe`, so a safe `AtomDataRegistry::get_mut` borrow retains existing-row
+kernel access but cannot invoke a structural callback. Force and analysis
+kernels retain direct SoA access to existing rows, including `ParticlesWith`
+views; changing a value in an existing row is not a structural operation.
 
 ## Features
 

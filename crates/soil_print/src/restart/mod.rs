@@ -321,7 +321,8 @@ pub fn read_restart(
     // Decode into an off-store row bundle.  Atom validates every core column
     // before this can become a live replacement; ParticleStore then couples it
     // atomically to every registered extension buffer.
-    let restored = Atom::from_local_rows(
+    ParticleStore::new(&mut atoms, &registry)
+        .replace_from_restart_rows(
         data.natoms,
         data.dt,
         LocalAtomRows {
@@ -355,11 +356,8 @@ pub fn read_restart(
                 .map(|&radius| radius as Real)
                 .collect(),
         },
+        &data.atom_data_buffers,
     )
-    .unwrap_or_else(|error| panic!("restart core rows are malformed: {error}"));
-
-    ParticleStore::new(&mut atoms, &registry)
-        .replace_from_restart(restored, &data.atom_data_buffers)
         .unwrap_or_else(|error| panic!("restart particle-store import failed: {error}"));
 
     run_state.total_cycle = data.total_cycle;

@@ -55,8 +55,7 @@ fn main() {
         unsafe { atoms.push_test_atom(0, [0.25, 0.5, 0.5], 0.3, 1.0) };
         unsafe { atoms.push_test_atom(1, [0.55, 0.5, 0.5], 0.3, 1.0) };
         unsafe { atoms.push_test_atom(2, [0.85, 0.5, 0.5], 0.3, 1.0) };
-        atoms.nlocal = 3;
-        atoms.natoms = 3;
+        unsafe { atoms.set_layout_unchecked(3, 0, 3) };
     }
 
     // Step the loop a few times. With no integrator the atoms don't move, but the
@@ -71,7 +70,7 @@ fn main() {
     let atoms = app.get_resource_ref::<Atom>().unwrap();
     let domain = app.get_resource_ref::<Domain>().unwrap();
     let neighbor = app.get_resource_ref::<Neighbor>().unwrap();
-    let nlocal = atoms.nlocal as usize;
+    let nlocal = atoms.nlocal() as usize;
 
     println!(
         "box = [{:?} .. {:?}], {} local atoms",

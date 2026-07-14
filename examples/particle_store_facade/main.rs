@@ -85,8 +85,8 @@ fn main() {
         && received.pos == source_atoms.pos
         && received_registry.get::<Marker>().unwrap().value
             == source_registry.get::<Marker>().unwrap().value
-        && received.nlocal as usize == count
-        && received.nghost == 0;
+        && received.nlocal() as usize == count
+        && received.nghost() == 0;
     println!(
         "PARTICLE_STORE case=framed_multi_record_parity expected={count} observed={} pass={parity}",
         received.len()

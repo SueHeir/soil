@@ -643,7 +643,7 @@ fn apply_deform(
     state.step += 1;
     let dt = atoms.dt;
     let step = state.step;
-    let nlocal = atoms.nlocal as usize;
+    let nlocal = atoms.nlocal() as usize;
 
     // Total steps for the current stage, needed by "final" style to compute
     // interpolation fraction. RunState stores the configured stage step count in
@@ -767,8 +767,7 @@ mod tests {
         for i in 0..n {
             unsafe { atom.push_test_atom(i as u32, [i as f64, 0.0, 0.0], 0.5, 1.0) };
         }
-        atom.nlocal = n as u32;
-        atom.natoms = n as u64;
+        unsafe { atom.set_layout_unchecked(n as u32, 0, n as u64) };
         atom.dt = 0.001;
         atom
     }
@@ -1103,8 +1102,7 @@ x = { style = "erate" }
         unsafe { atoms.push_test_atom(0, [0.5, 0.5, 0.5], 0.1, 1.0) };
         // Place atom at 3/4 of box
         unsafe { atoms.push_test_atom(1, [0.75, 0.5, 0.75], 0.1, 1.0) };
-        atoms.nlocal = 2;
-        atoms.natoms = 2;
+        unsafe { atoms.set_layout_unchecked(2, 0, 2) };
 
         let domain = make_domain([0.0, 0.0, 0.0], [1.0, 1.0, 1.0]);
         let neighbor = make_neighbor();
@@ -1159,8 +1157,7 @@ x = { style = "erate" }
         let mut atoms = Atom::new();
         atoms.dt = 0.001;
         unsafe { atoms.push_test_atom(0, [0.5, 0.5, 0.5], 0.1, 1.0) };
-        atoms.nlocal = 1;
-        atoms.natoms = 1;
+        unsafe { atoms.set_layout_unchecked(1, 0, 1) };
 
         let domain = make_domain([0.0, 0.0, 0.0], [1.0, 1.0, 1.0]);
         let neighbor = make_neighbor();

@@ -237,8 +237,8 @@ pub fn print_thermo(
     let global_ke_all = comm.all_reduce_sum_f64(local_ke_all);
     // Refresh the global atom count here (reporting-only; the ghost-rebuild path no
     // longer maintains it). Piggybacks on this thermo collective — no new barrier.
-    let global_atoms_all = comm.all_reduce_sum_f64(atoms.nlocal as f64);
-    atoms.natoms = global_atoms_all as u64;
+    let global_atoms_all = comm.all_reduce_sum_f64(atoms.nlocal() as f64);
+    atoms.set_global_natoms(global_atoms_all as u64);
     let local_neighbors = neighbor.neighbor_indices.len() as f64;
     let global_neighbors = comm.all_reduce_sum_f64(local_neighbors);
 
@@ -278,7 +278,7 @@ pub fn print_thermo(
                         let n = group_count.get(gname).copied().unwrap_or(0.0) as u64;
                         format!("{:<width$}", n, width = col.width)
                     } else {
-                        format!("{:<width$}", atoms.natoms, width = col.width)
+                        format!("{:<width$}", atoms.natoms(), width = col.width)
                     }
                 }
                 "ke" => {

@@ -225,7 +225,7 @@ fn end_build(mut profiler: ResMut<Profiler>) {
 }
 
 fn fill_ghost_forces(mut atoms: ResMut<Atom>) {
-    let nlocal = atoms.nlocal as usize;
+    let nlocal = atoms.nlocal() as usize;
     for force in &mut atoms.force[nlocal..] {
         *force = [1.0, 2.0, 3.0];
     }
@@ -379,8 +379,8 @@ fn push_rank_lattice(atoms: &mut Atom, domain: &Domain, case: &ProfileCase) {
             }
         }
     }
-    atoms.nlocal = local;
-    atoms.natoms = (case.ncell * case.ncell * case.ncell) as u64;
+    atoms.nlocal() = local;
+    atoms.natoms() = (case.ncell * case.ncell * case.ncell) as u64;
 }
 
 fn configure_domain(cfg: &mut ProfileConfig) {
@@ -581,8 +581,8 @@ fn print_summary(app: &App, cfg: &ProfileConfig) {
             P2P_MESSAGES[phase].load(Ordering::Relaxed),
             P2P_F64[phase].load(Ordering::Relaxed),
             COLLECTIVES[phase].load(Ordering::Relaxed),
-            atoms.nlocal,
-            atoms.nghost,
+            atoms.nlocal(),
+            atoms.nghost(),
             neighbor.neighbor_indices.len(),
             cfg.case.iterations,
             cfg.case.warmup,

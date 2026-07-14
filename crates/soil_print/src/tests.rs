@@ -254,7 +254,7 @@ fn build_source() -> (Atom, AtomDataRegistry) {
         let mut store = ParticleStore::new(&mut atoms, &reg);
         store.push_default_local(rows.len() as u64).unwrap();
         let i = store.atoms().len() - 1;
-        let atoms = store.atoms_mut();
+        drop(store);
         atoms.tag[i] = *tag;
         atoms.atom_type[i] = *atype;
         atoms.pos[i] = [pos[0] as Real, pos[1] as Real, pos[2] as Real];
@@ -268,9 +268,6 @@ fn build_source() -> (Atom, AtomDataRegistry) {
         col.scalar[i] = *cs;
         col.vector[i] = *cv;
     }
-    atoms.nlocal = rows.len() as u32;
-    atoms.natoms = rows.len() as u64;
-    atoms.nghost = 0;
     atoms.dt = 1.0 / 4096.0; // exactly representable, non-trivial
     (atoms, reg)
 }
@@ -293,9 +290,9 @@ fn assert_restart_fields_bit_identical(
     dst: &Atom,
     dst_reg: &AtomDataRegistry,
 ) {
-    let n = src.nlocal as usize;
-    assert_eq!(dst.nlocal, src.nlocal, "nlocal mismatch");
-    assert_eq!(dst.natoms, src.natoms, "natoms mismatch");
+    let n = src.nlocal() as usize;
+    assert_eq!(dst.nlocal(), src.nlocal(), "nlocal mismatch");
+    assert_eq!(dst.natoms(), src.natoms(), "natoms mismatch");
     assert_eq!(dst.dt.to_bits(), src.dt.to_bits(), "dt not bit-identical");
     for i in 0..n {
         assert_eq!(dst.tag[i], src.tag[i], "tag[{i}]");
@@ -341,10 +338,7 @@ fn assert_restart_fields_bit_identical(
 /// start from an empty store, else restored columns land at the wrong indices).
 #[allow(clippy::unnecessary_cast)] // precision-conditional casts; see build_source
 fn restore_from_restart(data: &RestartData) -> (Atom, AtomDataRegistry) {
-    let replacement = Atom::from_local_rows(
-        data.natoms,
-        data.dt,
-        soil_core::LocalAtomRows {
+    let rows = soil_core::LocalAtomRows {
             tag: data.tag.clone(),
             atom_type: data.atom_type.clone(),
             pos: data
@@ -374,9 +368,7 @@ fn restore_from_restart(data: &RestartData) -> (Atom, AtomDataRegistry) {
                 .iter()
                 .map(|&radius| radius as Real)
                 .collect(),
-        },
-    )
-    .expect("test restart rows are complete");
+    };
 
     let mut atoms = Atom::new();
     let reg = registry_with_column();
@@ -384,7 +376,7 @@ fn restore_from_restart(data: &RestartData) -> (Atom, AtomDataRegistry) {
     // replacement boundary as production restart loading. No extension-only
     // restart decoder is exposed to this test or downstream users.
     ParticleStore::new(&mut atoms, &reg)
-        .replace_from_restart(replacement, &data.atom_data_buffers)
+        .replace_from_restart_rows(data.natoms, data.dt, rows, &data.atom_data_buffers)
         .expect("test restart rows are aligned");
     (atoms, reg)
 }
@@ -493,7 +485,7 @@ fn production_read_restart_constructs_complete_zero_image_rows() {
 
     let restored = scheduler.get_resource_ref::<Atom>().unwrap();
     let registry = scheduler.get_resource_ref::<AtomDataRegistry>().unwrap();
-    let n = src.nlocal as usize;
+    let n = src.nlocal() as usize;
     assert!(restored.validate_rows(), "all Atom core rows are aligned");
     assert!(registry.validate_rows(n), "extension rows are aligned");
     assert_eq!(restored.image, vec![[0; 3]; n]);
@@ -576,12 +568,12 @@ fn substrate_migration_across_domain_boundary_bit_identical() {
     );
     assert_eq!(
         src_reg.get::<GenericColumn>().unwrap().scalar.len(),
-        src.nlocal as usize
+        src.nlocal() as usize
     );
 
     // ── Destination rank: unpack the migrant (mirrors comm::unpack_exchanged) ─
     let (mut dst, dst_reg) = build_source(); // pre-existing atoms on the dest rank
-    let dst_before = dst.nlocal as usize;
+    let dst_before = dst.nlocal() as usize;
     ParticleStore::new(&mut dst, &dst_reg)
         .append_migrant(&buf)
         .unwrap();
@@ -614,7 +606,7 @@ fn substrate_migration_across_domain_boundary_bit_identical() {
     let dc = dst_reg.get::<GenericColumn>().unwrap();
     assert_eq!(
         dc.scalar.len(),
-        dst.nlocal as usize,
+        dst.nlocal() as usize,
         "column stays sized to nlocal"
     );
     assert_eq!(

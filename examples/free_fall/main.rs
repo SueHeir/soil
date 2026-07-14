@@ -8,7 +8,7 @@
 //! - assembling an `App` with a force system in the `Force` phase plus the
 //!   integrator plugin,
 //! - the `inv_mass = 0` ⇒ pinned-particle idiom (a second atom that never moves),
-//! - that the integrator touches local atoms (`0..nlocal`) only.
+//! - that the integrator touches local atoms (`0..nlocal()`) only.
 //!
 //! Run with:
 //!
@@ -31,7 +31,7 @@ const G: f64 = -9.81;
 /// `AtomPlugin`, which we don't add here), so we **set** the force rather than
 /// `+=` into it — making the per-step force assignment idempotent.
 fn gravity(mut atoms: ResMut<Atom>) {
-    let nlocal = atoms.nlocal as usize;
+    let nlocal = atoms.nlocal() as usize;
     for i in 0..nlocal {
         let m = atoms.mass[i];
         atoms.force[i] = [0.0, 0.0, m * G];
@@ -54,8 +54,7 @@ fn main() {
     // Atom 1: pinned via infinite mass (inv_mass = 0) — never moves.
     unsafe { atoms.push_test_atom(1, [1.0, 0.0, 10.0], 0.1, 1.0) };
     atoms.inv_mass[1] = 0.0;
-    atoms.nlocal = 2;
-    atoms.natoms = 2;
+    unsafe { atoms.set_layout_unchecked(2, 0, 2) };
 
     app.add_resource(atoms);
     // Gravity in the Force phase; the plugin's systems bracket it.

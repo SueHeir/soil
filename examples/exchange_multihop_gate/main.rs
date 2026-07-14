@@ -40,10 +40,9 @@ fn main() {
             .expect("AtomPlugin registers the Atom resource");
         let mut binder = cell.borrow_mut();
         let atoms = binder.downcast_mut::<Atom>().unwrap();
-        atoms.natoms = 1;
         if rank == 0 {
             atoms.push_test_atom(42, [0.625, 0.5, 0.5], 0.01, 1.0);
-            atoms.nlocal = 1;
+            unsafe { atoms.set_layout_unchecked(1, 0, 1) };
         }
     }
 

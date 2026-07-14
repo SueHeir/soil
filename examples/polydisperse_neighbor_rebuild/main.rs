@@ -89,14 +89,14 @@ fn main() {
         let mut binder = cell.borrow_mut();
         let atoms = binder.downcast_mut::<Atom>().unwrap();
         let all_atoms = global_atoms();
-        atoms.natoms = all_atoms.len() as u64;
+        atoms.natoms() = all_atoms.len() as u64;
         for (tag, pos, radius) in all_atoms {
             let owned = (0..3).all(|d| pos[d] >= sub_low[d] && pos[d] < sub_high[d]);
             if owned {
                 atoms.push_test_atom(tag, pos, radius, 1.0);
             }
         }
-        atoms.nlocal = atoms.tag.len() as u32;
+        atoms.nlocal() = atoms.tag.len() as u32;
     }
 
     app.run();
@@ -112,7 +112,7 @@ fn main() {
 
         let mut pf = fs::File::create(pair_path).expect("cannot create pair csv");
         writeln!(pf, "tag_i,tag_j").unwrap();
-        for i in 0..atoms.nlocal as usize {
+        for i in 0..atoms.nlocal() as usize {
             let start = neighbor.neighbor_offsets[i] as usize;
             let end = neighbor.neighbor_offsets[i + 1] as usize;
             for &j in &neighbor.neighbor_indices[start..end] {
@@ -134,7 +134,7 @@ fn main() {
                 atoms.pos[i][1],
                 atoms.pos[i][2],
                 atoms.cutoff_radius[i],
-                i < atoms.nlocal as usize,
+                i < atoms.nlocal() as usize,
             )
             .unwrap();
         }
@@ -142,7 +142,7 @@ fn main() {
         if rank == 0 {
             println!(
                 "POLY_NEIGHBOR ranks={ranks} local={} pairs={}",
-                atoms.nlocal,
+                atoms.nlocal(),
                 neighbor.neighbor_indices.len()
             );
         }

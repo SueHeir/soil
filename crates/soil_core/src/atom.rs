@@ -856,6 +856,18 @@ macro_rules! for_each_atom_vec {
 /// ```
 ///
 /// ```compile_fail
+/// use soil_core::Atom;
+/// let mut atoms = Atom::new();
+/// atoms.nlocal = 1;
+/// ```
+///
+/// ```compile_fail
+/// use soil_core::Atom;
+/// let mut atoms = Atom::new();
+/// atoms.nghost = 1;
+/// ```
+///
+/// ```compile_fail
 /// use soil_core::AtomColumn;
 /// let _column = AtomColumn::from_vec_unchecked(vec![[0.0; 3]]);
 /// ```
@@ -937,11 +949,11 @@ impl<T> AtomColumn<T> {
 #[derive(Clone)]
 pub struct Atom {
     /// Total number of atoms across all ranks (global count).
-    pub natoms: u64,
+    pub(crate) natoms: u64,
     /// Number of local atoms this rank owns; they occupy indices `0..nlocal`.
-    pub nlocal: u32,
+    pub(crate) nlocal: u32,
     /// Number of ghost atoms (halo copies); they occupy `nlocal..nlocal+nghost`.
-    pub nghost: u32,
+    pub(crate) nghost: u32,
 
     /// Number of distinct atom types in the simulation.
     pub ntypes: usize,
@@ -981,8 +993,7 @@ pub struct Atom {
 ///
 /// This is deliberately an off-store transport object: its vectors may be
 /// decoded independently, but they cannot become live [`Atom`] columns until
-/// [`Atom::from_local_rows`] verifies that every one has the same row count.
-/// [`ParticleStore::replace_from_restart`] then atomically pairs that complete
+/// [`ParticleStore::replace_from_restart_rows`] verifies the core rows and then atomically pairs
 /// core replacement with the registered extension rows.
 #[derive(Debug, Default)]
 pub struct LocalAtomRows {
@@ -1096,7 +1107,7 @@ impl Atom {
     /// and image counters instead of accepting independently mutable versions of
     /// those structural columns.  It is intentionally not an installation API:
     /// use [`ParticleStore::replace_from_restart`] to pair it with extensions.
-    pub fn from_local_rows(
+    fn from_local_rows(
         natoms: u64,
         dt: f64,
         rows: LocalAtomRows,
@@ -1137,6 +1148,42 @@ impl Atom {
     /// Total number of atoms (local + ghost) currently stored.
     pub fn len(&self) -> usize {
         self.pos.len()
+    }
+
+    /// Global particle count last supplied by the owning collective.
+    pub fn natoms(&self) -> u64 {
+        self.natoms
+    }
+
+    /// Update the reporting count obtained from an external collective.
+    ///
+    /// Unlike the local/ghost partition, this value does not select or relabel
+    /// rows and is therefore safe to refresh independently.
+    pub fn set_global_natoms(&mut self, natoms: u64) {
+        self.natoms = natoms;
+    }
+
+    /// Number of locally owned rows at the front of the store.
+    pub fn nlocal(&self) -> u32 {
+        self.nlocal
+    }
+
+    /// Number of ghost rows in the suffix of the store.
+    pub fn nghost(&self) -> u32 {
+        self.nghost
+    }
+
+    /// Set the ownership partition for a deliberately core-only fixture.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure all registered extension columns have the same
+    /// length and that `nlocal + nghost == self.len()`. Production structural
+    /// changes must go through [`ParticleStore`].
+    pub unsafe fn set_layout_unchecked(&mut self, nlocal: u32, nghost: u32, natoms: u64) {
+        self.nlocal = nlocal;
+        self.nghost = nghost;
+        self.natoms = natoms;
     }
 
     /// Returns true if no atoms are stored.
@@ -1311,11 +1358,6 @@ impl<'a> ParticleStore<'a> {
         self.atoms
     }
 
-    /// Update existing core rows; [`AtomColumn`] cannot change a row count.
-    pub fn atoms_mut(&mut self) -> &mut Atom {
-        self.atoms
-    }
-
     /// Check the complete structural invariant, including ownership partition.
     ///
     /// Row alignment alone is insufficient: a stale `nlocal`/`nghost` pair can
@@ -1332,6 +1374,20 @@ impl<'a> ParticleStore<'a> {
     pub fn reserve(&mut self, additional: usize) {
         self.atoms.reserve(additional);
         self.registry.reserve_all(additional);
+    }
+
+    /// Decode and install a complete local restart image atomically with every
+    /// registered extension.  The row bundle cannot become a live [`Atom`]
+    /// outside this checked transaction.
+    pub fn replace_from_restart_rows(
+        &mut self,
+        natoms: u64,
+        dt: f64,
+        rows: LocalAtomRows,
+        extension_buffers: &[Vec<f64>],
+    ) -> Result<(), ParticleStoreError> {
+        let replacement = Atom::from_local_rows(natoms, dt, rows)?;
+        self.replace_from_restart(replacement, extension_buffers)
     }
 
     /// Transactionally append one locally-owned particle with core defaults.

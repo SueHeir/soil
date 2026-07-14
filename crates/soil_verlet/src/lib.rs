@@ -132,7 +132,7 @@ impl Plugin for VelocityVerletPlugin {
 /// This runs at [`ParticleSimScheduleSet::InitialIntegration`], **before** force computation.
 pub fn initial_integration(mut atoms: ResMut<Atom>) {
     let dt = atoms.dt;
-    let nlocal = atoms.nlocal as usize;
+    let nlocal = atoms.nlocal() as usize;
     // SAFETY: i < nlocal <= len for all arrays (inv_mass, force, vel, pos).
     // Raw pointers avoid borrow-checker conflicts when mutating vel/pos while
     // reading inv_mass/force from the same struct.
@@ -176,7 +176,7 @@ pub fn initial_integration(mut atoms: ResMut<Atom>) {
 /// This runs at [`ParticleSimScheduleSet::FinalIntegration`], **after** force computation.
 pub fn final_integration(mut atoms: ResMut<Atom>) {
     let dt = atoms.dt;
-    let nlocal = atoms.nlocal as usize;
+    let nlocal = atoms.nlocal() as usize;
     // SAFETY: i < nlocal <= len for all arrays (inv_mass, force, vel).
     let inv_mass_ptr = atoms.inv_mass.as_ptr();
     let force_ptr = atoms.force.as_ptr();
@@ -214,8 +214,7 @@ mod tests {
         unsafe { atom.push_test_atom(0, [0.0; 3], 0.001, 1.0) };
         atom.vel[0][0] = 1.0;
         atom.force[0][0] = 2.0;
-        atom.nlocal = 1;
-        atom.natoms = 1;
+        unsafe { atom.set_layout_unchecked(1, 0, 1) };
         atom
     }
 
@@ -345,8 +344,7 @@ mod tests {
         atom.dt = 0.001;
         unsafe { atom.push_test_atom(0, [0.0, 0.0, 0.0], 0.001, 1.0) };
         atom.vel[0] = [1.5, -2.3, 0.7];
-        atom.nlocal = 1;
-        atom.natoms = 1;
+        unsafe { atom.set_layout_unchecked(1, 0, 1) };
 
         app.add_resource(atom);
         app.add_update_system(initial_integration, ParticleSimScheduleSet::InitialIntegration);

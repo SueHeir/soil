@@ -71,17 +71,17 @@ fn seed_atoms(app: &mut App, cfg: DsmcConfig) {
         .expect("AtomPlugin registers Atom before prepare");
     let mut binder = cell.borrow_mut();
     let atoms = binder.downcast_mut::<Atom>().unwrap();
+    atoms.dt = 1.0;
     let mut store = ParticleStore::new(atoms, registry);
     store.reserve(n);
-    store.atoms_mut().dt = 1.0;
 
     for c in 0..cfg.cells_x {
         for p in 0..cfg.particles_per_cell {
             let tag = (c * cfg.particles_per_cell + p) as u32;
             let fx = (p as f64 + 0.5) / cfg.particles_per_cell as f64;
             store.push_default_local(n as u64).unwrap();
-            let atoms = store.atoms_mut();
-            let i = atoms.len() - 1;
+            let i = store.atoms().len() - 1;
+            drop(store);
             atoms.tag[i] = tag;
             atoms.pos[i] = [
                 ((c as f64 + fx) * cell_width) as soil_core::Real,
@@ -94,6 +94,7 @@ fn seed_atoms(app: &mut App, cfg: DsmcConfig) {
                 gaussian(&mut rng, cfg.ty0.sqrt()) as soil_core::Real,
                 gaussian(&mut rng, cfg.tz0.sqrt()) as soil_core::Real,
             ];
+            store = ParticleStore::new(atoms, registry);
         }
     }
 }
@@ -170,7 +171,7 @@ fn collide_cell(
 }
 
 fn temperatures(atoms: &Atom) -> [f64; 3] {
-    let n = atoms.nlocal as usize;
+    let n = atoms.nlocal() as usize;
     let mut mean = [0.0; 3];
     for v in atoms.vel[..n].iter() {
         mean[0] += v[0] as f64;
@@ -226,7 +227,7 @@ fn main() {
     app.prepare();
     app.run();
 
-    let nlocal = app.get_resource_ref::<Atom>().unwrap().nlocal as usize;
+    let nlocal = app.get_resource_ref::<Atom>().unwrap().nlocal() as usize;
     let cells = {
         let neighbor = app.get_resource_ref::<Neighbor>().unwrap();
         soil_cells(&neighbor, nlocal)

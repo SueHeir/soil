@@ -483,7 +483,10 @@ impl AtomDataRegistry {
     }
 
     /// Truncate all registered extensions to `n` atoms (used when removing ghosts).
-    pub fn truncate_all(&self, n: usize) {
+    ///
+    /// Structural operation: kept crate-private so it can only be paired with
+    /// the corresponding core operation by [`ParticleStore`].
+    pub(crate) fn truncate_all(&self, n: usize) {
         for (_, cell) in &self.stores {
             cell.borrow_mut().truncate(n);
         }
@@ -501,7 +504,7 @@ impl AtomDataRegistry {
     }
 
     /// Reserve capacity in each extension alongside the core SoA.
-    pub fn reserve_all(&self, additional: usize) {
+    pub(crate) fn reserve_all(&self, additional: usize) {
         for (_, cell) in &self.stores {
             cell.borrow_mut().reserve(additional);
         }
@@ -532,21 +535,21 @@ impl AtomDataRegistry {
     }
 
     /// Remove atom at index `i` from all registered extensions via swap-remove.
-    pub fn swap_remove_all(&self, i: usize) {
+    pub(crate) fn swap_remove_all(&self, i: usize) {
         for (_, cell) in &self.stores {
             cell.borrow_mut().swap_remove(i);
         }
     }
 
     /// Pack all extension fields for atom `i` into `buf` (exchange/border comm).
-    pub fn pack_all(&self, i: usize, buf: &mut Vec<f64>) {
+    pub(crate) fn pack_all(&self, i: usize, buf: &mut Vec<f64>) {
         for (_, cell) in &self.stores {
             cell.borrow().pack(i, buf);
         }
     }
 
     /// Unpack one atom's extension fields from `buf`. Returns total `f64`s consumed.
-    pub fn unpack_all(&self, buf: &[f64]) -> usize {
+    pub(crate) fn unpack_all(&self, buf: &[f64]) -> usize {
         let mut pos = 0;
         for (_, cell) in &self.stores {
             pos += cell.borrow_mut().unpack(&buf[pos..]);
@@ -567,14 +570,8 @@ impl AtomDataRegistry {
         }
     }
 
-    /// Reorder all extensions according to `perm[0..n]`.
-    pub fn apply_permutation_all(&self, perm: &[usize], n: usize) {
-        let mut visited = Vec::new();
-        self.apply_permutation_all_with_scratch(perm, n, &mut visited);
-    }
-
     /// Reorder all extensions with caller-owned cycle scratch.
-    pub fn apply_permutation_all_with_scratch(
+    pub(crate) fn apply_permutation_all_with_scratch(
         &self,
         perm: &[usize],
         n: usize,
@@ -810,20 +807,8 @@ macro_rules! impl_atom_swap_remove {
         /// last element. **Must** be mirrored on the [`AtomDataRegistry`] via
         /// [`swap_remove_all`](AtomDataRegistry::swap_remove_all) to keep the
         /// parallel arrays aligned.
-        pub fn swap_remove(&mut self, i: usize) {
+        pub(crate) fn swap_remove(&mut self, i: usize) {
             $( self.$field.swap_remove(i); )*
-        }
-    };
-}
-
-macro_rules! impl_atom_truncate {
-    ( $( ($field:ident, $ty:ty) ),* $(,)? ) => {
-        /// Drop all ghost atoms by truncating every field array to `nlocal`.
-        /// Mirror on the registry with
-        /// [`truncate_all`](AtomDataRegistry::truncate_all).
-        pub fn truncate_to_nlocal(&mut self) {
-            let n = self.nlocal as usize;
-            $( self.$field.truncate(n); )*
         }
     };
 }
@@ -840,7 +825,7 @@ macro_rules! impl_atom_reserve {
     ( $( ($field:ident, $ty:ty) ),* $(,)? ) => {
         /// Reserve capacity for `additional` more atoms in every field array
         /// (avoids repeated reallocation when bulk-inserting).
-        pub fn reserve(&mut self, additional: usize) {
+        pub(crate) fn reserve(&mut self, additional: usize) {
             $( self.$field.reserve(additional); )*
         }
     };
@@ -862,17 +847,8 @@ macro_rules! impl_atom_validate_rows {
 
 macro_rules! impl_atom_apply_permutation {
     ( $( ($field:ident, $ty:ty) ),* $(,)? ) => {
-        /// Reorder the first `n` atoms in every field array according to
-        /// `perm` (spatial re-sort for cache locality). **Must** be mirrored on
-        /// the registry via
-        /// [`apply_permutation_all`](AtomDataRegistry::apply_permutation_all).
-        pub fn apply_permutation(&mut self, perm: &[usize], n: usize) {
-            let mut visited = Vec::new();
-            self.apply_permutation_with_scratch(perm, n, &mut visited);
-        }
-
         /// Reorder the first `n` atoms using caller-owned cycle scratch.
-        pub fn apply_permutation_with_scratch(
+        pub(crate) fn apply_permutation_with_scratch(
             &mut self,
             perm: &[usize],
             n: usize,
@@ -886,7 +862,6 @@ macro_rules! impl_atom_apply_permutation {
 impl Atom {
     for_each_atom_vec!(impl_atom_new);
     for_each_atom_vec!(impl_atom_swap_remove);
-    for_each_atom_vec!(impl_atom_truncate);
     for_each_atom_vec!(impl_atom_truncate_to);
     for_each_atom_vec!(impl_atom_reserve);
     for_each_atom_vec!(impl_atom_validate_rows);
@@ -946,14 +921,14 @@ impl Atom {
     }
 
     /// Pack atom `i` for MPI exchange (migration to another rank). Sets origin_index to 0.
-    pub fn pack_exchange(&self, i: usize, buf: &mut Vec<f64>) {
+    pub(crate) fn pack_exchange(&self, i: usize, buf: &mut Vec<f64>) {
         self.pack_atom_inner(i, 0.0, [0.0; 3], [0.0; 3], buf);
     }
 
     /// Pack atom `i` as a ghost for border communication, applying a periodic
     /// position shift and (for sheared periodic faces) a velocity shift.
     /// Stores the local index as `origin_index` so reverse comm can accumulate forces back.
-    pub fn pack_border(
+    pub(crate) fn pack_border(
         &mut self,
         i: usize,
         change_pos: [f64; 3],
@@ -964,7 +939,7 @@ impl Atom {
     }
 
     /// Unpack one atom from `buf` (ghost or exchanged). Returns [`ATOM_PACK_SIZE`].
-    pub fn unpack_atom(&mut self, buf: &[f64], is_ghost: bool) -> usize {
+    pub(crate) fn unpack_atom(&mut self, buf: &[f64], is_ghost: bool) -> usize {
         self.tag.push(buf[0] as u32);
         self.origin_index.push(buf[1] as i32);
         self.cutoff_radius.push(buf[2] as Real);

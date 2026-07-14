@@ -51,6 +51,16 @@ app.run();
 
 Plugins register per-atom data through the `AtomDataRegistry`; use `#[derive(AtomData)]` (from `soil_derive`) to extend `Atom` with custom fields.
 
+## Particle-store migration
+
+`ParticleStore` is the public structural boundary for `Atom` plus registered
+`AtomData` columns. Use it for insertion, removal, ghost rebuilding, spatial
+permutation, migration, and restart replacement. The matching raw operations
+are crate-private, preventing a caller from changing core and extension row
+counts independently. Force and analysis kernels retain direct SoA access to
+existing rows, including `ParticlesWith` views; changing a value in an existing
+row is not a structural operation.
+
 ## Features
 
 - `mpi_backend` (default): Enable MPI; disable for serial-only builds

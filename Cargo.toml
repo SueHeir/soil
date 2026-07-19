@@ -18,11 +18,11 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/SueHeir/soil"
 
 [workspace.dependencies]
-grass_app = { git = "https://github.com/SueHeir/grass.git", branch = "main" }
-grass_derive = { git = "https://github.com/SueHeir/grass.git", branch = "main" }
-grass_io = { git = "https://github.com/SueHeir/grass.git", branch = "main" }
-grass_mpi = { git = "https://github.com/SueHeir/grass.git", branch = "main", default-features = false }
-grass_scheduler = { git = "https://github.com/SueHeir/grass.git", branch = "main" }
+grass_app = { git = "https://github.com/SueHeir/grass.git", rev = "83198be92efa43320b32f986d7dd72550e3bc141" }
+grass_derive = { git = "https://github.com/SueHeir/grass.git", rev = "83198be92efa43320b32f986d7dd72550e3bc141" }
+grass_io = { git = "https://github.com/SueHeir/grass.git", rev = "83198be92efa43320b32f986d7dd72550e3bc141" }
+grass_mpi = { git = "https://github.com/SueHeir/grass.git", rev = "83198be92efa43320b32f986d7dd72550e3bc141", default-features = false }
+grass_scheduler = { git = "https://github.com/SueHeir/grass.git", rev = "83198be92efa43320b32f986d7dd72550e3bc141" }
 bincode = "1"
 proc-macro2 = "1"
 quote = "1"

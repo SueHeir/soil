@@ -75,8 +75,9 @@ The field attributes have precise meanings:
 - `#[zero]` resets an accumulator before it is reused.
 - An unmarked field remains owner-local but still migrates with its particle.
 
-The complete invariants and per-step ordering are documented in
-[The AtomData Contract](docs/SOIL_ATOMDATA_CONTRACT.md).
+The complete structural invariants and per-step ordering are summarized in the
+[`soil_core`](crates/soil_core/README.md) and
+[`soil_derive`](crates/soil_derive/README.md) crate references.
 
 ## Build a particle method, not another infrastructure stack
 
@@ -88,11 +89,9 @@ A method implemented on SOIL typically supplies:
 4. An integrator and output plugins appropriate to the method.
 
 SOIL supplies the particle store, domain, communication, and neighbor machinery
-underneath those choices. The
-[Write Your Own Particle Physics](docs/src/tutorial/write-your-own-physics.md)
-tutorial constructs a minimal method step by step, while
-[`examples/minimal_sim`](examples/minimal_sim/README.md) shows the bare plugin
-assembly.
+underneath those choices. [`examples/minimal_sim`](examples/minimal_sim/README.md)
+shows the bare plugin assembly, while [`lj_dimer`](examples/lj_dimer/README.md)
+adds a complete non-DEM interaction law.
 
 ## Local and long-range spatial infrastructure
 
@@ -151,9 +150,9 @@ MPI development toolchain is installed and distributed execution is required.
 
 To build a method on top, depend on the substrate crates you need and assemble
 the base plugins (`AtomPlugin`, `DomainPlugin`, `NeighborPlugin`, and
-`CommunicationPlugin`). See
-[Write Your Own Particle Physics](docs/src/tutorial/write-your-own-physics.md)
-for a complete example.
+`CommunicationPlugin`). Start from
+[`examples/minimal_sim`](examples/minimal_sim/README.md) and add method-specific
+state and force systems as a plugin.
 
 ## Crate map
 
@@ -166,7 +165,9 @@ for a complete example.
 | [`soil_deform`](crates/soil_deform/README.md) | box deformation, target-size loading, and Lees–Edwards shear |
 | [`soil_fixes`](crates/soil_fixes/README.md) | method-neutral position and velocity constraints |
 
-The mdBook under `docs/` contains the detailed substrate model and API guidance.
+Configuration and runnable guidance live beside the examples. Public API,
+parallelism, and model-boundary details live in the crate READMEs and Rust
+documentation.
 
 ## Ecosystem
 

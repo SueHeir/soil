@@ -51,6 +51,31 @@ app.run();
 
 Plugins register per-atom data through the `AtomDataRegistry`; use `#[derive(AtomData)]` (from `soil_derive`) to extend `Atom` with custom fields.
 
+## The `AtomData` contract
+
+Every extension column must remain row-aligned with `Atom`. Register an
+extension once, then let `ParticleStore` perform structural changes so core and
+extension rows are inserted, migrated, permuted, removed, and restarted as one
+transaction.
+
+The generated communication hooks have distinct meanings:
+
+- migration `pack` / `unpack` moves every field from one owner to another;
+- `#[forward]` fields are overwritten from owners onto ghosts;
+- `#[reverse]` fields are added from ghosts back to owners;
+- `#[zero]` fields are reset before accumulation.
+
+The canonical distributed step is therefore:
+
+```text
+zero accumulators -> forward owner state -> compute -> reverse contributions -> integrate
+```
+
+Use `#[forward]` for state a neighboring rank must read, `#[reverse] #[zero]`
+for contributions computed on ghosts, and no communication attribute for
+owner-only state that merely migrates with its particle. Never resize an
+extension column independently of the particle store.
+
 ## Particle-store migration
 
 `ParticleStore` is the public structural boundary for `Atom` plus registered

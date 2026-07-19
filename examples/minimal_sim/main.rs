@@ -8,8 +8,8 @@
 //! There is no force law and no integrator here: this example exists to show the
 //! *assembly* — how the method-agnostic pieces snap together — and to give you a
 //! runnable starting point. A real tier adds an `AtomData` column, a force
-//! system, and an integrator (`soil_verlet`); see the mdBook tutorial
-//! "Write Your Own Particle Physics".
+//! system, and an integrator (`soil_verlet`); see the `soil_core` and
+//! `soil_derive` crate references for the extension contract.
 //!
 //! Run with:
 //!

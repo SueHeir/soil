@@ -364,6 +364,11 @@ pub fn derive_atom_data(input: TokenStream) -> TokenStream {
 
             fn len(&self) -> usize { #first_len }
 
+            // Generated hooks are per-row `Vec` operations: appends only push,
+            // and in-place operations only touch the validated rows. This lets
+            // `ParticleStore` skip whole-store snapshots for this store.
+            fn row_local_structural_hooks(&self) -> bool { true }
+
             unsafe fn push_default(&mut self) {
                 #(#default_stmts)*
             }

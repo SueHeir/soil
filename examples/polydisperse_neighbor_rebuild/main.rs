@@ -89,14 +89,17 @@ fn main() {
         let mut binder = cell.borrow_mut();
         let atoms = binder.downcast_mut::<Atom>().unwrap();
         let all_atoms = global_atoms();
-        atoms.natoms() = all_atoms.len() as u64;
+        let natoms = all_atoms.len() as u64;
         for (tag, pos, radius) in all_atoms {
             let owned = (0..3).all(|d| pos[d] >= sub_low[d] && pos[d] < sub_high[d]);
             if owned {
-                atoms.push_test_atom(tag, pos, radius, 1.0);
+                // SAFETY: core-only fixture; the layout is set below.
+                unsafe { atoms.push_test_atom(tag, pos, radius, 1.0) };
             }
         }
-        atoms.nlocal() = atoms.tag.len() as u32;
+        let local = atoms.tag.len() as u32;
+        // SAFETY: no extensions are registered and every pushed row is local.
+        unsafe { atoms.set_layout_unchecked(local, 0, natoms) };
     }
 
     app.run();

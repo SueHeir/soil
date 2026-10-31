@@ -25,5 +25,15 @@ pub use rebuild::decide_rebuild;
 pub use sorting::sort_atoms_by_bin;
 pub use state::{classify_boundary_atoms, Neighbor};
 
+/// `x.floor() as i32` without the libm call that `f64::floor` lowers to on
+/// the baseline x86-64 target (no SSE4.1). Identical for every finite `x` in
+/// `i32` range; out-of-range values saturate like the `as` cast, and callers
+/// clamp the result to the bin grid anyway.
+#[inline(always)]
+pub(crate) fn floor_to_i32(x: f64) -> i32 {
+    let t = x as i32;
+    t - ((t as f64) > x) as i32
+}
+
 #[cfg(test)]
 mod tests;

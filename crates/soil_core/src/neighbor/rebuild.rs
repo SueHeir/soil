@@ -46,33 +46,41 @@ fn displacement_exceeded(atoms: &Atom, neighbor: &Neighbor) -> bool {
     let n = neighbor.last_build_pos.len();
 
     if px && py && pz {
-        // Fully-periodic fast path (the common case): branchless nearest-image
-        // `d - box * round(d/box)` with an FMA reduction. No per-axis `if`, so the
-        // straight-line body auto-vectorizes; `round` lowers to a single rounding
-        // instruction. Equivalent to the per-axis branch form for any physical
-        // per-step displacement (which is << half a box).
-        let ibx = 1.0 / bx;
-        let iby = 1.0 / by;
-        let ibz = 1.0 / bz;
+        // Fully-periodic fast path (the common case). A physical displacement
+        // between rebuilds is far below half a box, so the nearest-image fold is
+        // a rarely-taken compare. This deliberately avoids `f64::round` and
+        // `mul_add`: on the baseline x86-64 target (no SSE4.1/FMA) both lower to
+        // libm calls, which made this per-step scan ~10x slower than the rest of
+        // the loop body.
+        let (hbx, hby, hbz) = (0.5 * bx, 0.5 * by, 0.5 * bz);
+        let fold = |d: f64, half: f64, full: f64| -> f64 {
+            if d > half {
+                d - full
+            } else if d < -half {
+                d + full
+            } else {
+                d
+            }
+        };
+        let pos = &atoms.pos[..n];
+        let radii = &atoms.cutoff_radius[..n];
+        let saved = &neighbor.last_build_pos[..n];
+        let saved_radius = &neighbor.last_build_radius[..n];
+        let mut exceeded = false;
         for idx in 0..n {
-            let p = unsafe { *atoms.pos.get_unchecked(idx) };
-            let q = unsafe { *neighbor.last_build_pos.get_unchecked(idx) };
-            let mut dx = p[0] as f64 - q[0];
-            let mut dy = p[1] as f64 - q[1];
-            let mut dz = p[2] as f64 - q[2];
-            dx -= bx * (dx * ibx).round();
-            dy -= by * (dy * iby).round();
-            dz -= bz * (dz * ibz).round();
-            let radius = unsafe { *neighbor.last_build_radius.get_unchecked(idx) };
-            if (atoms.cutoff_radius[idx] as f64 - radius).abs() > 1e-15 {
-                return true;
-            }
+            let p = pos[idx];
+            let q = saved[idx];
+            let dx = fold(p[0] as f64 - q[0], hbx, bx);
+            let dy = fold(p[1] as f64 - q[1], hby, by);
+            let dz = fold(p[2] as f64 - q[2], hbz, bz);
+            let radius = saved_radius[idx];
             let budget = budget_fraction * radius;
-            if dx.mul_add(dx, dy.mul_add(dy, dz * dz)) > budget * budget {
-                return true;
-            }
+            // Non-short-circuiting `|` keeps the body branch-free so the scan
+            // vectorizes; the exact rebuild decision is unchanged.
+            exceeded |= ((radii[idx] as f64 - radius).abs() > 1e-15)
+                | (dx * dx + dy * dy + dz * dz > budget * budget);
         }
-        return false;
+        return exceeded;
     }
 
     // General path: mixed / non-periodic axes, per-axis single-image correction.

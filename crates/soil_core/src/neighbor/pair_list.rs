@@ -40,7 +40,9 @@ unsafe fn append_uniform_range_scalar(
         let dx = pj[0] - pi[0];
         let dy = pj[1] - pi[1];
         let dz = pj[2] - pi[2];
-        let r2 = dx.mul_add(dx, dy.mul_add(dy, dz * dz));
+        // Plain multiply-add (not `mul_add`): matches the AVX2 kernel bit for
+        // bit and avoids a libm `fma` call per candidate on non-FMA targets.
+        let r2 = dx * dx + dy * dy + dz * dz;
         if r2 < cutoff_sq {
             writer.push(*sorted_atoms.get_unchecked(m));
         }
@@ -131,7 +133,9 @@ unsafe fn append_polydisperse_range_scalar(
         let dx = pj[0] - pi[0];
         let dy = pj[1] - pi[1];
         let dz = pj[2] - pi[2];
-        let r2 = dx.mul_add(dx, dy.mul_add(dy, dz * dz));
+        // Plain multiply-add (not `mul_add`): matches the AVX2 kernel bit for
+        // bit and avoids a libm `fma` call per candidate on non-FMA targets.
+        let r2 = dx * dx + dy * dy + dz * dz;
         let sum_skin = si + *cutoff_radius.get_unchecked(j) as f64;
         if r2 < sum_skin * sum_skin * skin_fraction_sq {
             writer.push(j as u32);
@@ -316,9 +320,9 @@ pub fn bin_neighbor_list(
         } else {
             pi_f
         };
-        let cx = ((pi[0] - bin_ox) * inv_bsx).floor() as i32;
-        let cy = ((pi[1] - bin_oy) * inv_bsy).floor() as i32;
-        let cz = ((pi[2] - bin_oz) * inv_bsz).floor() as i32;
+        let cx = super::floor_to_i32((pi[0] - bin_ox) * inv_bsx);
+        let cy = super::floor_to_i32((pi[1] - bin_oy) * inv_bsy);
+        let cz = super::floor_to_i32((pi[2] - bin_oz) * inv_bsz);
         let cx = cx.clamp(0, nx - 1);
         let cy = cy.clamp(0, ny - 1);
         let cz = cz.clamp(0, nz - 1);

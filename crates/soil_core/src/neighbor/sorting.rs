@@ -105,9 +105,9 @@ pub fn sort_atoms_by_bin(
         let pr = atoms.pos[i];
         let pf = [pr[0] as f64, pr[1] as f64, pr[2] as f64];
         let p = if triclinic { domain.x2lamda(pf) } else { pf };
-        let cx = (((p[0] - ox) * inv_bsx).floor() as i32).clamp(0, nx - 1);
-        let cy = (((p[1] - oy) * inv_bsy).floor() as i32).clamp(0, ny - 1);
-        let cz = (((p[2] - oz) * inv_bsz).floor() as i32).clamp(0, nz - 1);
+        let cx = super::floor_to_i32((p[0] - ox) * inv_bsx).clamp(0, nx - 1);
+        let cy = super::floor_to_i32((p[1] - oy) * inv_bsy).clamp(0, ny - 1);
+        let cz = super::floor_to_i32((p[2] - oz) * inv_bsz).clamp(0, nz - 1);
         let c = (cx * ny * nz + cy * nz + cz) as u32;
         cell[i] = c;
         counts[c as usize + 1] += 1;

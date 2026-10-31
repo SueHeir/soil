@@ -140,3 +140,8 @@ path = "examples/particle_store_facade/main.rs"
 name = "typed_system_labels"
 path = "examples/typed_system_labels/main.rs"
 required-features = ["precision-double"]
+
+[[example]]
+name = "scaling_bench"
+path = "examples/scaling_bench/main.rs"
+required-features = ["mpi_backend", "precision-double"]

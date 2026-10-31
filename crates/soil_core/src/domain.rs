@@ -695,6 +695,12 @@ pub fn shrink_wrap_update(domain: &mut Domain, positions: &[[f64; 3]], nlocal: u
 ///
 /// Runs at `PreExchange` before `pbc`. Delegates to [`shrink_wrap_update`].
 pub fn shrink_wrap(atoms: Res<Atom>, mut domain: ResMut<Domain>) {
+    // Nothing to do (and nothing to copy) unless an axis is shrink-wrapped; this
+    // runs every step, so the common periodic/fixed box must not pay for a
+    // position copy.
+    if !(domain.is_shrink_wrap(0) || domain.is_shrink_wrap(1) || domain.is_shrink_wrap(2)) {
+        return;
+    }
     // shrink_wrap_update works in f64; convert the local `Real` positions at the
     // boundary (shrink-wrap is single-process and rare, so the copy is cheap).
     let nlocal = atoms.nlocal as usize;

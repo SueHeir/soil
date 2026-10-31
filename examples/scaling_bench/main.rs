@@ -25,9 +25,9 @@ use grass_app::prelude::*;
 use grass_scheduler::prelude::*;
 use soil_core::{
     bin_neighbor_list, forward_comm_borders, Atom, AtomData, AtomDataRegistry, AtomPlugin,
-    CommResource, CommunicationPlugin, Config, Domain, DomainPlugin, Neighbor, NeighborPlugin,
-    ParticleSimScheduleSet, ParticleStore, ScheduleSetupSet, BORDERS, DECIDE_REBUILD,
-    DOMAIN_READ_INPUT, EXCHANGE, REVERSE_SEND_FORCE, SORT_ATOMS,
+    CommResource, CommunicationPlugin, Config, Domain, DomainPlugin, LoadBalancePlugin, Neighbor,
+    NeighborPlugin, ParticleSimScheduleSet, ParticleStore, ScheduleSetupSet, BORDERS,
+    DECIDE_REBUILD, DOMAIN_READ_INPUT, EXCHANGE, REVERSE_SEND_FORCE, SORT_ATOMS,
 };
 use soil_derive::AtomData as DeriveAtomData;
 use soil_verlet::VelocityVerletPlugin;
@@ -69,6 +69,11 @@ struct BenchCase {
     warmup: usize,
     skin: f64,
     seed: u64,
+    /// Density skew: keep a lattice site with probability
+    /// `(1 - skew*x/Lx) * (1 - skew*y/Ly)`, decided by its tag.
+    skew: f64,
+    /// Run `LoadBalancePlugin` every this many steps (0 = off).
+    balance: usize,
 }
 
 // ── timers ───────────────────────────────────────────────────────────────────
@@ -246,10 +251,21 @@ fn seed_lattice(
                     (iy as f64 + 0.5) * c.spacing,
                     (iz as f64 + 0.5) * c.spacing,
                 ];
+                let tag = (ix * c.global[1] * c.global[2] + iy * c.global[2] + iz) as u64;
+                if c.skew > 0.0 {
+                    let fx = (ix as f64 + 0.5) / c.global[0] as f64;
+                    let fy = (iy as f64 + 0.5) / c.global[1] as f64;
+                    let keep = (1.0 - c.skew * fx) * (1.0 - c.skew * fy);
+                    let mut rng =
+                        Lcg(c.seed.rotate_left(17) ^ tag.wrapping_mul(0xD1B54A32D192ED03));
+                    rng.next();
+                    if rng.next() >= keep {
+                        continue;
+                    }
+                }
                 if (0..3)
                     .all(|d| p[d] >= domain.sub_domain_low[d] && p[d] < domain.sub_domain_high[d])
                 {
-                    let tag = (ix * c.global[1] * c.global[2] + iy * c.global[2] + iz) as u64;
                     mine.push((tag, p));
                 }
             }
@@ -299,6 +315,8 @@ fn parse_args() -> BenchCase {
         warmup: 50,
         skin: 1.15,
         seed: 12345,
+        skew: 0.0,
+        balance: 0,
     };
     let mut per_rank: Option<[usize; 3]> = None;
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -326,6 +344,8 @@ fn parse_args() -> BenchCase {
             "--vmax" => case.vmax = val.parse().unwrap(),
             "--skin" => case.skin = val.parse().unwrap(),
             "--seed" => case.seed = val.parse().unwrap(),
+            "--skew" => case.skew = val.parse().unwrap(),
+            "--balance" => case.balance = val.parse().unwrap(),
             other => panic!("unknown argument {other}"),
         }
         k += 2;
@@ -383,6 +403,13 @@ newton = true
         .add_plugins(CommunicationPlugin);
     soil_core::register_atom_data!(&mut app, BenchGrain::default());
     app.add_plugins(VelocityVerletPlugin::new());
+    if case.balance > 0 {
+        app.add_plugins(LoadBalancePlugin {
+            every: case.balance,
+            nbins: 256,
+            threshold: 1.0,
+        });
+    }
     app.add_resource(CaseRes(case.clone()));
     app.add_resource(Timers::default());
 

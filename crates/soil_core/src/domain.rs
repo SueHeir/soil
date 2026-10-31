@@ -111,6 +111,15 @@ pub struct DomainConfig {
 
 impl DomainConfig {
     /// Return the boundary types as a 3-element array `[x, y, z]`.
+    /// Box edge lengths `[x_high - x_low, y_high - y_low, z_high - z_low]`.
+    pub fn box_lengths(&self) -> [f64; 3] {
+        [
+            self.x_high - self.x_low,
+            self.y_high - self.y_low,
+            self.z_high - self.z_low,
+        ]
+    }
+
     pub fn boundary_types(&self) -> [BoundaryType; 3] {
         [self.boundary_x, self.boundary_y, self.boundary_z]
     }
@@ -428,8 +437,9 @@ pub fn balanced_planes(hist: &[f64], lo: f64, hi: f64, px: usize) -> Vec<f64> {
 /// Rebalance the decomposed x-axis so each rank owns ~equal particle counts, then
 /// flag `bounds_changed` to trigger atom re-exchange + neighbour rebuild. Physics
 /// is decomposition-invariant, so a periodically-rebalanced run must reproduce a
-/// static one. Uses only `all_reduce_sum` (one reduction per bin), so it works for
-/// any rank count without an all-gather.
+/// static one. The histogram is summed in one collective, so it works for any
+/// rank count without an all-gather. Prefer [`rebalance_shift`], which balances
+/// every decomposed axis and limits how far planes move per call.
 pub fn rebalance_x(atoms: &Atom, domain: &mut Domain, comm: &dyn CommBackend, nbins: usize) {
     let px = comm.processor_decomposition()[0] as usize;
     if px < 2 {
@@ -443,9 +453,7 @@ pub fn rebalance_x(atoms: &Atom, domain: &mut Domain, comm: &dyn CommBackend, nb
         let b = (((atoms.pos[i][0] as f64 - lo) / w).floor() as usize).min(nbins - 1);
         hist[b] += 1.0;
     }
-    for h in hist.iter_mut() {
-        *h = comm.all_reduce_sum_f64(*h);
-    }
+    comm.all_reduce_sum_f64_slice(&mut hist);
     let planes = balanced_planes(&hist, lo, hi, px);
     let r = comm.processor_position()[0] as usize;
     domain.sub_domain_low[0] = planes[r];
@@ -456,41 +464,229 @@ pub fn rebalance_x(atoms: &Atom, domain: &mut Domain, comm: &dyn CommBackend, nb
     domain.bounds_changed = true;
 }
 
-/// Cadence + resolution for periodic dynamic load balancing.
+/// Make every sub-domain along an axis at least `min_width` wide while
+/// keeping the end planes fixed. Returns `false` if the axis is too short to
+/// fit `planes.len() - 1` such slabs.
+fn enforce_min_width(planes: &mut [f64], min_width: f64) -> bool {
+    let p = planes.len() - 1;
+    if (planes[p] - planes[0]) < p as f64 * min_width * (1.0 + 1e-12) {
+        return false;
+    }
+    for r in 1..p {
+        planes[r] = planes[r].max(planes[r - 1] + min_width);
+    }
+    for r in (1..p).rev() {
+        planes[r] = planes[r].min(planes[r + 1] - min_width);
+    }
+    true
+}
+
+/// Move `old` planes toward `target` by one uniform fraction `a <= 1`, chosen
+/// so no interior plane moves more than half of either neighboring old slab.
+/// That keeps every atom within one rank of its old owner (exchange is
+/// single-hop), and because every plane moves by the same fraction, any width
+/// bound that both `old` and `target` satisfy still holds afterwards.
+pub fn damped_planes(old: &[f64], target: &[f64]) -> Vec<f64> {
+    let p = old.len() - 1;
+    let mut a: f64 = 1.0;
+    for r in 1..p {
+        let delta = (target[r] - old[r]).abs();
+        let limit = 0.5 * (old[r] - old[r - 1]).min(old[r + 1] - old[r]);
+        if delta > limit {
+            a = a.min(limit / delta);
+        }
+    }
+    let mut planes: Vec<f64> = old
+        .iter()
+        .zip(target)
+        .map(|(&o, &t)| o + a * (t - o))
+        .collect();
+    planes[0] = old[0];
+    planes[p] = old[p];
+    planes
+}
+
+/// Shift-style load balancing over every decomposed axis, like LAMMPS
+/// `balance shift xyz`. The grid stays a brick (planes are per axis), so
+/// the 6-swap ghost pattern is unchanged. Each axis gets an equal-count
+/// target from a global 1D histogram, widened so no sub-domain is thinner
+/// than the ghost cutoff allows for the current swap depth (`maxneed`), and
+/// the planes then move toward it by at most half a slab (see
+/// [`damped_planes`]); a badly skewed start converges over a few calls.
+///
+/// All histograms and the current plane positions are summed in a single
+/// collective, so every rank computes identical planes. Orthogonal boxes
+/// only: returns `false` without touching the domain when triclinic. Returns
+/// `true` and sets `bounds_changed` when any plane moved.
+pub fn rebalance_shift(
+    atoms: &Atom,
+    domain: &mut Domain,
+    comm: &dyn CommBackend,
+    nbins: usize,
+    maxneed: [i32; 3],
+) -> bool {
+    if domain.triclinic || nbins == 0 {
+        return false;
+    }
+    let decomp = comm.processor_decomposition();
+    let position = comm.processor_position();
+    let axes: Vec<usize> = (0..3).filter(|&d| decomp[d] > 1).collect();
+    if axes.is_empty() {
+        return false;
+    }
+
+    // Layout per balanced axis: [nbins histogram][p + 1 planes, in lamda].
+    // Only the rank at grid position 0 on the other two axes writes planes,
+    // so the sum reproduces each plane exactly once.
+    let mut offsets = [(0usize, 0usize); 3];
+    let mut len = 0;
+    for &d in &axes {
+        offsets[d] = (len, len + nbins);
+        len += nbins + decomp[d] as usize + 1;
+    }
+    let mut buf = vec![0.0f64; len];
+    for &d in &axes {
+        let representative = (0..3).all(|e| e == d || position[e] == 0);
+        if representative {
+            let p = decomp[d] as usize;
+            let r = position[d] as usize;
+            let base = offsets[d].1;
+            buf[base + r] = domain.sub_lamda_low[d];
+            if r == p - 1 {
+                buf[base + p] = domain.sub_lamda_high[d];
+            }
+        }
+    }
+    let scale = nbins as f64;
+    for i in 0..atoms.nlocal as usize {
+        for &d in &axes {
+            let lam = (atoms.pos[i][d] as f64 - domain.boundaries_low[d]) / domain.size[d];
+            let bin = ((lam * scale).floor().max(0.0) as usize).min(nbins - 1);
+            buf[offsets[d].0 + bin] += 1.0;
+        }
+    }
+    comm.all_reduce_sum_f64_slice(&mut buf);
+
+    let mut moved = false;
+    for &d in &axes {
+        let p = decomp[d] as usize;
+        let (h, b) = offsets[d];
+        let hist = &buf[h..h + nbins];
+        let old = &buf[b..b + p + 1];
+        let mut target = balanced_planes(hist, 0.0, 1.0, p);
+        // Narrowest slab the current swap depth can serve with ghosts.
+        let size = domain.size[d];
+        let need = if maxneed[d] > 0 {
+            maxneed[d] as f64
+        } else {
+            (domain.ghost_cutoff * p as f64 / size).ceil().max(1.0)
+        };
+        let min_width = domain.ghost_cutoff / need / size;
+        if !enforce_min_width(&mut target, min_width) {
+            continue;
+        }
+        let planes = damped_planes(old, &target);
+        let r = position[d] as usize;
+        let (lo_l, hi_l) = (planes[r], planes[r + 1]);
+        if lo_l == domain.sub_lamda_low[d] && hi_l == domain.sub_lamda_high[d] {
+            continue;
+        }
+        let blo = domain.boundaries_low[d];
+        let lo = if r == 0 { blo } else { blo + lo_l * size };
+        let hi = if r + 1 == p {
+            domain.boundaries_high[d]
+        } else {
+            blo + hi_l * size
+        };
+        domain.sub_lamda_low[d] = lo_l;
+        domain.sub_lamda_high[d] = hi_l;
+        domain.sub_domain_low[d] = lo;
+        domain.sub_domain_high[d] = hi;
+        domain.sub_length[d] = hi - lo;
+        moved = true;
+    }
+    // Every rank sees the same sums, but only some ranks' own slabs change:
+    // flag the change on all of them so bins are recomputed consistently.
+    let any_moved = comm.all_reduce_sum_f64(moved as u8 as f64) > 0.0;
+    if any_moved {
+        domain.bounds_changed = true;
+    }
+    any_moved
+}
+
+/// Cadence, resolution and trigger for periodic dynamic load balancing.
 pub struct LoadBalanceConfig {
-    /// Rebalance every `every`-th invocation (0 disables).
+    /// Rebalance every `every`-th step (0 disables). The balance runs on the
+    /// first neighbor-rebuild step at or after it is due, so it never forces
+    /// an extra rebuild.
     pub every: usize,
-    /// Histogram bins along the balanced axis.
+    /// Histogram bins per balanced axis.
     pub nbins: usize,
+    /// Only rebalance when `max(nlocal) / mean(nlocal)` exceeds this.
+    pub threshold: f64,
 }
 
 #[derive(Default)]
 struct LoadBalanceCounter(usize);
 
-/// Rebalance the x-decomposition by particle count every `every`-th step, at
-/// `PreExchange`, so the following `Exchange` migrates atoms to their new owners.
+/// Rebalance every decomposed axis by particle count (see
+/// [`rebalance_shift`]), at `PreExchange` of a rebuild step so the following
+/// `Exchange` migrates atoms to their new owners.
 fn load_balance_system(
     atoms: Res<Atom>,
     mut domain: ResMut<Domain>,
     comm: Res<CommResource>,
     cfg: Res<LoadBalanceConfig>,
+    topo: Option<Res<crate::CommTopology>>,
+    comm_state: Res<CurrentState<CommState>>,
     mut counter: ResMut<LoadBalanceCounter>,
 ) {
     counter.0 += 1;
-    if cfg.every == 0 || counter.0 % cfg.every != 0 {
+    if cfg.every == 0 || counter.0 < cfg.every || comm_state.0 != CommState::FullRebuild {
         return;
     }
-    rebalance_x(&atoms, &mut domain, &**comm, cfg.nbins);
+    counter.0 = 0;
+    if comm.size() < 2 {
+        return;
+    }
+    if cfg.threshold > 1.0 {
+        let n = atoms.nlocal as f64;
+        let max = -comm.all_reduce_min_f64(-n);
+        let mean = comm.all_reduce_sum_f64(n) / comm.size() as f64;
+        if mean <= 0.0 || max / mean <= cfg.threshold {
+            return;
+        }
+    }
+    let maxneed = topo.map(|t| t.maxneed).unwrap_or([0; 3]);
+    rebalance_shift(&atoms, &mut domain, &**comm, cfg.nbins, maxneed);
 }
 
-/// Periodic dynamic 1D load balancing (roadmap step 5). Add to the app to rebalance
-/// the x-decomposition by particle count every `every` steps. Physics is
+/// Periodic dynamic load balancing. Add to the app to move the sub-domain
+/// planes of every decomposed axis toward equal particle counts every `every`
+/// steps (LAMMPS `fix balance ... shift xyz`). Physics is
 /// decomposition-invariant, so a rebalanced run reproduces a static one.
+///
+/// ```ignore
+/// app.add_plugins(LoadBalancePlugin { every: 100, ..Default::default() });
+/// ```
 pub struct LoadBalancePlugin {
     /// Rebalance every `every` steps (0 disables rebalancing).
     pub every: usize,
-    /// Number of histogram bins used to find balanced cut planes along x.
+    /// Number of histogram bins per balanced axis.
     pub nbins: usize,
+    /// Skip a due rebalance unless `max(nlocal) / mean(nlocal)` exceeds this
+    /// (LAMMPS `thresh`). `1.0` always rebalances.
+    pub threshold: f64,
+}
+
+impl Default for LoadBalancePlugin {
+    fn default() -> Self {
+        LoadBalancePlugin {
+            every: 100,
+            nbins: 256,
+            threshold: 1.05,
+        }
+    }
 }
 
 impl Plugin for LoadBalancePlugin {
@@ -498,9 +694,13 @@ impl Plugin for LoadBalancePlugin {
         app.add_resource(LoadBalanceConfig {
             every: self.every,
             nbins: self.nbins,
+            threshold: self.threshold,
         });
         app.add_resource(LoadBalanceCounter(0));
-        app.add_update_system(load_balance_system, ParticleSimScheduleSet::PreExchange);
+        app.add_update_system(
+            load_balance_system.after(PBC),
+            ParticleSimScheduleSet::PreExchange,
+        );
     }
 }
 
@@ -939,6 +1139,39 @@ mod tests {
         fn sendrecv_batch_f64_into(&self, _ops: &mut [crate::SendRecvOp<'_>]) {
             unreachable!("TestComm point-to-point is not used in domain tests");
         }
+    }
+
+    #[test]
+    fn damped_planes_keep_every_move_within_half_a_slab() {
+        let old = [0.0, 0.25, 0.5, 0.75, 1.0];
+        // Close target: moved all the way.
+        let near = [0.0, 0.2, 0.45, 0.7, 1.0];
+        assert_eq!(damped_planes(&old, &near), near.to_vec());
+        // Far target: every plane moves by the same fraction, the largest
+        // move is exactly half a slab, and planes stay ordered.
+        let far = [0.0, 0.05, 0.1, 0.2, 1.0];
+        let got = damped_planes(&old, &far);
+        let max_move = (1..4).map(|r| (got[r] - old[r]).abs()).fold(0.0, f64::max);
+        assert!((max_move - 0.125).abs() < 1e-12, "{got:?}");
+        assert!(got.windows(2).all(|w| w[1] > w[0]));
+        assert_eq!((got[0], got[4]), (0.0, 1.0));
+        // Each atom can only change owner to an adjacent rank.
+        for r in 1..4 {
+            assert!(got[r] > old[r - 1] && got[r] < old[r + 1]);
+        }
+    }
+
+    #[test]
+    fn enforce_min_width_widens_thin_slabs() {
+        let mut planes = vec![0.0, 0.01, 0.02, 0.5, 1.0];
+        assert!(enforce_min_width(&mut planes, 0.2));
+        assert!(
+            planes.windows(2).all(|w| w[1] - w[0] >= 0.2 - 1e-12),
+            "{planes:?}"
+        );
+        assert_eq!((planes[0], planes[4]), (0.0, 1.0));
+        let mut tight = vec![0.0, 0.5, 1.0];
+        assert!(!enforce_min_width(&mut tight, 0.6));
     }
 
     #[test]

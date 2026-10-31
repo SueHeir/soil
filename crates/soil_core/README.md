@@ -121,6 +121,14 @@ binning and neighbor kernels lean on them. Set `[comm] processors_x/y/z = 0`
 to let SOIL pick a minimum-surface processor grid for the rank count, like
 LAMMPS `processors * * *`.
 
+For uneven particle density, add `LoadBalancePlugin { every: 100,
+..Default::default() }`. It shifts the sub-domain planes on every decomposed
+axis toward equal particle counts (LAMMPS `fix balance ... shift xyz`), only
+on steps that already rebuild the neighbor list, and only when max/mean
+particles per rank exceeds `threshold` (default 1.05). Planes move at most half
+a slab per call so exchange stays single-hop; a heavily skewed start settles
+over a few calls. Orthogonal boxes only.
+
 ## Features
 
 - `mpi_backend` (default): Enable MPI; disable for serial-only builds

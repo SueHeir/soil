@@ -226,7 +226,7 @@ fn end_build(mut profiler: ResMut<Profiler>) {
 
 fn fill_ghost_forces(mut atoms: ResMut<Atom>) {
     let nlocal = atoms.nlocal() as usize;
-    for force in &mut atoms.force[nlocal..] {
+    for force in atoms.force.iter_mut().skip(nlocal) {
         *force = [1.0, 2.0, 3.0];
     }
 }
@@ -373,14 +373,15 @@ fn push_rank_lattice(atoms: &mut Atom, domain: &Domain, case: &ProfileCase) {
                     pos[d] >= domain.sub_domain_low[d] && pos[d] < domain.sub_domain_high[d]
                 }) {
                     let tag = (ix * case.ncell * case.ncell + iy * case.ncell + iz) as u32;
-                    atoms.push_test_atom(tag, pos, case.radius, 1.0);
+                    // SAFETY: core-only fixture; the layout is set below.
+                    unsafe { atoms.push_test_atom(tag, pos, case.radius, 1.0) };
                     local += 1;
                 }
             }
         }
     }
-    atoms.nlocal() = local;
-    atoms.natoms() = (case.ncell * case.ncell * case.ncell) as u64;
+    // SAFETY: no extensions are registered and every pushed row is local.
+    unsafe { atoms.set_layout_unchecked(local, 0, (case.ncell * case.ncell * case.ncell) as u64) };
 }
 
 fn configure_domain(cfg: &mut ProfileConfig) {

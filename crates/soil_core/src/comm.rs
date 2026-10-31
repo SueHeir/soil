@@ -150,6 +150,9 @@ pub struct CommBuffers {
     pub forward_scratch: Vec<SwapScratch>,
     /// Per-swap scratch for the overlapped reverse force comm.
     pub reverse_scratch: Vec<SwapScratch>,
+    /// Scratch list of local rows leaving this rank in the current exchange
+    /// dimension (strictly descending), reused across exchanges.
+    pub exchange_removed: Vec<usize>,
     /// Persistent receive buffer for the count-first ghost rebuild in `borders`
     /// (C7): sized to the exact incoming payload and received into via the
     /// probe-free `_into` path, so a full rebuild never heap-allocates a recv Vec.
@@ -165,6 +168,7 @@ impl Default for CommBuffers {
             reverse_send_buff: Vec::new(),
             forward_scratch: Vec::new(),
             reverse_scratch: Vec::new(),
+            exchange_removed: Vec::new(),
             border_recv_buff: Vec::new(),
         }
     }
@@ -683,22 +687,15 @@ fn unpack_forward(
     recv_count: usize,
     extra_per_atom: usize,
 ) {
-    let stride = FORWARD_PACK_SIZE + extra_per_atom;
-    for k in 0..recv_count {
-        let base = k * stride;
-        atoms.pos[recv_start + k] = [
-            msg[base] as Real,
-            msg[base + 1] as Real,
-            msg[base + 2] as Real,
-        ];
-        atoms.vel[recv_start + k] = [
-            msg[base + 3] as Real,
-            msg[base + 4] as Real,
-            msg[base + 5] as Real,
-        ];
-        if extra_per_atom > 0 {
-            registry.unpack_forward_all(recv_start + k, &msg[base + FORWARD_PACK_SIZE..]);
-        }
+    // Wire layout per swap: [pos|vel for every atom] then one block per forward
+    // extension store (see `pack_forward_into`).
+    let base_len = recv_count * FORWARD_PACK_SIZE;
+    for (k, rec) in msg[..base_len].chunks_exact(FORWARD_PACK_SIZE).enumerate() {
+        atoms.pos[recv_start + k] = [rec[0] as Real, rec[1] as Real, rec[2] as Real];
+        atoms.vel[recv_start + k] = [rec[3] as Real, rec[4] as Real, rec[5] as Real];
+    }
+    if extra_per_atom > 0 {
+        registry.unpack_forward_rows(recv_start, recv_count, &msg[base_len..]);
     }
 }
 
@@ -711,25 +708,15 @@ fn unpack_forward_f32(
     recv_count: usize,
     extra_per_atom: usize,
 ) {
-    for k in 0..recv_count {
-        let base = k * FORWARD_PACK_SIZE;
-        atoms.pos[recv_start + k] = [
-            base_msg[base] as Real,
-            base_msg[base + 1] as Real,
-            base_msg[base + 2] as Real,
-        ];
-        atoms.vel[recv_start + k] = [
-            base_msg[base + 3] as Real,
-            base_msg[base + 4] as Real,
-            base_msg[base + 5] as Real,
-        ];
-        if extra_per_atom > 0 {
-            let extra_base = k * extra_per_atom;
-            registry.unpack_forward_all(
-                recv_start + k,
-                &extra_msg[extra_base..extra_base + extra_per_atom],
-            );
-        }
+    for (k, rec) in base_msg[..recv_count * FORWARD_PACK_SIZE]
+        .chunks_exact(FORWARD_PACK_SIZE)
+        .enumerate()
+    {
+        atoms.pos[recv_start + k] = [rec[0] as Real, rec[1] as Real, rec[2] as Real];
+        atoms.vel[recv_start + k] = [rec[3] as Real, rec[4] as Real, rec[5] as Real];
+    }
+    if extra_per_atom > 0 {
+        registry.unpack_forward_rows(recv_start, recv_count, extra_msg);
     }
 }
 
@@ -749,18 +736,23 @@ fn pack_forward_into(
 ) {
     let offset = swap.periodic_offset;
     let voff = swap.vel_offset;
+    // Base block first (pos|vel per atom), then each forward extension store
+    // packs all of this swap's atoms in one batched call — one RefCell borrow
+    // and one dynamic dispatch per store instead of per atom.
+    buf.reserve(swap.send_indices.len() * FORWARD_PACK_SIZE);
     for &idx in &swap.send_indices {
-        let base = [
-            atoms.pos[idx][0] as f64 + offset[0],
-            atoms.pos[idx][1] as f64 + offset[1],
-            atoms.pos[idx][2] as f64 + offset[2],
-            atoms.vel[idx][0] as f64 + voff[0],
-            atoms.vel[idx][1] as f64 + voff[1],
-            atoms.vel[idx][2] as f64 + voff[2],
-        ];
-        buf.extend_from_slice(&base);
-        registry.pack_forward_all(idx, buf);
+        let p = atoms.pos[idx];
+        let v = atoms.vel[idx];
+        buf.extend_from_slice(&[
+            p[0] as f64 + offset[0],
+            p[1] as f64 + offset[1],
+            p[2] as f64 + offset[2],
+            v[0] as f64 + voff[0],
+            v[1] as f64 + voff[1],
+            v[2] as f64 + voff[2],
+        ]);
     }
+    registry.pack_forward_rows(&swap.send_indices, buf);
 }
 
 fn pack_forward_base_f32_into(swap: &SwapData, buf: &mut Vec<f32>, atoms: &Atom) {
@@ -777,9 +769,7 @@ fn pack_forward_base_f32_into(swap: &SwapData, buf: &mut Vec<f32>, atoms: &Atom)
 }
 
 fn pack_forward_extra_into(swap: &SwapData, buf: &mut Vec<f64>, registry: &AtomDataRegistry) {
-    for &idx in &swap.send_indices {
-        registry.pack_forward_all(idx, buf);
-    }
+    registry.pack_forward_rows(&swap.send_indices, buf);
 }
 
 /// Pack one swap's outgoing ghost data into `scratch.send`. If the swap is a
@@ -1490,15 +1480,17 @@ fn reverse_accumulate(
     registry: &AtomDataRegistry,
     per_atom: usize,
 ) {
-    for k in 0..swap.send_indices.len() {
-        let base = k * per_atom;
-        let origin = swap.send_indices[k];
-        atoms.force[origin][0] += recv[base] as Accum;
-        atoms.force[origin][1] += recv[base + 1] as Accum;
-        atoms.force[origin][2] += recv[base + 2] as Accum;
-        if per_atom > 3 {
-            registry.unpack_reverse_all(origin, &recv[base + 3..]);
-        }
+    // Wire layout per swap: [force for every atom] then one block per reverse
+    // extension store (see `pack_reverse_into`).
+    let n = swap.send_indices.len();
+    for (rec, &origin) in recv[..3 * n].chunks_exact(3).zip(&swap.send_indices) {
+        let f = &mut atoms.force[origin];
+        f[0] += rec[0] as Accum;
+        f[1] += rec[1] as Accum;
+        f[2] += rec[2] as Accum;
+    }
+    if per_atom > 3 {
+        registry.unpack_reverse_rows(&swap.send_indices, &recv[3 * n..]);
     }
 }
 
@@ -1514,17 +1506,18 @@ fn pack_reverse_into(
     atoms: &Atom,
     registry: &AtomDataRegistry,
 ) {
-    for i in swap.recv_start..(swap.recv_start + swap.recv_count) {
+    let range = swap.recv_start..(swap.recv_start + swap.recv_count);
+    buf.reserve(3 * swap.recv_count);
+    for i in range {
         debug_assert!(
             atoms.is_ghost[i],
             "reverse_send_force: atom {} is not ghost",
             i
         );
-        buf.push(atoms.force[i][0] as f64);
-        buf.push(atoms.force[i][1] as f64);
-        buf.push(atoms.force[i][2] as f64);
-        registry.pack_reverse_all(i, buf);
+        let f = atoms.force[i];
+        buf.extend_from_slice(&[f[0] as f64, f[1] as f64, f[2] as f64]);
     }
+    registry.pack_reverse_rows(swap.recv_start, swap.recv_count, buf);
 }
 
 fn reverse_prepare_swap<'s>(
@@ -1806,35 +1799,45 @@ pub fn exchange(
             }
         };
 
-        // Scan local atoms: pack those outside subdomain in this dimension
-        for i in (0..atoms.len()).rev() {
-            let pr = atoms.pos[i];
-            let pf = [pr[0] as f64, pr[1] as f64, pr[2] as f64];
-            let coord = if triclinic {
-                domain.x2lamda(pf)[dim]
-            } else {
-                pf[dim]
-            };
-            let disp_lo = min_image(coord - sub_lo);
-            let disp_hi = min_image(coord - sub_hi);
-            if disp_lo < 0.0 {
-                lo_count += 1.0;
-                ParticleStore::new(&mut atoms, &registry)
-                    .pack_migrant(i, &mut atoms_buff[0])
+        // Scan local atoms from the back and pack those outside the subdomain in
+        // this dimension. Packing first and removing afterwards in one batch is
+        // identical to swap-removing during the backward scan (the row moved into
+        // a removed slot always comes from the already-scanned, staying tail), but
+        // validates and commits the store once per dimension instead of once per
+        // migrant.
+        let mut removed = std::mem::take(&mut buffers.exchange_removed);
+        removed.clear();
+        {
+            let store = ParticleStore::new(&mut atoms, &registry);
+            for i in (0..store.atoms().len()).rev() {
+                let pr = store.atoms().pos[i];
+                let pf = [pr[0] as f64, pr[1] as f64, pr[2] as f64];
+                let coord = if triclinic {
+                    domain.x2lamda(pf)[dim]
+                } else {
+                    pf[dim]
+                };
+                let disp_lo = min_image(coord - sub_lo);
+                let disp_hi = min_image(coord - sub_hi);
+                let target = if disp_lo < 0.0 {
+                    lo_count += 1.0;
+                    0
+                } else if disp_hi >= 0.0 {
+                    hi_count += 1.0;
+                    1
+                } else {
+                    continue;
+                };
+                store
+                    .pack_migrant(i, &mut atoms_buff[target])
                     .expect("exchange found invalid particle columns");
-                ParticleStore::new(&mut atoms, &registry)
-                    .swap_remove(i)
-                    .expect("exchange found an invalid local particle index");
-            } else if disp_hi >= 0.0 {
-                hi_count += 1.0;
-                ParticleStore::new(&mut atoms, &registry)
-                    .pack_migrant(i, &mut atoms_buff[1])
-                    .expect("exchange found invalid particle columns");
-                ParticleStore::new(&mut atoms, &registry)
-                    .swap_remove(i)
-                    .expect("exchange found an invalid local particle index");
+                removed.push(i);
             }
         }
+        ParticleStore::new(&mut atoms, &registry)
+            .swap_remove_descending(&removed)
+            .expect("exchange found an invalid local particle index");
+        buffers.exchange_removed = removed;
 
         // C7 count-first exchange. Both directions use the same 2-message
         // (meta=[atom_count, payload_len], then payload) protocol on every branch —

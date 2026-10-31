@@ -76,6 +76,15 @@ for contributions computed on ghosts, and no communication attribute for
 owner-only state that merely migrates with its particle. Never resize an
 extension column independently of the particle store.
 
+Structural operations stay all-or-nothing, but they only copy what they must.
+`#[derive(AtomData)]` stores report `row_local_structural_hooks() == true`, so a
+failed append is undone by truncation and in-place operations (removal,
+permutation, ghost discard) need no copy at all; insertion, migration, and
+ghost rebuilds therefore cost O(changed rows). A hand-written store keeps the
+conservative whole-store `snapshot()` unless it overrides
+`row_local_structural_hooks` to return `true`, which it should do whenever its
+hooks are plain per-row `Vec` operations.
+
 ## Particle-store migration
 
 `ParticleStore` is the public structural boundary for `Atom` plus registered

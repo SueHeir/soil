@@ -40,14 +40,20 @@ const GAMMA_N: f64 = 5.0;
 #[derive(DeriveAtomData, Default)]
 struct BenchGrain {
     radius: Vec<f64>,
+    // Owner-only: integration state that ghosts never read.
+    #[no_ghost]
     density: Vec<f64>,
+    #[no_ghost]
     inv_inertia: Vec<f64>,
+    #[no_ghost]
     quaternion: Vec<[f64; 4]>,
     #[forward]
     omega: Vec<[f64; 3]>,
+    #[no_ghost]
     ang_mom: Vec<[f64; 3]>,
     #[reverse]
     #[zero]
+    #[no_ghost]
     torque: Vec<[f64; 3]>,
     #[forward]
     body_id: Vec<f64>,

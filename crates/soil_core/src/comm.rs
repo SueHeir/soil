@@ -79,13 +79,16 @@ impl Default for ForwardCommPrecision {
 #[serde(deny_unknown_fields)]
 /// TOML `[comm]` — MPI processor grid configuration.
 pub struct CommConfig {
-    /// Number of MPI ranks in x dimension.
+    /// Number of MPI ranks in x dimension. `0` = choose automatically
+    /// (minimum-surface grid, like LAMMPS `processors * * *`).
     #[serde(default = "default_one_i32")]
     pub processors_x: i32,
-    /// Number of MPI ranks in y dimension.
+    /// Number of MPI ranks in y dimension. `0` = choose automatically
+    /// (minimum-surface grid, like LAMMPS `processors * * *`).
     #[serde(default = "default_one_i32")]
     pub processors_y: i32,
-    /// Number of MPI ranks in z dimension.
+    /// Number of MPI ranks in z dimension. `0` = choose automatically
+    /// (minimum-surface grid, like LAMMPS `processors * * *`).
     #[serde(default = "default_one_i32")]
     pub processors_z: i32,
     /// Precision for per-step forward ghost position/velocity updates.
@@ -225,7 +228,7 @@ impl Plugin for CommunicationPlugin {
     fn default_config(&self) -> Option<&str> {
         Some(
             r#"[comm]
-# Number of MPI processors in each dimension
+# Ranks per axis; 0 = automatic (minimum-surface grid for the run's rank count).
 processors_x = 1
 processors_y = 1
 processors_z = 1
@@ -263,6 +266,33 @@ forward_precision = "f64""#,
                 .ok_or_else(|| AppError::message("CommunicationPlugin did not register CommConfig"))?;
             let comm = app.get_resource_ref::<CommResource>()
                 .ok_or_else(|| AppError::message("CommunicationPlugin did not register CommResource"))?;
+            let requested = [config.processors_x, config.processors_y, config.processors_z];
+            if requested.iter().any(|&p| p < 0) {
+                return Err(AppError::message(format!(
+                    "[comm] processors {} {} {} must be positive, or 0 for automatic",
+                    requested[0], requested[1], requested[2]
+                )));
+            }
+            if requested.contains(&0) {
+                let box_len = app
+                    .get_resource_ref::<crate::DomainConfig>()
+                    .map(|d| [d.x_high - d.x_low, d.y_high - d.y_low, d.z_high - d.z_low])
+                    .unwrap_or([1.0; 3]);
+                let grid = auto_processor_grid(comm.size(), box_len, requested).ok_or_else(|| {
+                    AppError::message(format!(
+                        "[comm] processors {} {} {}: no grid with those fixed counts multiplies to {} ranks",
+                        requested[0], requested[1], requested[2], comm.size()
+                    ))
+                })?;
+                let mut resolved = config.clone();
+                resolved.processors_x = grid[0];
+                resolved.processors_y = grid[1];
+                resolved.processors_z = grid[2];
+                drop(config);
+                drop(comm);
+                app.add_resource(resolved);
+                return Ok(());
+            }
             let configured = config.processors_x * config.processors_y * config.processors_z;
             if configured != comm.size() {
                 return Err(AppError::message(format!(
@@ -348,6 +378,49 @@ pub fn comm_read_input(config: Res<CommConfig>, mut comm: ResMut<CommResource>) 
     let position = [rank / (py * pz), (rank / pz) % py, rank % pz];
 
     comm.set_processor_grid(decomp, position);
+}
+
+/// Pick a processor grid for `nprocs` ranks that minimizes the total
+/// sub-domain surface area (and so the ghost volume), like LAMMPS
+/// `processors * * *`. Entries of `fixed` greater than zero are kept; zeros
+/// are free. Ties go to the grid with more ranks along x, then y, which keeps
+/// the choice deterministic on every rank. Returns `None` when the fixed
+/// entries cannot be completed to a grid of exactly `nprocs` ranks.
+pub fn auto_processor_grid(nprocs: i32, box_len: [f64; 3], fixed: [i32; 3]) -> Option<[i32; 3]> {
+    if nprocs <= 0 {
+        return None;
+    }
+    let mut best: Option<([i32; 3], f64)> = None;
+    for px in 1..=nprocs {
+        if nprocs % px != 0 || (fixed[0] > 0 && fixed[0] != px) {
+            continue;
+        }
+        let rest = nprocs / px;
+        for py in 1..=rest {
+            if rest % py != 0 || (fixed[1] > 0 && fixed[1] != py) {
+                continue;
+            }
+            let pz = rest / py;
+            if fixed[2] > 0 && fixed[2] != pz {
+                continue;
+            }
+            let (lx, ly, lz) = (
+                box_len[0] / px as f64,
+                box_len[1] / py as f64,
+                box_len[2] / pz as f64,
+            );
+            let surface = lx * ly + ly * lz + lz * lx;
+            // `<=` lets later candidates win ties: larger px, then larger py.
+            let better = match best {
+                None => true,
+                Some((_, s)) => surface <= s * (1.0 + 1e-12),
+            };
+            if better {
+                best = Some(([px, py, pz], surface));
+            }
+        }
+    }
+    best.map(|(grid, _)| grid)
 }
 
 /// Convert a 3D processor grid position to a linear MPI rank.
@@ -1991,6 +2064,30 @@ pub fn exchange(
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn auto_processor_grid_minimizes_surface() {
+        // Cube: as close to cubic as the factorization allows.
+        assert_eq!(auto_processor_grid(8, [1.0; 3], [0; 3]), Some([2, 2, 2]));
+        assert_eq!(auto_processor_grid(1, [1.0; 3], [0; 3]), Some([1, 1, 1]));
+        assert_eq!(auto_processor_grid(4, [1.0; 3], [0; 3]), Some([2, 2, 1]));
+        // Prime count: a slab along an axis, ties going to x.
+        assert_eq!(auto_processor_grid(7, [1.0; 3], [0; 3]), Some([7, 1, 1]));
+        // Long box: cut the long axis.
+        assert_eq!(auto_processor_grid(4, [8.0, 1.0, 1.0], [0; 3]), Some([4, 1, 1]));
+        assert_eq!(auto_processor_grid(4, [1.0, 1.0, 8.0], [0; 3]), Some([1, 1, 4]));
+        // Flat box: 2D grid in the plane.
+        assert_eq!(auto_processor_grid(16, [4.0, 4.0, 0.25], [0; 3]), Some([4, 4, 1]));
+    }
+
+    #[test]
+    fn auto_processor_grid_honors_fixed_axes() {
+        assert_eq!(auto_processor_grid(8, [1.0; 3], [0, 0, 1]), Some([4, 2, 1]));
+        assert_eq!(auto_processor_grid(12, [1.0; 3], [3, 0, 0]), Some([3, 2, 2]));
+        assert_eq!(auto_processor_grid(6, [1.0; 3], [4, 0, 0]), None);
+        assert_eq!(auto_processor_grid(6, [1.0; 3], [2, 3, 1]), Some([2, 3, 1]));
+        assert_eq!(auto_processor_grid(6, [1.0; 3], [2, 2, 2]), None);
+    }
 
     #[derive(Default)]
     struct CountingComm {

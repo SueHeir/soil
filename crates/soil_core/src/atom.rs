@@ -262,6 +262,27 @@ pub trait AtomData: Any {
     /// The caller must append one matching core row and a row in every other
     /// extension, or roll the operation back.
     unsafe fn unpack(&mut self, buf: &[f64]) -> usize;
+    /// Serialize atom `i`'s fields for a ghost (border) record.
+    ///
+    /// Ghosts only need what force kernels read on a neighbor. The default
+    /// sends the full migration record ([`pack`](Self::pack)); a store whose
+    /// rows carry owner-only state (contact histories, statistics) should
+    /// override this pair to omit it, because the border record is sent for
+    /// every ghost on every rebuild. `#[derive(AtomData)]` skips
+    /// `#[no_ghost]` fields.
+    fn pack_border(&self, i: usize, buf: &mut Vec<f64>) {
+        self.pack(i, buf);
+    }
+    /// Append one ghost row from a [`pack_border`](Self::pack_border) record;
+    /// returns the number of `f64`s consumed. Owner-only state is left at its
+    /// default.
+    ///
+    /// # Safety
+    ///
+    /// Same contract as [`unpack`](Self::unpack).
+    unsafe fn unpack_border(&mut self, buf: &[f64]) -> usize {
+        unsafe { self.unpack(buf) }
+    }
     /// Reorder atoms according to `perm[0..n]` (used by spatial sorting).
     ///
     /// # Safety
@@ -798,6 +819,13 @@ impl AtomDataRegistry {
         }
     }
 
+    /// Pack the ghost (border) record of every extension for atom `i`.
+    pub(crate) fn pack_border_all(&self, i: usize, buf: &mut Vec<f64>) {
+        for (_, cell) in &self.stores {
+            cell.borrow().pack_border(i, buf);
+        }
+    }
+
     /// Unpack one atom's extension fields from `buf`. Returns total `f64`s consumed.
     pub(crate) fn unpack_all(&self, buf: &[f64]) -> usize {
         let mut pos = 0;
@@ -809,10 +837,31 @@ impl AtomDataRegistry {
         pos
     }
 
+    /// Unpack one ghost (border) record. Returns total `f64`s consumed.
+    fn unpack_border_all(&self, buf: &[f64]) -> usize {
+        let mut pos = 0;
+        for (_, cell) in &self.stores {
+            // SAFETY: as `unpack_all`.
+            pos += unsafe { cell.borrow_mut().unpack_border(&buf[pos..]) };
+        }
+        pos
+    }
+
     /// Decode one extension record while containing the legacy infallible
     /// callback boundary. A failed decoder is rolled back to `expected_rows`.
-    fn unpack_one(&self, expected_rows: usize, buf: &[f64]) -> Result<usize, ParticleStoreError> {
-        let decoded = catch_unwind(AssertUnwindSafe(|| self.unpack_all(buf)));
+    fn unpack_one(
+        &self,
+        expected_rows: usize,
+        buf: &[f64],
+        ghost: bool,
+    ) -> Result<usize, ParticleStoreError> {
+        let decoded = catch_unwind(AssertUnwindSafe(|| {
+            if ghost {
+                self.unpack_border_all(buf)
+            } else {
+                self.unpack_all(buf)
+            }
+        }));
         match decoded {
             Ok(used) if used == buf.len() && self.validate_rows(expected_rows + 1) => Ok(used),
             _ => {
@@ -1809,7 +1858,7 @@ impl<'a> ParticleStore<'a> {
         }
         Self::frame_record(buf, |buf| {
             self.atoms.pack_border(index, change_pos, vel_offset, buf);
-            self.registry.pack_all(index, buf);
+            self.registry.pack_border_all(index, buf);
         });
         Ok(())
     }
@@ -1837,7 +1886,7 @@ impl<'a> ParticleStore<'a> {
         let rows_before = self.atoms.len();
         let extension_used = self
             .registry
-            .unpack_one(rows_before, &record[ATOM_PACK_SIZE..])?;
+            .unpack_one(rows_before, &record[ATOM_PACK_SIZE..], ghost)?;
         debug_assert_eq!(ATOM_PACK_SIZE + extension_used, record_len);
         self.atoms.unpack_atom(record, ghost);
         Ok(record_len + 1)
@@ -1992,6 +2041,18 @@ mod tests {
         scalar: Vec<f64>,
         #[reverse]
         vector: Vec<[f64; 3]>,
+    }
+
+    #[derive(Default, AtomData)]
+    struct OwnerOnlyRows {
+        #[forward]
+        omega: Vec<[f64; 3]>,
+        #[no_ghost]
+        history: Vec<[f64; 4]>,
+        #[no_ghost]
+        #[reverse]
+        torque: Vec<[f64; 3]>,
+        radius: Vec<f64>,
     }
 
     #[derive(Default)]
@@ -2463,6 +2524,58 @@ mod tests {
             registry.get::<DerivedRows>().unwrap().scalar,
             vec![3.0, 3.0]
         );
+    }
+
+    #[test]
+    fn no_ghost_fields_skip_border_records_and_zero_ghost_rows() {
+        let mut atoms = Atom::new();
+        atoms.push_test_atom(7, [0.5; 3], 1.0, 1.0);
+        atoms.nlocal = 1;
+        let mut registry = AtomDataRegistry::new();
+        registry
+            .try_register(
+                OwnerOnlyRows {
+                    omega: vec![[1.0, 2.0, 3.0]],
+                    history: vec![[4.0, 5.0, 6.0, 7.0]],
+                    torque: vec![[8.0, 9.0, 10.0]],
+                    radius: vec![0.25],
+                },
+                1,
+            )
+            .unwrap();
+
+        let mut border = Vec::new();
+        let mut migrant = Vec::new();
+        {
+            let mut store = ParticleStore::new(&mut atoms, &registry);
+            store.pack_border(0, [0.0; 3], [0.0; 3], &mut border).unwrap();
+            store.pack_migrant(0, &mut migrant).unwrap();
+        }
+        // Border records drop the 4 + 3 owner-only values.
+        assert_eq!(migrant.len() - border.len(), 7);
+
+        ParticleStore::new(&mut atoms, &registry)
+            .append_ghost_records(&border, 1)
+            .unwrap();
+        assert_eq!((atoms.nlocal, atoms.nghost), (1, 1));
+        {
+            let rows = registry.get::<OwnerOnlyRows>().unwrap();
+            assert_eq!(rows.omega[1], [1.0, 2.0, 3.0]);
+            assert_eq!(rows.radius[1], 0.25);
+            assert_eq!(rows.history[1], [0.0; 4]);
+            assert_eq!(rows.torque[1], [0.0; 3]);
+        }
+
+        // Migrants still carry every field.
+        let mut fresh = Atom::new();
+        let mut fresh_registry = AtomDataRegistry::new();
+        fresh_registry.try_register(OwnerOnlyRows::default(), 0).unwrap();
+        ParticleStore::new(&mut fresh, &fresh_registry)
+            .append_migrant_records(&migrant, 1)
+            .unwrap();
+        let rows = fresh_registry.get::<OwnerOnlyRows>().unwrap();
+        assert_eq!(rows.history[0], [4.0, 5.0, 6.0, 7.0]);
+        assert_eq!(rows.torque[0], [8.0, 9.0, 10.0]);
     }
 
     #[test]

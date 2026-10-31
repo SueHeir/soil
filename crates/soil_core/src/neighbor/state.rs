@@ -55,7 +55,7 @@ pub struct Neighbor {
     pub every: usize,
     /// When true and `every > 0`, also check displacement threshold each step.
     pub check: bool,
-    /// Communication cutoff for ghost atoms: `pair_cutoff + 2 * displacement_buffer`.
+    /// Communication cutoff for ghost atoms: the neighbor-list cutoff (pair cutoff times skin), or a larger `domain.ghost_cutoff` requested by a plugin.
     pub ghost_cutoff: f64,
     /// Smallest cutoff radius among local atoms, cached at rebuild time for
     /// diagnostics and uniform-cutoff fast-path setup.

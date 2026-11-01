@@ -360,6 +360,22 @@ pub fn bin_neighbor_list(
         bin_count_arr[c] = pos + 1;
     }
 
+    // Bins-only mode (`[neighbor] pairs = false`): the per-bin CSR is the
+    // product. Leave an empty, well-formed pair list and return.
+    if !neighbor.build_pairs {
+        let mut offsets = std::mem::take(&mut neighbor.neighbor_offsets);
+        offsets.clear();
+        offsets.resize(nlocal + 1, 0);
+        neighbor.neighbor_offsets = offsets;
+        neighbor.neighbor_indices.clear();
+        neighbor.bin_atom_cell = atom_cell;
+        neighbor.bin_count_arr = bin_count_arr;
+        neighbor.bin_start = bin_start;
+        neighbor.bin_sorted_atoms = sorted_atoms;
+        neighbor.bin_atom_sorted_idx = atom_sorted_idx;
+        return;
+    }
+
     // Step 2b: Build sorted position cache for cache-friendly inner loop access
     let mut sorted_pos = std::mem::take(&mut neighbor.bin_sorted_pos);
     sorted_pos.clear();

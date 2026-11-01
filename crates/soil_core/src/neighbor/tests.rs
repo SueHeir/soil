@@ -67,6 +67,63 @@ fn bin_neighbor_list_finds_close_pair() {
 }
 
 #[test]
+fn bins_only_mode_bins_atoms_without_pairs() {
+    let mut app = App::new();
+    let mut atom = Atom::new();
+    push_atom(&mut atom, 0, [0.5, 0.5, 0.5], 0.5);
+    push_atom(&mut atom, 1, [1.0, 0.5, 0.5], 0.5);
+    push_atom(&mut atom, 2, [1.5, 1.5, 1.5], 0.5);
+    atom.nlocal = 3;
+    atom.natoms = 3;
+
+    let mut domain = crate::Domain::new();
+    domain.sub_domain_low = [0.0, 0.0, 0.0];
+    domain.sub_domain_high = [2.0, 2.0, 2.0];
+    domain.sub_length = [2.0, 2.0, 2.0];
+
+    let mut neighbor = Neighbor::new();
+    neighbor.skin_fraction = 1.0;
+    neighbor.bin_min_size = 1.0;
+    neighbor.build_pairs = false;
+
+    app.add_resource(atom);
+    app.add_resource(neighbor);
+    app.add_resource(domain);
+    app.add_resource(NeighborConfig {
+        pairs: false,
+        ..NeighborConfig::default()
+    });
+    app.add_resource(CurrentState(CommState::FullRebuild));
+    app.add_resource(crate::CommResource(Box::new(
+        crate::SingleProcessComm::new(),
+    )));
+    app.add_setup_system(neighbor_setup, ScheduleSetupSet::PostSetup);
+    app.add_update_system(bin_neighbor_list, ParticleSimScheduleSet::Neighbor);
+    app.organize_systems();
+    app.setup();
+    app.run();
+
+    let n = app.get_resource_ref::<Neighbor>().unwrap();
+    assert!(
+        n.neighbor_indices.is_empty(),
+        "pairs = false builds no pairs"
+    );
+    assert_eq!(n.neighbor_offsets, vec![0; 4], "empty but well-formed CSR");
+    assert_eq!(n.pairs(3).count(), 0);
+    // Every local atom is in exactly one bin, and that bin contains its position.
+    let mut seen = vec![0usize; 3];
+    for c in 0..n.bin_total_cells {
+        for m in n.bin_start[c] as usize..n.bin_start[c + 1] as usize {
+            let i = n.bin_sorted_atoms[m] as usize;
+            seen[i] += 1;
+            assert_eq!(n.bin_atom_cell[i] as usize, c);
+        }
+    }
+    assert_eq!(seen, vec![1, 1, 1]);
+    assert_ne!(n.bin_atom_cell[0], n.bin_atom_cell[2]);
+}
+
+#[test]
 fn pair_iter_matches_manual() {
     let mut neighbor = Neighbor::new();
     // 3 local atoms: atom 0 -> [1, 2], atom 1 -> [2], atom 2 -> []

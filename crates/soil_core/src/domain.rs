@@ -275,6 +275,45 @@ impl Domain {
         ]
     }
 
+    /// Wrap a separation vector `d = x_j - x_i` to its **minimum image** on every
+    /// periodic axis (orthogonal or triclinic box); non-periodic axes are left as
+    /// they are.
+    ///
+    /// Use it for any persistent pair addressed by tag (bonds, peridynamic
+    /// families): the same tag can be present as a local atom *and* as one or
+    /// more periodic ghost images, so the copy a tag lookup returns is not
+    /// necessarily the nearest one. Valid while the interaction range is below
+    /// half the periodic box length.
+    #[inline]
+    pub fn minimum_image(&self, d: [f64; 3]) -> [f64; 3] {
+        let pflags = self.periodic_flags();
+        if !(pflags[0] || pflags[1] || pflags[2]) {
+            return d;
+        }
+        if !self.triclinic {
+            let mut d = d;
+            for k in 0..3 {
+                if pflags[k] && self.size[k] > 0.0 {
+                    d[k] -= self.size[k] * (d[k] / self.size[k]).round();
+                }
+            }
+            return d;
+        }
+        let [xy, xz, yz] = self.tilt;
+        // Fractional components via back-substitution through H (upper
+        // triangular), computed from the *unwrapped* separation, then wrapped.
+        let lz = if self.size[2] != 0.0 { d[2] / self.size[2] } else { 0.0 };
+        let ly = if self.size[1] != 0.0 { (d[1] - yz * lz) / self.size[1] } else { 0.0 };
+        let lx = if self.size[0] != 0.0 { (d[0] - xy * ly - xz * lz) / self.size[0] } else { 0.0 };
+        let wrap = |l: f64, axis: usize| if pflags[axis] { l - l.round() } else { l };
+        let (lx, ly, lz) = (wrap(lx, 0), wrap(ly, 1), wrap(lz, 2));
+        [
+            if self.size[0] != 0.0 { self.size[0] * lx + xy * ly + xz * lz } else { d[0] },
+            if self.size[1] != 0.0 { self.size[1] * ly + yz * lz } else { d[1] },
+            if self.size[2] != 0.0 { self.size[2] * lz } else { d[2] },
+        ]
+    }
+
     /// Convert a real-space point to fractional (lamda) box coordinates, where the
     /// (possibly tilted) box maps onto the unit cube `[0,1)³`.
     ///
@@ -1139,6 +1178,31 @@ mod tests {
         fn sendrecv_batch_f64_into(&self, _ops: &mut [crate::SendRecvOp<'_>]) {
             unreachable!("TestComm point-to-point is not used in domain tests");
         }
+    }
+
+    #[test]
+    fn minimum_image_wraps_only_periodic_axes() {
+        let mut d = Domain::new();
+        d.size = [10.0, 10.0, 10.0];
+        d.boundary_type = [BoundaryType::Periodic, BoundaryType::Fixed, BoundaryType::Periodic];
+        let w = d.minimum_image([9.0, 9.0, -6.0]);
+        assert!((w[0] - -1.0).abs() < 1e-12);
+        assert!((w[1] - 9.0).abs() < 1e-12);
+        assert!((w[2] - 4.0).abs() < 1e-12);
+        d.boundary_type = [BoundaryType::Fixed; 3];
+        assert_eq!(d.minimum_image([9.0, 9.0, -6.0]), [9.0, 9.0, -6.0]);
+    }
+
+    #[test]
+    fn minimum_image_triclinic_matches_lamda_wrap() {
+        let mut d = Domain::new();
+        d.size = [10.0, 8.0, 6.0];
+        d.tilt = [2.0, 1.0, 0.5];
+        d.triclinic = true;
+        d.boundary_type = [BoundaryType::Periodic; 3];
+        // A shift by one full lattice vector of H (column 2) must wrap to zero.
+        let w = d.minimum_image([1.0 + 0.3, 0.5, 6.0]);
+        assert!((w[0] - 0.3).abs() < 1e-12 && w[1].abs() < 1e-12 && w[2].abs() < 1e-12, "{w:?}");
     }
 
     #[test]

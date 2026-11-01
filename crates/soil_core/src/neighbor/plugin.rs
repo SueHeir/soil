@@ -70,6 +70,7 @@ distance_kernel = "scalar""#,
         Config::load::<NeighborConfig>(app, "neighbor");
 
         app.add_resource(Neighbor::new())
+            .add_resource(crate::TagIndex::new())
             .add_resource(CurrentState(CommState::FullRebuild))
             .add_setup_system(neighbor_read_input, ScheduleSetupSet::Setup)
             .add_setup_system(

@@ -20,6 +20,7 @@ pub(super) fn save_build_positions(atoms: &Atom, neighbor: &mut Neighbor) {
     }
     neighbor.last_build_total = atoms.len();
     neighbor.steps_since_build = 0;
+    neighbor.build_count = neighbor.build_count.wrapping_add(1);
     let (min_skin, max_skin) = atoms.cutoff_radius[..nlocal]
         .iter()
         .fold((f64::MAX, f64::MIN), |(mn, mx), &s| {

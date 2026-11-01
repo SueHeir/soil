@@ -57,7 +57,7 @@ bin_size = 1.0
 every = 0
 # Also check displacement when every > 0 (like LAMMPS "check yes")
 check = true
-# Sort atoms by spatial bin every N steps for cache locality (0 = disabled)
+# Sort atoms by spatial bin at the first full rebuild after every N steps (0 = every rebuild)
 sort_every = 1000
 # Newton's third law optimization (true = half list + reverse comm, false = full list)
 newton = true

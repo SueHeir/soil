@@ -64,7 +64,8 @@ pub struct NeighborConfig {
     /// When true and every > 0, also check displacement threshold (like LAMMPS "check yes")
     #[serde(default = "default_true")]
     pub check: bool,
-    /// Sort atoms by spatial bin every N steps for cache locality (0 = disabled).
+    /// Sort atoms by spatial bin at the first full rebuild after every N steps,
+    /// for cache locality, like LAMMPS `atom_modify sort` (0 = at every full rebuild).
     #[serde(default = "default_sort_every")]
     pub sort_every: usize,
     /// Newton's third law optimization: true = half neighbor list + reverse comm,

@@ -60,10 +60,14 @@ pub struct Neighbor {
     /// Smallest cutoff radius among local atoms, cached at rebuild time for
     /// diagnostics and uniform-cutoff fast-path setup.
     pub cached_min_skin: f64,
-    /// Reorder atoms by spatial bin every N steps for cache locality (0 = disabled).
+    /// Reorder atoms by spatial bin at the first full rebuild after every N steps,
+    /// for cache locality (0 = at every full rebuild).
     pub sort_every: usize,
     /// Steps elapsed since the last spatial sort.
     pub sort_counter: usize,
+    /// A spatial sort is due and runs at the next full rebuild. Starts true so
+    /// the first build sorts.
+    pub sort_due: bool,
     /// Per-atom bin cell index (reused across rebuilds to avoid allocation).
     pub bin_atom_cell: Vec<u32>,
     /// Per-cell atom count, then reused as write cursor during CSR construction.
@@ -153,6 +157,7 @@ impl Neighbor {
             cached_min_skin: f64::MAX,
             sort_every: 1000,
             sort_counter: 0,
+            sort_due: true,
             bin_atom_cell: Vec::new(),
             bin_count_arr: Vec::new(),
             bin_start: Vec::new(),

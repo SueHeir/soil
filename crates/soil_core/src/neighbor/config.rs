@@ -75,6 +75,12 @@ pub struct NeighborConfig {
     /// Distance-filter kernel for neighbor construction: `scalar` or `simd`.
     #[serde(default = "default_distance_kernel")]
     pub distance_kernel: NeighborDistanceKernel,
+    /// Build the pair list at each rebuild (default). `false` keeps the bin grid,
+    /// per-bin CSR (`bin_start` / `bin_sorted_atoms`), sorting, exchange and
+    /// borders, but leaves the pair list empty: for methods whose interactions
+    /// are cell-based rather than pairwise within a cutoff (DSMC, PIC, MPM).
+    #[serde(default = "default_true")]
+    pub pairs: bool,
 }
 
 impl Default for NeighborConfig {
@@ -87,6 +93,7 @@ impl Default for NeighborConfig {
             sort_every: 1000,
             newton: true,
             distance_kernel: NeighborDistanceKernel::Scalar,
+            pairs: true,
         }
     }
 }

@@ -225,14 +225,6 @@ fn newton_on(neighbor: Res<Neighbor>) -> bool {
 pub struct CommunicationPlugin;
 
 impl Plugin for CommunicationPlugin {
-    /// Installs the shared `grass_mpi::CommResource`, the same capability FIELD's
-    /// `CommPlugin` provides. Advertising it lets a mesh plugin that `requires`
-    /// `"comm"` (e.g. `field_core::UniformMeshPlugin`) share SOIL's communicator
-    /// in one App instead of installing a second backend.
-    fn provides(&self) -> Vec<&str> {
-        vec!["comm"]
-    }
-
     fn default_config(&self) -> Option<&str> {
         Some(
             r#"[comm]

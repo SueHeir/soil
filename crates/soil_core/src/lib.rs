@@ -97,6 +97,7 @@ pub mod precision;
 pub mod query;
 pub mod region;
 pub mod schedule;
+pub mod tag_index;
 pub mod startup;
 pub mod tree;
 pub mod virial;
@@ -137,6 +138,7 @@ pub use neighbor::*;
 pub use precision::{Accum, Real};
 pub use schedule::*;
 pub use startup::stage_tables;
+pub use tag_index::TagIndex;
 pub use tree::{Monopole, Octree, OctreeNode};
 pub use virial::*;
 

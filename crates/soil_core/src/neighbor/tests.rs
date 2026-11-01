@@ -132,6 +132,13 @@ fn pair_iter_matches_manual() {
 
     let pairs: Vec<(usize, usize)> = neighbor.pairs(3).collect();
     assert_eq!(pairs, vec![(0, 1), (0, 2), (1, 2)]);
+
+    // Row access yields the same pairs.
+    assert_eq!(neighbor.neighbors_of(0), &[1, 2]);
+    assert_eq!(neighbor.neighbors_of(1), &[2]);
+    assert!(neighbor.neighbors_of(2).is_empty());
+    assert!(neighbor.neighbors_of(3).is_empty());
+    assert!(Neighbor::new().neighbors_of(0).is_empty());
 }
 
 #[test]

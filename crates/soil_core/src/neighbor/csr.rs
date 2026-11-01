@@ -42,6 +42,18 @@ impl<'a> Iterator for PairIter<'a> {
 }
 
 impl Neighbor {
+    /// The neighbor indices of local atom `i` (one CSR row). Lets a gather pass
+    /// hoist everything that depends only on `i` out of the inner loop and write
+    /// its accumulator once per atom, instead of once per pair as with
+    /// [`pairs`](Self::pairs). Empty before the first build.
+    #[inline]
+    pub fn neighbors_of(&self, i: usize) -> &[u32] {
+        match (self.neighbor_offsets.get(i), self.neighbor_offsets.get(i + 1)) {
+            (Some(&s), Some(&e)) => &self.neighbor_indices[s as usize..e as usize],
+            _ => &[],
+        }
+    }
+
     /// Iterate over all (i, j) pairs from the CSR neighbor list.
     /// `nlocal` is the number of local atoms (only local atoms own neighbor lists).
     pub fn pairs(&self, nlocal: usize) -> PairIter<'_> {

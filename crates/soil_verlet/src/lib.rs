@@ -59,7 +59,7 @@
 use grass_app::prelude::*;
 use grass_scheduler::prelude::*;
 
-use soil_core::{Accum, Atom, ParticleSimScheduleSet, Real};
+use soil_core::{Accum, Atom, ParticleSimScheduleSet, Real, RunConfig, ScheduleSetupSet};
 
 /// Registers initial and final integration systems for translational Velocity Verlet.
 ///
@@ -104,6 +104,10 @@ impl Default for VelocityVerletPlugin {
 
 impl Plugin for VelocityVerletPlugin {
     fn build(&self, app: &mut App) {
+        // Honour an explicit `[[run]] dt` for the current stage. Runs at `Setup`
+        // so a tier's own `PostSetup` timestep estimate (used when `dt = 0`)
+        // still has the last word.
+        app.add_setup_system(timestep_from_run_config, ScheduleSetupSet::Setup);
         if let Some(ref stage_name) = self.stage {
             app.add_update_system(
                 initial_integration.run_if(in_stage(stage_name)),
@@ -117,6 +121,29 @@ impl Plugin for VelocityVerletPlugin {
             app.add_update_system(initial_integration, ParticleSimScheduleSet::InitialIntegration)
                 .add_update_system(final_integration, ParticleSimScheduleSet::FinalIntegration);
         }
+    }
+}
+
+/// Setup system: copy the current stage's `[[run]] dt` into [`Atom::dt`] when it
+/// is set (`dt > 0`). `Atom::dt` otherwise keeps its previous value, so a tier
+/// that derives a stable timestep itself (DIRT's Rayleigh estimate) is
+/// unaffected when the config leaves `dt` at `0`. Re-runs at every stage's
+/// setup, so per-stage `dt` values are applied.
+pub fn timestep_from_run_config(
+    mut atoms: ResMut<Atom>,
+    run_config: Option<Res<RunConfig>>,
+    manager: Option<Res<SchedulerManager>>,
+) {
+    let Some(run_config) = run_config else {
+        return;
+    };
+    if run_config.num_stages() == 0 {
+        return;
+    }
+    let index = manager.map(|m| m.index).unwrap_or(0);
+    let dt = run_config.current_stage(index).dt;
+    if dt > 0.0 {
+        atoms.dt = dt;
     }
 }
 
@@ -216,6 +243,30 @@ mod tests {
         atom.force[0][0] = 2.0;
         unsafe { atom.set_layout_unchecked(1, 0, 1) };
         atom
+    }
+
+    #[test]
+    fn run_config_dt_is_applied_only_when_set() {
+        let mut stage = soil_core::StageConfig::default();
+        stage.dt = 2.5e-4;
+        let mut app = App::new();
+        app.add_resource(make_atom());
+        app.add_resource(RunConfig { stages: vec![stage] });
+        app.add_setup_system(timestep_from_run_config, ScheduleSetupSet::Setup);
+        app.organize_systems();
+        app.setup();
+        assert_eq!(app.get_resource_ref::<Atom>().unwrap().dt, 2.5e-4);
+
+        // dt = 0 leaves a tier-computed timestep alone.
+        let mut atom = make_atom();
+        atom.dt = 7.0e-6;
+        let mut app = App::new();
+        app.add_resource(atom);
+        app.add_resource(RunConfig::default());
+        app.add_setup_system(timestep_from_run_config, ScheduleSetupSet::Setup);
+        app.organize_systems();
+        app.setup();
+        assert_eq!(app.get_resource_ref::<Atom>().unwrap().dt, 7.0e-6);
     }
 
     #[test]

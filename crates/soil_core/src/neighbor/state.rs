@@ -29,6 +29,10 @@ pub struct Neighbor {
     pub last_build_radius: Vec<f64>,
     /// Number of timesteps since the last neighbor list rebuild.
     pub steps_since_build: usize,
+    /// Monotonic count of neighbor-list builds. Local indices and the ghost set
+    /// change only at a build, so caches keyed on atom index (for example
+    /// [`TagIndex`](crate::TagIndex)) stay valid while this value is unchanged.
+    pub build_count: u64,
     /// Total atom count (local + ghost) at the last neighbor build.
     pub last_build_total: usize,
     /// Full simulation box dimensions `[Lx, Ly, Lz]` for minimum-image displacement checks.
@@ -145,6 +149,7 @@ impl Neighbor {
             last_build_pos: Vec::new(),
             last_build_radius: Vec::new(),
             steps_since_build: 0,
+            build_count: 0,
             last_build_total: 0,
             pbc_box: [0.0; 3],
             pbc_flags: [false; 3],

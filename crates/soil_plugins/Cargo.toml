@@ -1,0 +1,20 @@
+[package]
+name = "soil_plugins"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Shared SOIL plugin groups (CorePlugins) for every particle-method tier"
+keywords = ["plugin", "particles", "simulation"]
+categories = ["simulation", "science"]
+
+[features]
+default = ["precision-double"]
+precision-double = ["soil_core/precision-double", "soil_print/precision-double"]
+precision-mixed = ["soil_core/precision-mixed", "soil_print/precision-mixed"]
+precision-single = ["soil_core/precision-single", "soil_print/precision-single"]
+
+[dependencies]
+soil_core = { path = "../soil_core", version = "0.1.3", default-features = false }
+soil_print = { path = "../soil_print", version = "0.1.3", default-features = false }
+grass_app.workspace = true

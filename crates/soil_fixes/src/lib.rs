@@ -11,6 +11,7 @@
 //! | Fix | TOML key | Description |
 //! |-----|----------|-------------|
 //! | [`PinDef`] | `[[pin]]` | Hard **translational** position constraint — captures pos at setup, restores every step |
+//! | [`GravityConfig`] | `[gravity]` | Uniform body force `F = m g` ([`GravityPlugin`], shared by DEM, SPH and peridynamics) |
 //!
 //! # Plugin
 //!
@@ -77,6 +78,9 @@
 //! torque.
 
 #![warn(missing_docs)]
+
+mod gravity;
+pub use gravity::{apply_gravity, GravityConfig, GravityPlugin};
 
 use std::collections::HashMap;
 

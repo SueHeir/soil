@@ -951,18 +951,43 @@ pub fn shrink_wrap(atoms: Res<Atom>, mut domain: ResMut<Domain>) {
 }
 
 /// Wrap a position into [low, low+size) with periodic boundaries.
-/// Returns (new_pos, image_delta) where image_delta is +1/-1/0.
+/// Returns (new_pos, image_delta). The common case is one image (+1/-1/0);
+/// a particle that crossed several periods since the last wrap (a fast
+/// particle in a thin periodic direction, e.g. a DSMC slab) is wrapped by as
+/// many images as it needs, at no cost to the common case.
 #[inline]
 fn wrap_periodic(mut pos: f64, low: f64, size: f64) -> (f64, i32) {
     let high = low + size;
     if pos < low {
-        pos += size;
-        (pos, -1)
+        let mut delta = 0;
+        while pos < low {
+            pos += size;
+            delta -= 1;
+        }
+        (pos, delta)
     } else if pos >= high {
-        pos -= size;
-        (pos, 1)
+        let mut delta = 0;
+        while pos >= high {
+            pos -= size;
+            delta += 1;
+        }
+        (pos, delta)
     } else {
         (pos, 0)
+    }
+}
+
+#[cfg(test)]
+mod wrap_tests {
+    use super::wrap_periodic;
+
+    #[test]
+    fn wrap_periodic_handles_one_and_several_images() {
+        assert_eq!(wrap_periodic(0.5, 0.0, 1.0), (0.5, 0));
+        assert_eq!(wrap_periodic(1.25, 0.0, 1.0), (0.25, 1));
+        assert_eq!(wrap_periodic(-0.25, 0.0, 1.0), (0.75, -1));
+        assert_eq!(wrap_periodic(3.25, 0.0, 1.0), (0.25, 3));
+        assert_eq!(wrap_periodic(-2.75, 0.0, 1.0), (0.25, -3));
     }
 }
 

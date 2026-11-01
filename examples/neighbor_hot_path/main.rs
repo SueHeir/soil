@@ -104,6 +104,7 @@ fn build_app(case: &CaseConfig, kernel: NeighborDistanceKernel) -> App {
         sort_every: 0,
         newton: true,
         distance_kernel: kernel,
+        pairs: true,
     });
     app.add_resource(CurrentState(CommState::FullRebuild));
     app.add_resource(CommResource(Box::new(SingleProcessComm::new())));

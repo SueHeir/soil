@@ -122,6 +122,9 @@ pub struct Neighbor {
     pub newton: bool,
     /// Distance-filter kernel selected for neighbor construction.
     pub distance_kernel: NeighborDistanceKernel,
+    /// When `false`, rebuilds bin atoms into `bin_start` / `bin_sorted_atoms`
+    /// but skip the pair list (see [`NeighborConfig::pairs`](super::NeighborConfig)).
+    pub build_pairs: bool,
 }
 
 impl Default for Neighbor {
@@ -181,6 +184,7 @@ impl Neighbor {
             cached_max_cutoff: 0.0,
             newton: true,
             distance_kernel: NeighborDistanceKernel::Scalar,
+            build_pairs: true,
         }
     }
 }

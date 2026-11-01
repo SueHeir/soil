@@ -62,7 +62,9 @@ sort_every = 1000
 # Newton's third law optimization (true = half list + reverse comm, false = full list)
 newton = true
 # Neighbor distance kernel: scalar or simd (falls back to scalar if unsupported)
-distance_kernel = "scalar""#,
+distance_kernel = "scalar"
+# Build the pair list (false = bins only, for cell-based methods such as DSMC)
+pairs = true"#,
         )
     }
 
@@ -111,6 +113,7 @@ pub fn neighbor_read_input(
     neighbor.sort_every = config.sort_every;
     neighbor.newton = config.newton;
     neighbor.distance_kernel = config.distance_kernel;
+    neighbor.build_pairs = config.pairs;
     if comm.rank() == 0 {
         let rebuild_str = if config.every == 0 {
             "displacement".to_string()

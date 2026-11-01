@@ -240,16 +240,9 @@ forward_precision = "f64""#,
     fn build(&self, app: &mut App) {
         Config::load::<CommConfig>(app, "comm");
 
-        // Select backend based on feature flag
-        #[cfg(feature = "mpi_backend")]
-        {
-            let world = get_mpi_world();
-            app.add_resource(CommResource(Box::new(MpiCommBackend::new(world))));
-        }
-        #[cfg(not(feature = "mpi_backend"))]
-        {
-            app.add_resource(CommResource(Box::new(SingleProcessComm::new())));
-        }
+        // The communicator is GRASS's: reuse the App's if another library
+        // (FIELD, a coupler, the application) already installed it.
+        app.add_plugins(grass_mpi::MpiPlugin);
 
         app.add_resource(CommBuffers::default());
         app.add_resource(CommTopology {
@@ -307,8 +300,6 @@ forward_precision = "f64""#,
                 .run_if(in_state(CommState::FullRebuild)),
             ParticleSimScheduleSet::Exchange,
         );
-
-        app.add_cleanup(finalize_mpi);
     }
 }
 

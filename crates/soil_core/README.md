@@ -76,6 +76,23 @@ for contributions computed on ghosts, and no communication attribute for
 owner-only state that merely migrates with its particle. Never resize an
 extension column independently of the particle store.
 
+Owner-only state that ghosts never read (contact or bond history, integrator
+state, accumulators) can also be marked `#[no_ghost]`. Ghost border records
+then skip it, and ghost rows get zeros. That keeps the per-rebuild borders
+message close to the size of the core record, which matters at high rank
+counts where the ghost shell is a large fraction of the atoms. A hand-written
+store does the same by overriding `pack_border` / `unpack_border`. A field
+can't be both `#[forward]` and `#[no_ghost]`.
+
+Structural operations stay all-or-nothing, but they only copy what they must.
+`#[derive(AtomData)]` stores report `row_local_structural_hooks() == true`, so a
+failed append is undone by truncation and in-place operations (removal,
+permutation, ghost discard) need no copy at all; insertion, migration, and
+ghost rebuilds therefore cost O(changed rows). A hand-written store keeps the
+conservative whole-store `snapshot()` unless it overrides
+`row_local_structural_hooks` to return `true`, which it should do whenever its
+hooks are plain per-row `Vec` operations.
+
 ## Particle-store migration
 
 `ParticleStore` is the public structural boundary for `Atom` plus registered
@@ -94,6 +111,23 @@ Downstream code that only reads ownership should use `Atom::nlocal()`,
 backfilled against the live core store; do not supply a separate row count.
 Only extension-free test fixtures may use `Atom::set_layout_unchecked`, and
 must establish a complete core layout before any extension is registered.
+
+## Building for performance
+
+The workspace release profile uses fat LTO with one codegen unit. On a known
+machine, also build with `RUSTFLAGS="-C target-cpu=native"`: on baseline
+x86-64, `f64::floor`, `round` and `mul_add` become library calls, and the
+binning and neighbor kernels lean on them. Set `[comm] processors_x/y/z = 0`
+to let SOIL pick a minimum-surface processor grid for the rank count, like
+LAMMPS `processors * * *`.
+
+For uneven particle density, add `LoadBalancePlugin { every: 100,
+..Default::default() }`. It shifts the sub-domain planes on every decomposed
+axis toward equal particle counts (LAMMPS `fix balance ... shift xyz`), only
+on steps that already rebuild the neighbor list, and only when max/mean
+particles per rank exceeds `threshold` (default 1.05). Planes move at most half
+a slab per call so exchange stays single-hop; a heavily skewed start settles
+over a few calls. Orthogonal boxes only.
 
 ## Features
 

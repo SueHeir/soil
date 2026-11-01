@@ -140,3 +140,16 @@ path = "examples/particle_store_facade/main.rs"
 name = "typed_system_labels"
 path = "examples/typed_system_labels/main.rs"
 required-features = ["precision-double"]
+
+[[example]]
+name = "scaling_bench"
+path = "examples/scaling_bench/main.rs"
+required-features = ["mpi_backend", "precision-double"]
+
+# Release builds are what MPI scaling runs use. Fat LTO + one codegen unit
+# lets the comm/neighbor hot paths inline across crates (SOIL <-> GRASS).
+# For production runs on a known machine also set
+# RUSTFLAGS="-C target-cpu=native" (see crates/soil_core/README.md).
+[profile.release]
+lto = "fat"
+codegen-units = 1

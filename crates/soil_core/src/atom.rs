@@ -262,6 +262,27 @@ pub trait AtomData: Any {
     /// The caller must append one matching core row and a row in every other
     /// extension, or roll the operation back.
     unsafe fn unpack(&mut self, buf: &[f64]) -> usize;
+    /// Serialize atom `i`'s fields for a ghost (border) record.
+    ///
+    /// Ghosts only need what force kernels read on a neighbor. The default
+    /// sends the full migration record ([`pack`](Self::pack)); a store whose
+    /// rows carry owner-only state (contact histories, statistics) should
+    /// override this pair to omit it, because the border record is sent for
+    /// every ghost on every rebuild. `#[derive(AtomData)]` skips
+    /// `#[no_ghost]` fields.
+    fn pack_border(&self, i: usize, buf: &mut Vec<f64>) {
+        self.pack(i, buf);
+    }
+    /// Append one ghost row from a [`pack_border`](Self::pack_border) record;
+    /// returns the number of `f64`s consumed. Owner-only state is left at its
+    /// default.
+    ///
+    /// # Safety
+    ///
+    /// Same contract as [`unpack`](Self::unpack).
+    unsafe fn unpack_border(&mut self, buf: &[f64]) -> usize {
+        unsafe { self.unpack(buf) }
+    }
     /// Reorder atoms according to `perm[0..n]` (used by spatial sorting).
     ///
     /// # Safety
@@ -282,6 +303,43 @@ pub trait AtomData: Any {
     fn unpack_reverse(&mut self, _i: usize, _buf: &[f64]) -> usize {
         0
     }
+    /// Pack the forward-comm fields of every row in `rows`, in order.
+    ///
+    /// Ghost communication calls this once per store and swap instead of once
+    /// per atom. The default loops over [`pack_forward`](Self::pack_forward);
+    /// because default methods are monomorphized per implementor, that inner
+    /// call is static, so every store gets the batched path for free.
+    fn pack_forward_rows(&self, rows: &[usize], buf: &mut Vec<f64>) {
+        buf.reserve(rows.len() * self.forward_comm_size());
+        for &i in rows {
+            self.pack_forward(i, buf);
+        }
+    }
+    /// Unpack forward-comm fields into the contiguous rows
+    /// `first..first + count`; returns the number of `f64`s consumed.
+    fn unpack_forward_rows(&mut self, first: usize, count: usize, buf: &[f64]) -> usize {
+        let width = self.forward_comm_size();
+        for k in 0..count {
+            self.unpack_forward(first + k, &buf[k * width..]);
+        }
+        count * width
+    }
+    /// Pack the reverse-comm fields of the contiguous rows `first..first + count`.
+    fn pack_reverse_rows(&self, first: usize, count: usize, buf: &mut Vec<f64>) {
+        buf.reserve(count * self.reverse_comm_size());
+        for i in first..first + count {
+            self.pack_reverse(i, buf);
+        }
+    }
+    /// Accumulate reverse-comm fields into every row in `rows`, in order;
+    /// returns the number of `f64`s consumed.
+    fn unpack_reverse_rows(&mut self, rows: &[usize], buf: &[f64]) -> usize {
+        let width = self.reverse_comm_size();
+        for (k, &i) in rows.iter().enumerate() {
+            self.unpack_reverse(i, &buf[k * width..]);
+        }
+        rows.len() * width
+    }
     /// Zero per-step accumulators (e.g. torque) for atoms 0..n.
     fn zero(&mut self, _n: usize) {}
     /// Reorder atoms with caller-owned cycle scratch.
@@ -296,6 +354,24 @@ pub trait AtomData: Any {
         _visited: &mut Vec<bool>,
     ) {
         unsafe { self.apply_permutation(perm, n) };
+    }
+    /// Whether every structural hook touches only the rows it is asked to.
+    ///
+    /// Returning `true` promises that `push_default` and `unpack` only append
+    /// one row, that `truncate`, `swap_remove`, and `apply_permutation*` never
+    /// panic for indices the caller has already validated, and that none of
+    /// them read or write state outside the affected rows. [`ParticleStore`]
+    /// then rolls a failed append back by truncation and runs in-place
+    /// operations without a whole-store [`snapshot`](Self::snapshot), so
+    /// insertion, migration, sorting, and ghost rebuilds cost O(changed rows)
+    /// instead of O(all rows) per operation.
+    ///
+    /// `#[derive(AtomData)]` stores return `true`. The default `false` keeps the
+    /// conservative whole-store snapshot for hand-written stores; a hand-written
+    /// store whose hooks are plain per-row `Vec` operations should override
+    /// this to return `true`.
+    fn row_local_structural_hooks(&self) -> bool {
+        false
     }
     /// Number of f64s per atom in forward comm.
     fn forward_comm_size(&self) -> usize {
@@ -422,6 +498,10 @@ pub struct AtomDataRegistry {
     forward_stores: Vec<usize>,
     /// Indices into `stores` with reverse-comm data (`reverse_comm_size() > 0`).
     reverse_stores: Vec<usize>,
+    /// Per store: whether it declared [`AtomData::row_local_structural_hooks`].
+    /// Such stores are rolled back by truncation (appends) or need no rollback
+    /// (validated in-place operations), so they are never snapshotted.
+    row_local: Vec<bool>,
 }
 
 impl Default for AtomDataRegistry {
@@ -444,6 +524,7 @@ impl AtomDataRegistry {
             stores: Vec::new(),
             forward_stores: Vec::new(),
             reverse_stores: Vec::new(),
+            row_local: Vec::new(),
         }
     }
 
@@ -511,6 +592,11 @@ impl AtomDataRegistry {
             .collect();
         self.reverse_stores = (0..self.stores.len())
             .filter(|&i| self.stores[i].1.borrow().reverse_comm_size() > 0)
+            .collect();
+        self.row_local = self
+            .stores
+            .iter()
+            .map(|(_, cell)| cell.borrow().row_local_structural_hooks())
             .collect();
     }
 
@@ -634,18 +720,109 @@ impl AtomDataRegistry {
         }
     }
 
-    /// Remove atom at index `i` from all registered extensions via swap-remove.
-    pub(crate) fn swap_remove_all(&self, i: usize) {
-        for (_, cell) in &self.stores {
-            // SAFETY: ParticleStore mirrors this in every core column.
-            unsafe { cell.borrow_mut().swap_remove(i) };
+    /// Whether any registered store still needs a whole-store snapshot.
+    fn has_snapshot_stores(&self) -> bool {
+        self.row_local.iter().any(|&row_local| !row_local)
+    }
+
+    /// Snapshot only the stores that did not declare row-local structural
+    /// hooks. Returns `None` (no allocation, no copying) when every store is
+    /// row-local, which is the case for all `#[derive(AtomData)]` stores.
+    fn rollback_snapshot(&self) -> Option<Vec<Option<Box<dyn AtomData>>>> {
+        if !self.has_snapshot_stores() {
+            return None;
         }
+        Some(
+            self.stores
+                .iter()
+                .zip(&self.row_local)
+                .map(|((_, cell), &row_local)| (!row_local).then(|| cell.borrow().snapshot()))
+                .collect(),
+        )
+    }
+
+    /// Undo a failed append: restore snapshotted stores, and truncate the
+    /// row-local stores back to `rows_before` (an append only added rows).
+    fn rollback_append(
+        &self,
+        snapshot: Option<Vec<Option<Box<dyn AtomData>>>>,
+        rows_before: usize,
+    ) {
+        let mut saved = snapshot.map(Vec::into_iter);
+        for ((_, cell), &row_local) in self.stores.iter().zip(&self.row_local) {
+            let slot = saved.as_mut().and_then(Iterator::next).flatten();
+            if let Some(saved) = slot {
+                *cell.borrow_mut() = saved;
+            } else if row_local {
+                // SAFETY: the caller truncates the core to the same row count.
+                let mut store = cell.borrow_mut();
+                if store.len() > rows_before {
+                    unsafe { store.truncate(rows_before) };
+                }
+            }
+        }
+    }
+
+    /// Restore the snapshotted (non-row-local) stores after a failed in-place
+    /// operation. Row-local stores are run only after every snapshotted store
+    /// succeeded, so they are still untouched here.
+    fn rollback_in_place(&self, snapshot: Option<Vec<Option<Box<dyn AtomData>>>>) {
+        let Some(saved) = snapshot else { return };
+        for ((_, cell), slot) in self.stores.iter().zip(saved) {
+            if let Some(saved) = slot {
+                *cell.borrow_mut() = saved;
+            }
+        }
+    }
+
+    /// Run an in-place structural hook on every store: the snapshotted stores
+    /// first (a panic there is recoverable because nothing row-local has been
+    /// touched), then the row-local stores, which promised not to fail.
+    fn for_each_store_in_place(
+        &self,
+        expected_rows: usize,
+        mut op: impl FnMut(&mut dyn AtomData),
+    ) -> bool {
+        let snapshot = self.rollback_snapshot();
+        let legacy = catch_unwind(AssertUnwindSafe(|| {
+            for ((_, cell), &row_local) in self.stores.iter().zip(&self.row_local) {
+                if !row_local {
+                    op(&mut **cell.borrow_mut());
+                }
+            }
+        }));
+        let legacy_ok = legacy.is_ok()
+            && self
+                .stores
+                .iter()
+                .zip(&self.row_local)
+                .all(|((_, cell), &row_local)| row_local || cell.borrow().len() == expected_rows);
+        if !legacy_ok {
+            self.rollback_in_place(snapshot);
+            return false;
+        }
+        for ((_, cell), &row_local) in self.stores.iter().zip(&self.row_local) {
+            if row_local {
+                // A panic here propagates: a store that declared row-local hooks
+                // broke that promise and the particle rows can no longer be
+                // reconciled.
+                op(&mut **cell.borrow_mut());
+            }
+        }
+        true
     }
 
     /// Pack all extension fields for atom `i` into `buf` (exchange/border comm).
     pub(crate) fn pack_all(&self, i: usize, buf: &mut Vec<f64>) {
         for (_, cell) in &self.stores {
             cell.borrow().pack(i, buf);
+        }
+    }
+
+    /// Pack the ghost (border) record of every extension for atom `i`.
+    pub(crate) fn pack_border_all(&self, i: usize, buf: &mut Vec<f64>) {
+        for (_, cell) in &self.stores {
+            cell.borrow().pack_border(i, buf);
         }
     }
 
@@ -660,33 +837,37 @@ impl AtomDataRegistry {
         pos
     }
 
+    /// Unpack one ghost (border) record. Returns total `f64`s consumed.
+    fn unpack_border_all(&self, buf: &[f64]) -> usize {
+        let mut pos = 0;
+        for (_, cell) in &self.stores {
+            // SAFETY: as `unpack_all`.
+            pos += unsafe { cell.borrow_mut().unpack_border(&buf[pos..]) };
+        }
+        pos
+    }
+
     /// Decode one extension record while containing the legacy infallible
     /// callback boundary. A failed decoder is rolled back to `expected_rows`.
-    fn unpack_one(&self, expected_rows: usize, buf: &[f64]) -> Result<usize, ParticleStoreError> {
-        let decoded = catch_unwind(AssertUnwindSafe(|| self.unpack_all(buf)));
+    fn unpack_one(
+        &self,
+        expected_rows: usize,
+        buf: &[f64],
+        ghost: bool,
+    ) -> Result<usize, ParticleStoreError> {
+        let decoded = catch_unwind(AssertUnwindSafe(|| {
+            if ghost {
+                self.unpack_border_all(buf)
+            } else {
+                self.unpack_all(buf)
+            }
+        }));
         match decoded {
             Ok(used) if used == buf.len() && self.validate_rows(expected_rows + 1) => Ok(used),
             _ => {
                 self.truncate_all(expected_rows);
                 Err(ParticleStoreError::MalformedExtensionRecord)
             }
-        }
-    }
-
-    /// Reorder all extensions with caller-owned cycle scratch.
-    pub(crate) fn apply_permutation_all_with_scratch(
-        &self,
-        perm: &[usize],
-        n: usize,
-        visited: &mut Vec<bool>,
-    ) {
-        for (_, cell) in &self.stores {
-            // SAFETY: ParticleStore validates and applies this same
-            // permutation to all core and extension columns.
-            unsafe {
-                cell.borrow_mut()
-                    .apply_permutation_with_scratch(perm, n, visited)
-            };
         }
     }
 
@@ -729,6 +910,52 @@ impl AtomDataRegistry {
                 .1
                 .borrow_mut()
                 .unpack_reverse(i, &buf[pos..]);
+        }
+        pos
+    }
+
+    /// Pack every forward-comm store for the rows in `rows`: one block per
+    /// store (store-major), each holding `rows.len() * width` values. One
+    /// borrow and one dynamic call per store, not per atom.
+    pub fn pack_forward_rows(&self, rows: &[usize], buf: &mut Vec<f64>) {
+        for &si in &self.forward_stores {
+            self.stores[si].1.borrow().pack_forward_rows(rows, buf);
+        }
+    }
+
+    /// Mirror of [`pack_forward_rows`](Self::pack_forward_rows) into the
+    /// contiguous ghost rows `first..first + count`. Returns `f64`s consumed.
+    pub fn unpack_forward_rows(&self, first: usize, count: usize, buf: &[f64]) -> usize {
+        let mut pos = 0;
+        for &si in &self.forward_stores {
+            pos += self.stores[si]
+                .1
+                .borrow_mut()
+                .unpack_forward_rows(first, count, &buf[pos..]);
+        }
+        pos
+    }
+
+    /// Pack every reverse-comm store for the contiguous ghost rows
+    /// `first..first + count`, store-major.
+    pub fn pack_reverse_rows(&self, first: usize, count: usize, buf: &mut Vec<f64>) {
+        for &si in &self.reverse_stores {
+            self.stores[si]
+                .1
+                .borrow()
+                .pack_reverse_rows(first, count, buf);
+        }
+    }
+
+    /// Mirror of [`pack_reverse_rows`](Self::pack_reverse_rows): accumulate
+    /// into the owner rows `rows`. Returns `f64`s consumed.
+    pub fn unpack_reverse_rows(&self, rows: &[usize], buf: &[f64]) -> usize {
+        let mut pos = 0;
+        for &si in &self.reverse_stores {
+            pos += self.stores[si]
+                .1
+                .borrow_mut()
+                .unpack_reverse_rows(rows, &buf[pos..]);
         }
         pos
     }
@@ -1400,13 +1627,20 @@ impl<'a> ParticleStore<'a> {
         if !self.has_valid_layout() || self.atoms.nghost != 0 {
             return Err(ParticleStoreError::InvalidStructuralOperation);
         }
-        let expected = self.atoms.len() + 1;
-        self.structural_transaction(expected, |atoms, registry| {
-            atoms.push_default_row();
-            registry.push_default_all();
-            atoms.nlocal += 1;
-            atoms.natoms = global_natoms;
-        })
+        let rows_before = self.atoms.len();
+        // Only stores without row-local hooks are snapshotted; a row-local
+        // append is undone by truncation. The core row is added last, once
+        // every extension accepted its default row, so it never needs undoing.
+        let snapshot = self.registry.rollback_snapshot();
+        let result = catch_unwind(AssertUnwindSafe(|| self.registry.push_default_all()));
+        if result.is_err() || !self.registry.validate_rows(rows_before + 1) {
+            self.registry.rollback_append(snapshot, rows_before);
+            return Err(ParticleStoreError::MalformedExtensionRecord);
+        }
+        self.atoms.push_default_row();
+        self.atoms.nlocal += 1;
+        self.atoms.natoms = global_natoms;
+        Ok(())
     }
 
     /// Replace the complete local core state and its restart extension rows.
@@ -1439,26 +1673,30 @@ impl<'a> ParticleStore<'a> {
         }
     }
 
-    /// Run a legacy extension callback behind one all-or-nothing boundary.
-    /// Snapshot availability is checked before the core is touched, and a
-    /// successful-but-malformed callback is treated the same as a panic.
-    fn structural_transaction(
+    /// Run an in-place extension operation behind an all-or-nothing boundary,
+    /// then apply `core` to the core columns.
+    ///
+    /// Extensions run first: stores without row-local hooks are snapshotted and
+    /// restored if they panic or leave the wrong row count, and the core is not
+    /// touched in that case. Row-local stores (every `#[derive(AtomData)]`
+    /// store) are neither snapshotted nor copied, so the cost of an operation is
+    /// proportional to the rows it changes, not to the size of the store.
+    fn in_place_transaction(
         &mut self,
         expected_rows: usize,
-        operation: impl FnOnce(&mut Atom, &AtomDataRegistry),
+        extension: impl FnMut(&mut dyn AtomData),
+        core: impl FnOnce(&mut Atom),
     ) -> Result<(), ParticleStoreError> {
-        let snapshot = self.registry.snapshot();
-        let core_before = self.atoms.clone();
-        let result = catch_unwind(AssertUnwindSafe(|| operation(self.atoms, self.registry)));
-        if result.is_ok()
-            && self.registry.validate_rows(expected_rows)
-            && self.atoms.len() == expected_rows
+        if !self
+            .registry
+            .for_each_store_in_place(expected_rows, extension)
+            || !self.registry.validate_rows(expected_rows)
         {
-            return Ok(());
+            return Err(ParticleStoreError::MalformedExtensionRecord);
         }
-        *self.atoms = core_before;
-        self.registry.restore(snapshot);
-        Err(ParticleStoreError::MalformedExtensionRecord)
+        core(self.atoms);
+        debug_assert_eq!(self.atoms.len(), expected_rows);
+        Ok(())
     }
 
     /// Remove a locally owned row from core and extensions together.
@@ -1471,11 +1709,52 @@ impl<'a> ParticleStore<'a> {
             return Err(ParticleStoreError::InvalidStructuralOperation);
         }
         let expected = self.atoms.len() - 1;
-        self.structural_transaction(expected, |atoms, registry| {
-            atoms.swap_remove(index);
-            registry.swap_remove_all(index);
-            atoms.nlocal -= 1;
-        })
+        self.in_place_transaction(
+            expected,
+            // SAFETY: the core performs the same removal below.
+            |store| unsafe { store.swap_remove(index) },
+            |atoms| {
+                atoms.swap_remove(index);
+                atoms.nlocal -= 1;
+            },
+        )
+    }
+
+    /// Remove several locally owned rows in one transaction.
+    ///
+    /// `indices` must be strictly descending; the rows are swap-removed in that
+    /// order, which is exactly the result of calling [`swap_remove`](Self::swap_remove)
+    /// once per index while scanning the store from the back (the migration
+    /// pattern). Stores without row-local hooks are snapshotted once for the
+    /// whole batch instead of once per removed row.
+    pub fn swap_remove_descending(&mut self, indices: &[usize]) -> Result<(), ParticleStoreError> {
+        if indices.is_empty() {
+            return Ok(());
+        }
+        let nlocal = self.atoms.nlocal as usize;
+        if !self.has_valid_layout()
+            || self.atoms.nghost != 0
+            || indices[0] >= nlocal
+            || indices.windows(2).any(|w| w[0] <= w[1])
+        {
+            return Err(ParticleStoreError::InvalidStructuralOperation);
+        }
+        let expected = self.atoms.len() - indices.len();
+        self.in_place_transaction(
+            expected,
+            |store| {
+                for &index in indices {
+                    // SAFETY: the core performs the same removals below.
+                    unsafe { store.swap_remove(index) };
+                }
+            },
+            |atoms| {
+                for &index in indices {
+                    atoms.swap_remove(index);
+                }
+                atoms.nlocal -= indices.len() as u32;
+            },
+        )
     }
 
     /// Drop the ghost suffix from core and extensions together.
@@ -1484,11 +1763,15 @@ impl<'a> ParticleStore<'a> {
             return Err(ParticleStoreError::InvalidStructuralOperation);
         }
         let nlocal = self.atoms.nlocal as usize;
-        self.structural_transaction(nlocal, |atoms, registry| {
-            atoms.truncate_to(nlocal);
-            registry.truncate_all(nlocal);
-            atoms.nghost = 0;
-        })
+        self.in_place_transaction(
+            nlocal,
+            // SAFETY: the core truncates to the same row count below.
+            |store| unsafe { store.truncate(nlocal) },
+            |atoms| {
+                atoms.truncate_to(nlocal);
+                atoms.nghost = 0;
+            },
+        )
     }
 
     /// Begin a full ghost rebuild with a local-only, aligned particle prefix.
@@ -1527,10 +1810,17 @@ impl<'a> ParticleStore<'a> {
                 return Err(ParticleStoreError::InvalidStructuralOperation);
             }
         }
-        self.structural_transaction(self.atoms.len(), |atoms, registry| {
-            atoms.apply_permutation_with_scratch(permutation, n, scratch);
-            registry.apply_permutation_all_with_scratch(permutation, n, scratch);
-        })
+        let rows = self.atoms.len();
+        let applied = self.registry.for_each_store_in_place(rows, |store| {
+            // SAFETY: the same validated permutation is applied to the core below.
+            unsafe { store.apply_permutation_with_scratch(permutation, n, scratch) }
+        });
+        if !applied || !self.registry.validate_rows(rows) {
+            return Err(ParticleStoreError::MalformedExtensionRecord);
+        }
+        self.atoms
+            .apply_permutation_with_scratch(permutation, n, scratch);
+        Ok(())
     }
 
     fn frame_record<F>(buf: &mut Vec<f64>, pack: F)
@@ -1568,7 +1858,7 @@ impl<'a> ParticleStore<'a> {
         }
         Self::frame_record(buf, |buf| {
             self.atoms.pack_border(index, change_pos, vel_offset, buf);
-            self.registry.pack_all(index, buf);
+            self.registry.pack_border_all(index, buf);
         });
         Ok(())
     }
@@ -1596,7 +1886,7 @@ impl<'a> ParticleStore<'a> {
         let rows_before = self.atoms.len();
         let extension_used = self
             .registry
-            .unpack_one(rows_before, &record[ATOM_PACK_SIZE..])?;
+            .unpack_one(rows_before, &record[ATOM_PACK_SIZE..], ghost)?;
         debug_assert_eq!(ATOM_PACK_SIZE + extension_used, record_len);
         self.atoms.unpack_atom(record, ghost);
         Ok(record_len + 1)
@@ -1646,8 +1936,11 @@ impl<'a> ParticleStore<'a> {
             return Err(ParticleStoreError::InvalidStructuralOperation);
         }
         let rows_before = self.atoms.len();
-        let core_before = self.atoms.clone();
-        let extension_before = self.registry.snapshot();
+        let (nlocal_before, nghost_before) = (self.atoms.nlocal, self.atoms.nghost);
+        // Appends only add rows, so the core is rolled back by truncation and
+        // row-local extensions likewise; only stores without row-local hooks
+        // need a snapshot (none, for `#[derive(AtomData)]` stores).
+        let extension_before = self.registry.rollback_snapshot();
         let result = catch_unwind(AssertUnwindSafe(|| {
             self.reserve(count);
             let mut pos = 0;
@@ -1670,8 +1963,10 @@ impl<'a> ParticleStore<'a> {
         {
             return Ok(());
         }
-        *self.atoms = core_before;
-        self.registry.restore(extension_before);
+        self.atoms.truncate_to(rows_before);
+        self.atoms.nlocal = nlocal_before;
+        self.atoms.nghost = nghost_before;
+        self.registry.rollback_append(extension_before, rows_before);
         Err(ParticleStoreError::MalformedExtensionRecord)
     }
 }
@@ -1746,6 +2041,18 @@ mod tests {
         scalar: Vec<f64>,
         #[reverse]
         vector: Vec<[f64; 3]>,
+    }
+
+    #[derive(Default, AtomData)]
+    struct OwnerOnlyRows {
+        #[forward]
+        omega: Vec<[f64; 3]>,
+        #[no_ghost]
+        history: Vec<[f64; 4]>,
+        #[no_ghost]
+        #[reverse]
+        torque: Vec<[f64; 3]>,
+        radius: Vec<f64>,
     }
 
     #[derive(Default)]
@@ -2056,6 +2363,261 @@ mod tests {
         assert_eq!(registry.get::<ManualRows>().unwrap().rows, vec![100.0]);
         assert_eq!((store.atoms.nlocal, store.atoms.nghost), (1, 0));
         assert!(registry.validate_rows(store.atoms.len()));
+    }
+
+    #[test]
+    fn derived_stores_declare_row_local_hooks_and_skip_snapshots() {
+        let mut registry = AtomDataRegistry::new();
+        registry.try_register(DerivedRows::default(), 0).unwrap();
+        assert!(DerivedRows::default().row_local_structural_hooks());
+        assert!(!ManualRows::default().row_local_structural_hooks());
+        assert!(registry.rollback_snapshot().is_none());
+        registry.try_register(ManualRows::default(), 0).unwrap();
+        let snapshot = registry
+            .rollback_snapshot()
+            .expect("legacy store is snapshotted");
+        assert_eq!(snapshot.len(), 2);
+        assert!(snapshot[0].is_none(), "derived store must not be copied");
+        assert!(snapshot[1].is_some());
+    }
+
+    #[test]
+    fn batched_swap_remove_matches_sequential_backward_removal() {
+        let build = || {
+            let mut atoms = Atom::new();
+            for tag in 0..8u32 {
+                atoms.push_test_atom(tag, [tag as f64, 0.0, 0.0], 1.0, 1.0);
+            }
+            atoms.nlocal = 8;
+            let mut registry = AtomDataRegistry::new();
+            registry
+                .try_register(
+                    DerivedRows {
+                        scalar: (0..8).map(|i| i as f64).collect(),
+                        vector: (0..8).map(|i| [i as f64; 3]).collect(),
+                    },
+                    8,
+                )
+                .unwrap();
+            registry
+                .try_register(
+                    ManualRows {
+                        rows: (0..8).map(|i| 10.0 * i as f64).collect(),
+                    },
+                    8,
+                )
+                .unwrap();
+            (atoms, registry)
+        };
+        let removed = [7, 5, 4, 1];
+
+        let (mut seq_atoms, seq_registry) = build();
+        for &i in &removed {
+            ParticleStore::new(&mut seq_atoms, &seq_registry)
+                .swap_remove(i)
+                .unwrap();
+        }
+        let (mut batch_atoms, batch_registry) = build();
+        ParticleStore::new(&mut batch_atoms, &batch_registry)
+            .swap_remove_descending(&removed)
+            .unwrap();
+
+        assert_eq!(batch_atoms.tag, seq_atoms.tag);
+        assert_eq!(batch_atoms.nlocal, 4);
+        assert_eq!(
+            batch_registry.get::<DerivedRows>().unwrap().scalar,
+            seq_registry.get::<DerivedRows>().unwrap().scalar
+        );
+        assert_eq!(
+            batch_registry.get::<ManualRows>().unwrap().rows,
+            seq_registry.get::<ManualRows>().unwrap().rows
+        );
+        // Unsorted or out-of-range batches are rejected without mutation.
+        assert_eq!(
+            ParticleStore::new(&mut batch_atoms, &batch_registry).swap_remove_descending(&[1, 2]),
+            Err(ParticleStoreError::InvalidStructuralOperation)
+        );
+        assert_eq!(batch_atoms.nlocal, 4);
+    }
+
+    #[test]
+    fn row_local_store_is_untouched_when_a_legacy_store_panics() {
+        let mut atoms = Atom::new();
+        atoms.push_test_atom(10, [0.0; 3], 1.0, 1.0);
+        atoms.push_test_atom(20, [1.0; 3], 1.0, 1.0);
+        atoms.nlocal = 2;
+        let mut registry = AtomDataRegistry::new();
+        // Registered first, so a naive in-order loop would already have
+        // removed its row before the legacy store panics.
+        registry
+            .try_register(
+                DerivedRows {
+                    scalar: vec![1.0, 2.0],
+                    vector: vec![[1.0; 3], [2.0; 3]],
+                },
+                2,
+            )
+            .unwrap();
+        registry
+            .try_register(
+                PanickingRows {
+                    rows: vec![4.0, 9.0],
+                },
+                2,
+            )
+            .unwrap();
+
+        assert_eq!(
+            ParticleStore::new(&mut atoms, &registry).swap_remove(0),
+            Err(ParticleStoreError::MalformedExtensionRecord)
+        );
+        assert_eq!(atoms.tag, vec![10, 20]);
+        assert_eq!(
+            registry.get::<DerivedRows>().unwrap().scalar,
+            vec![1.0, 2.0]
+        );
+        assert_eq!(
+            registry.get::<PanickingRows>().unwrap().rows,
+            vec![4.0, 9.0]
+        );
+        assert!(registry.validate_rows(atoms.len()));
+    }
+
+    #[test]
+    fn derived_receive_rolls_back_by_truncation() {
+        let mut atoms = Atom::new();
+        atoms.push_test_atom(10, [0.0; 3], 1.0, 1.0);
+        atoms.nlocal = 1;
+        let mut registry = AtomDataRegistry::new();
+        registry
+            .try_register(
+                DerivedRows {
+                    scalar: vec![3.0],
+                    vector: vec![[3.0; 3]],
+                },
+                1,
+            )
+            .unwrap();
+        let mut payload = Vec::new();
+        ParticleStore::new(&mut atoms, &registry)
+            .pack_migrant(0, &mut payload)
+            .unwrap();
+        // Two good records followed by a truncated third: the whole batch must
+        // be rejected and the store left exactly as it was.
+        let mut batch = payload.clone();
+        batch.extend_from_slice(&payload);
+        batch.extend_from_slice(&payload[..payload.len() - 2]);
+        assert!(ParticleStore::new(&mut atoms, &registry)
+            .append_migrant_records(&batch, 3)
+            .is_err());
+        assert_eq!(atoms.tag, vec![10]);
+        assert_eq!((atoms.nlocal, atoms.nghost), (1, 0));
+        assert_eq!(registry.get::<DerivedRows>().unwrap().scalar, vec![3.0]);
+        assert!(registry.validate_rows(1));
+
+        // And a good batch still lands.
+        ParticleStore::new(&mut atoms, &registry)
+            .append_migrant_records(&payload, 1)
+            .unwrap();
+        assert_eq!(atoms.tag, vec![10, 10]);
+        assert_eq!(
+            registry.get::<DerivedRows>().unwrap().scalar,
+            vec![3.0, 3.0]
+        );
+    }
+
+    #[test]
+    fn no_ghost_fields_skip_border_records_and_zero_ghost_rows() {
+        let mut atoms = Atom::new();
+        atoms.push_test_atom(7, [0.5; 3], 1.0, 1.0);
+        atoms.nlocal = 1;
+        let mut registry = AtomDataRegistry::new();
+        registry
+            .try_register(
+                OwnerOnlyRows {
+                    omega: vec![[1.0, 2.0, 3.0]],
+                    history: vec![[4.0, 5.0, 6.0, 7.0]],
+                    torque: vec![[8.0, 9.0, 10.0]],
+                    radius: vec![0.25],
+                },
+                1,
+            )
+            .unwrap();
+
+        let mut border = Vec::new();
+        let mut migrant = Vec::new();
+        {
+            let mut store = ParticleStore::new(&mut atoms, &registry);
+            store.pack_border(0, [0.0; 3], [0.0; 3], &mut border).unwrap();
+            store.pack_migrant(0, &mut migrant).unwrap();
+        }
+        // Border records drop the 4 + 3 owner-only values.
+        assert_eq!(migrant.len() - border.len(), 7);
+
+        ParticleStore::new(&mut atoms, &registry)
+            .append_ghost_records(&border, 1)
+            .unwrap();
+        assert_eq!((atoms.nlocal, atoms.nghost), (1, 1));
+        {
+            let rows = registry.get::<OwnerOnlyRows>().unwrap();
+            assert_eq!(rows.omega[1], [1.0, 2.0, 3.0]);
+            assert_eq!(rows.radius[1], 0.25);
+            assert_eq!(rows.history[1], [0.0; 4]);
+            assert_eq!(rows.torque[1], [0.0; 3]);
+        }
+
+        // Migrants still carry every field.
+        let mut fresh = Atom::new();
+        let mut fresh_registry = AtomDataRegistry::new();
+        fresh_registry.try_register(OwnerOnlyRows::default(), 0).unwrap();
+        ParticleStore::new(&mut fresh, &fresh_registry)
+            .append_migrant_records(&migrant, 1)
+            .unwrap();
+        let rows = fresh_registry.get::<OwnerOnlyRows>().unwrap();
+        assert_eq!(rows.history[0], [4.0, 5.0, 6.0, 7.0]);
+        assert_eq!(rows.torque[0], [8.0, 9.0, 10.0]);
+    }
+
+    #[test]
+    fn batched_comm_rows_match_per_row_hooks() {
+        let mut registry = AtomDataRegistry::new();
+        registry
+            .try_register(
+                DerivedRows {
+                    scalar: vec![1.0, 2.0, 3.0, 0.0, 0.0],
+                    vector: vec![
+                        [1.0, 1.5, 2.0],
+                        [2.0, 2.5, 3.0],
+                        [3.0, 3.5, 4.0],
+                        [0.5; 3],
+                        [0.25; 3],
+                    ],
+                },
+                5,
+            )
+            .unwrap();
+        let send = [2usize, 0];
+        let mut batched = Vec::new();
+        registry.pack_forward_rows(&send, &mut batched);
+        let mut per_row = Vec::new();
+        for &i in &send {
+            registry.pack_forward_all(i, &mut per_row);
+        }
+        assert_eq!(batched, per_row);
+        assert_eq!(registry.unpack_forward_rows(3, 2, &batched), 2);
+        assert_eq!(
+            registry.get::<DerivedRows>().unwrap().scalar,
+            vec![1.0, 2.0, 3.0, 3.0, 1.0]
+        );
+
+        // Reverse: ghost rows 3..5 accumulate onto owners [2, 0].
+        let mut rev = Vec::new();
+        registry.pack_reverse_rows(3, 2, &mut rev);
+        assert_eq!(rev, vec![0.5, 0.5, 0.5, 0.25, 0.25, 0.25]);
+        assert_eq!(registry.unpack_reverse_rows(&send, &rev), 6);
+        let derived = registry.get::<DerivedRows>().unwrap();
+        assert_eq!(derived.vector[2], [3.5, 4.0, 4.5]);
+        assert_eq!(derived.vector[0], [1.25, 1.75, 2.25]);
     }
 
     #[test]

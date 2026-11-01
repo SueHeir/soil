@@ -41,7 +41,8 @@ fn main() {
         let mut binder = cell.borrow_mut();
         let atoms = binder.downcast_mut::<Atom>().unwrap();
         if rank == 0 {
-            atoms.push_test_atom(42, [0.625, 0.5, 0.5], 0.01, 1.0);
+            // SAFETY: core-only fixture; the layout is set right after.
+            unsafe { atoms.push_test_atom(42, [0.625, 0.5, 0.5], 0.01, 1.0) };
             unsafe { atoms.set_layout_unchecked(1, 0, 1) };
         }
     }

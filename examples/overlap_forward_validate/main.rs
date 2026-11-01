@@ -223,7 +223,7 @@ fn force_overlap(
 fn initial_integration(mut atoms: ResMut<Atom>) {
     let dt = atoms.dt as Accum;
     let nlocal = atoms.nlocal() as usize;
-    for i in 0..nlocal() {
+    for i in 0..nlocal {
         let half_dt_over_m = 0.5 * dt * atoms.inv_mass[i] as Accum;
         for k in 0..3 {
             let v = atoms.vel[i][k] as Accum + half_dt_over_m * atoms.force[i][k];
@@ -235,7 +235,7 @@ fn initial_integration(mut atoms: ResMut<Atom>) {
 fn final_integration(mut atoms: ResMut<Atom>) {
     let dt = atoms.dt as Accum;
     let nlocal = atoms.nlocal() as usize;
-    for i in 0..nlocal() {
+    for i in 0..nlocal {
         let half_dt_over_m = 0.5 * dt * atoms.inv_mass[i] as Accum;
         for k in 0..3 {
             atoms.vel[i][k] =
@@ -299,7 +299,6 @@ fn main() {
         let mut binder = cell.borrow_mut();
         let atoms = binder.downcast_mut::<Atom>().unwrap();
         atoms.dt = DT;
-        atoms.natoms() = (NCELL * NCELL * NCELL) as u64;
         // One PRNG stream, drawn identically on every rank so all ranks agree on
         // the global system; each rank keeps only atoms inside its subdomain.
         let mut rng: u64 = SEED;
@@ -321,7 +320,8 @@ fn main() {
                     ];
                     let owned = (0..3).all(|k| pos[k] >= sub_low[k] && pos[k] < sub_high[k]);
                     if owned {
-                        atoms.push_test_atom(tag, pos, ATOM_RADIUS, 1.0);
+                        // SAFETY: core-only fixture; the layout is set below.
+                        unsafe { atoms.push_test_atom(tag, pos, ATOM_RADIUS, 1.0) };
                         let idx = atoms.tag.len() - 1;
                         atoms.vel[idx] = [vel[0] as Real, vel[1] as Real, vel[2] as Real];
                         local += 1;
@@ -329,7 +329,8 @@ fn main() {
                 }
             }
         }
-        atoms.nlocal() = local;
+        // SAFETY: no extensions are registered and every pushed row is local.
+        unsafe { atoms.set_layout_unchecked(local, 0, (NCELL * NCELL * NCELL) as u64) };
     }
 
     // Time-step the gas.

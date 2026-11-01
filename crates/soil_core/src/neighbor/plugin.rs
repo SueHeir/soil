@@ -57,7 +57,7 @@ bin_size = 1.0
 every = 0
 # Also check displacement when every > 0 (like LAMMPS "check yes")
 check = true
-# Sort atoms by spatial bin every N steps for cache locality (0 = disabled)
+# Sort atoms by spatial bin at the first full rebuild after every N steps (0 = every rebuild)
 sort_every = 1000
 # Newton's third law optimization (true = half list + reverse comm, false = full list)
 newton = true
@@ -133,7 +133,7 @@ pub fn neighbor_read_input(
 ///
 /// Runs at [`ScheduleSetupSet::PostSetup`] after atoms are created. Determines:
 /// - `max_cutoff = 2 * max_skin * skin_fraction` (largest pairwise neighbor distance)
-/// - `ghost_cutoff = max_cutoff + displacement_buffer` (communication distance for ghosts)
+/// - `ghost_cutoff = max(max_cutoff, domain.ghost_cutoff)` (communication distance for ghosts)
 /// - Bin grid dimensions, stencil offsets, and PBC flags
 pub fn neighbor_setup(
     _config: Res<NeighborConfig>,
@@ -157,27 +157,23 @@ pub fn neighbor_setup(
     } else {
         neighbor.bin_min_size
     };
-    // Add displacement buffer to ghost_cutoff so atoms don't drift in/out of the
-    // ghost zone between neighbor rebuilds. Without this padding, ghost count
-    // fluctuates every step, forcing unnecessary neighbor rebuilds.
-    // Max per-atom displacement before rebuild = (skin_fraction - 1) * radius_i.
-    // Two largest atoms can each move by the largest budget, so pad the globally
-    // largest skinned pair cutoff by 2 * max_budget.
-    let displacement_buffer = if max_skin > 0.0 {
-        (neighbor.skin_fraction - 1.0) * max_skin
-    } else {
-        0.0
-    };
-    let ghost_cut = (max_cutoff + 2.0 * displacement_buffer).max(domain.ghost_cutoff);
+    // Ghost shell = neighbor-list cutoff (LAMMPS `cutghost = cutforce + skin`).
+    // Ghost sets are frozen between rebuilds, and at a rebuild every local atom
+    // lies inside its subdomain (exchange enforces it), so any pair the list
+    // can hold is within `max_cutoff` of a subdomain face. A pair that starts
+    // farther apart cannot reach contact before the displacement check forces
+    // a rebuild, so no extra padding is needed. (A previous `2 * (skin - 1) *
+    // r_max` pad made the shell ~13% thicker at skin 1.15 for no benefit.)
+    // Plugins that need a deeper shell (bonds, clumps) raise
+    // `domain.ghost_cutoff` before this system and are honored by the `max`.
+    let ghost_cut = max_cutoff.max(domain.ghost_cutoff);
     neighbor.ghost_cutoff = ghost_cut;
     neighbor.cached_max_cutoff = max_cutoff;
     domain.ghost_cutoff = ghost_cut;
     if comm.rank() == 0 {
         println!(
-            "Neighbor: ghost_cutoff={:.4} (pair_cutoff={:.4} + buffer={:.4})",
-            ghost_cut,
-            max_cutoff,
-            2.0 * displacement_buffer
+            "Neighbor: ghost_cutoff={:.4} (pair_cutoff={:.4})",
+            ghost_cut, max_cutoff
         );
     }
     // Single-process: bin_size >= cutoff gives stencil range=1, keeping bin_start

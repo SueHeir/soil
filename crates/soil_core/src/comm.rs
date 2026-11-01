@@ -79,13 +79,16 @@ impl Default for ForwardCommPrecision {
 #[serde(deny_unknown_fields)]
 /// TOML `[comm]` — MPI processor grid configuration.
 pub struct CommConfig {
-    /// Number of MPI ranks in x dimension.
+    /// Number of MPI ranks in x dimension. `0` = choose automatically
+    /// (minimum-surface grid, like LAMMPS `processors * * *`).
     #[serde(default = "default_one_i32")]
     pub processors_x: i32,
-    /// Number of MPI ranks in y dimension.
+    /// Number of MPI ranks in y dimension. `0` = choose automatically
+    /// (minimum-surface grid, like LAMMPS `processors * * *`).
     #[serde(default = "default_one_i32")]
     pub processors_y: i32,
-    /// Number of MPI ranks in z dimension.
+    /// Number of MPI ranks in z dimension. `0` = choose automatically
+    /// (minimum-surface grid, like LAMMPS `processors * * *`).
     #[serde(default = "default_one_i32")]
     pub processors_z: i32,
     /// Precision for per-step forward ghost position/velocity updates.
@@ -150,6 +153,9 @@ pub struct CommBuffers {
     pub forward_scratch: Vec<SwapScratch>,
     /// Per-swap scratch for the overlapped reverse force comm.
     pub reverse_scratch: Vec<SwapScratch>,
+    /// Scratch list of local rows leaving this rank in the current exchange
+    /// dimension (strictly descending), reused across exchanges.
+    pub exchange_removed: Vec<usize>,
     /// Persistent receive buffer for the count-first ghost rebuild in `borders`
     /// (C7): sized to the exact incoming payload and received into via the
     /// probe-free `_into` path, so a full rebuild never heap-allocates a recv Vec.
@@ -165,6 +171,7 @@ impl Default for CommBuffers {
             reverse_send_buff: Vec::new(),
             forward_scratch: Vec::new(),
             reverse_scratch: Vec::new(),
+            exchange_removed: Vec::new(),
             border_recv_buff: Vec::new(),
         }
     }
@@ -221,7 +228,7 @@ impl Plugin for CommunicationPlugin {
     fn default_config(&self) -> Option<&str> {
         Some(
             r#"[comm]
-# Number of MPI processors in each dimension
+# Ranks per axis; 0 = automatic (minimum-surface grid for the run's rank count).
 processors_x = 1
 processors_y = 1
 processors_z = 1
@@ -259,13 +266,11 @@ forward_precision = "f64""#,
                 .ok_or_else(|| AppError::message("CommunicationPlugin did not register CommConfig"))?;
             let comm = app.get_resource_ref::<CommResource>()
                 .ok_or_else(|| AppError::message("CommunicationPlugin did not register CommResource"))?;
-            let configured = config.processors_x * config.processors_y * config.processors_z;
-            if configured != comm.size() {
-                return Err(AppError::message(format!(
-                    "[comm] processors {} {} {} multiply to {configured}, but the active communicator has {} ranks",
-                    config.processors_x, config.processors_y, config.processors_z, comm.size()
-                )));
-            }
+            let box_len = app
+                .get_resource_ref::<crate::DomainConfig>()
+                .map(|d| d.box_lengths());
+            // `comm_read_input` fills in automatic (0) counts the same way.
+            resolve_processor_grid(&config, box_len, comm.size()).map_err(AppError::message)?;
             Ok(())
         }, ScheduleSetupSet::PreSetup);
 
@@ -310,40 +315,149 @@ forward_precision = "f64""#,
 // ── Shared systems ───────────────────────────────────────────────────────────
 
 /// Read `[comm]` config and set up the processor grid decomposition.
-pub fn comm_read_input(config: Res<CommConfig>, mut comm: ResMut<CommResource>) {
-    if comm.rank() == 0 {
-        println!(
-            "Comm: processors {} {} {}",
-            config.processors_x, config.processors_y, config.processors_z
-        );
-    }
-
-    let decomp = [
-        config.processors_x,
-        config.processors_y,
-        config.processors_z,
-    ];
-    let mul = config.processors_x * config.processors_y * config.processors_z;
-    if mul != comm.size() {
-        if comm.rank() == 0 {
-            println!(
-                "processors {} {} {} with {} processors does not match {}",
-                config.processors_x,
-                config.processors_y,
-                config.processors_z,
-                mul,
-                comm.size()
-            );
+pub fn comm_read_input(
+    mut config: ResMut<CommConfig>,
+    domain_config: Option<Res<crate::DomainConfig>>,
+    mut comm: ResMut<CommResource>,
+) {
+    let box_len = domain_config.map(|d| d.box_lengths());
+    let decomp = match resolve_processor_grid(&config, box_len, comm.size()) {
+        Ok(grid) => grid,
+        Err(message) => {
+            if comm.rank() == 0 {
+                println!("{message}");
+            }
+            panic!("CommunicationPlugin startup validation was bypassed: {message}");
         }
-        panic!("CommunicationPlugin startup validation was bypassed: processor grid does not match communicator size");
+    };
+    config.processors_x = decomp[0];
+    config.processors_y = decomp[1];
+    config.processors_z = decomp[2];
+    if comm.rank() == 0 {
+        println!("Comm: processors {} {} {}", decomp[0], decomp[1], decomp[2]);
     }
 
     let rank = comm.rank();
-    let pz = config.processors_z;
-    let py = config.processors_y;
+    let pz = decomp[2];
+    let py = decomp[1];
     let position = [rank / (py * pz), (rank / pz) % py, rank % pz];
 
     comm.set_processor_grid(decomp, position);
+}
+
+/// Turn the `[comm]` processor counts into a concrete grid for `nprocs`
+/// ranks: zeros are filled in by [`auto_processor_grid`] using the box
+/// lengths (a unit cube when no `[domain]` is configured), and the product
+/// must equal `nprocs`.
+pub fn resolve_processor_grid(
+    config: &CommConfig,
+    box_len: Option<[f64; 3]>,
+    nprocs: i32,
+) -> Result<[i32; 3], String> {
+    let requested = [config.processors_x, config.processors_y, config.processors_z];
+    if requested.iter().any(|&p| p < 0) {
+        return Err(format!(
+            "[comm] processors {} {} {} must be positive, or 0 for automatic",
+            requested[0], requested[1], requested[2]
+        ));
+    }
+    if requested.contains(&0) {
+        return auto_processor_grid(nprocs, box_len.unwrap_or([1.0; 3]), requested).ok_or_else(
+            || {
+                format!(
+                    "[comm] processors {} {} {}: no grid with those fixed counts multiplies to {nprocs} ranks",
+                    requested[0], requested[1], requested[2]
+                )
+            },
+        );
+    }
+    let configured = requested[0] * requested[1] * requested[2];
+    if configured != nprocs {
+        return Err(format!(
+            "[comm] processors {} {} {} multiply to {configured}, but the active communicator has {nprocs} ranks",
+            requested[0], requested[1], requested[2]
+        ));
+    }
+    Ok(requested)
+}
+
+/// Which way `exchange` sends an atom along one axis: `0` keeps it, `-1`
+/// sends it to the low neighbor, `1` to the high neighbor. On a periodic axis
+/// the coordinate is first wrapped into the box, then an atom outside the slab
+/// goes toward whichever face is nearer around the ring. This stays correct
+/// for slabs wider than half the box, which load balancing can produce (a
+/// min-image displacement from each face does not).
+fn exchange_direction(
+    coord: f64,
+    sub_lo: f64,
+    sub_hi: f64,
+    box_lo: f64,
+    box_size: f64,
+    periodic: bool,
+) -> i32 {
+    if !periodic {
+        return if coord < sub_lo {
+            -1
+        } else if coord >= sub_hi {
+            1
+        } else {
+            0
+        };
+    }
+    let c = box_lo + (coord - box_lo).rem_euclid(box_size);
+    if c >= sub_lo && c < sub_hi {
+        return 0;
+    }
+    let below = (sub_lo - c).rem_euclid(box_size);
+    let above = (c - sub_hi).rem_euclid(box_size);
+    if below <= above {
+        -1
+    } else {
+        1
+    }
+}
+
+/// Pick a processor grid for `nprocs` ranks that minimizes the total
+/// sub-domain surface area (and so the ghost volume), like LAMMPS
+/// `processors * * *`. Entries of `fixed` greater than zero are kept; zeros
+/// are free. Ties go to the grid with more ranks along x, then y, which keeps
+/// the choice deterministic on every rank. Returns `None` when the fixed
+/// entries cannot be completed to a grid of exactly `nprocs` ranks.
+pub fn auto_processor_grid(nprocs: i32, box_len: [f64; 3], fixed: [i32; 3]) -> Option<[i32; 3]> {
+    if nprocs <= 0 {
+        return None;
+    }
+    let mut best: Option<([i32; 3], f64)> = None;
+    for px in 1..=nprocs {
+        if nprocs % px != 0 || (fixed[0] > 0 && fixed[0] != px) {
+            continue;
+        }
+        let rest = nprocs / px;
+        for py in 1..=rest {
+            if rest % py != 0 || (fixed[1] > 0 && fixed[1] != py) {
+                continue;
+            }
+            let pz = rest / py;
+            if fixed[2] > 0 && fixed[2] != pz {
+                continue;
+            }
+            let (lx, ly, lz) = (
+                box_len[0] / px as f64,
+                box_len[1] / py as f64,
+                box_len[2] / pz as f64,
+            );
+            let surface = lx * ly + ly * lz + lz * lx;
+            // `<=` lets later candidates win ties: larger px, then larger py.
+            let better = match best {
+                None => true,
+                Some((_, s)) => surface <= s * (1.0 + 1e-12),
+            };
+            if better {
+                best = Some(([px, py, pz], surface));
+            }
+        }
+    }
+    best.map(|(grid, _)| grid)
 }
 
 /// Convert a 3D processor grid position to a linear MPI rank.
@@ -683,22 +797,15 @@ fn unpack_forward(
     recv_count: usize,
     extra_per_atom: usize,
 ) {
-    let stride = FORWARD_PACK_SIZE + extra_per_atom;
-    for k in 0..recv_count {
-        let base = k * stride;
-        atoms.pos[recv_start + k] = [
-            msg[base] as Real,
-            msg[base + 1] as Real,
-            msg[base + 2] as Real,
-        ];
-        atoms.vel[recv_start + k] = [
-            msg[base + 3] as Real,
-            msg[base + 4] as Real,
-            msg[base + 5] as Real,
-        ];
-        if extra_per_atom > 0 {
-            registry.unpack_forward_all(recv_start + k, &msg[base + FORWARD_PACK_SIZE..]);
-        }
+    // Wire layout per swap: [pos|vel for every atom] then one block per forward
+    // extension store (see `pack_forward_into`).
+    let base_len = recv_count * FORWARD_PACK_SIZE;
+    for (k, rec) in msg[..base_len].chunks_exact(FORWARD_PACK_SIZE).enumerate() {
+        atoms.pos[recv_start + k] = [rec[0] as Real, rec[1] as Real, rec[2] as Real];
+        atoms.vel[recv_start + k] = [rec[3] as Real, rec[4] as Real, rec[5] as Real];
+    }
+    if extra_per_atom > 0 {
+        registry.unpack_forward_rows(recv_start, recv_count, &msg[base_len..]);
     }
 }
 
@@ -711,25 +818,15 @@ fn unpack_forward_f32(
     recv_count: usize,
     extra_per_atom: usize,
 ) {
-    for k in 0..recv_count {
-        let base = k * FORWARD_PACK_SIZE;
-        atoms.pos[recv_start + k] = [
-            base_msg[base] as Real,
-            base_msg[base + 1] as Real,
-            base_msg[base + 2] as Real,
-        ];
-        atoms.vel[recv_start + k] = [
-            base_msg[base + 3] as Real,
-            base_msg[base + 4] as Real,
-            base_msg[base + 5] as Real,
-        ];
-        if extra_per_atom > 0 {
-            let extra_base = k * extra_per_atom;
-            registry.unpack_forward_all(
-                recv_start + k,
-                &extra_msg[extra_base..extra_base + extra_per_atom],
-            );
-        }
+    for (k, rec) in base_msg[..recv_count * FORWARD_PACK_SIZE]
+        .chunks_exact(FORWARD_PACK_SIZE)
+        .enumerate()
+    {
+        atoms.pos[recv_start + k] = [rec[0] as Real, rec[1] as Real, rec[2] as Real];
+        atoms.vel[recv_start + k] = [rec[3] as Real, rec[4] as Real, rec[5] as Real];
+    }
+    if extra_per_atom > 0 {
+        registry.unpack_forward_rows(recv_start, recv_count, extra_msg);
     }
 }
 
@@ -749,18 +846,23 @@ fn pack_forward_into(
 ) {
     let offset = swap.periodic_offset;
     let voff = swap.vel_offset;
+    // Base block first (pos|vel per atom), then each forward extension store
+    // packs all of this swap's atoms in one batched call — one RefCell borrow
+    // and one dynamic dispatch per store instead of per atom.
+    buf.reserve(swap.send_indices.len() * FORWARD_PACK_SIZE);
     for &idx in &swap.send_indices {
-        let base = [
-            atoms.pos[idx][0] as f64 + offset[0],
-            atoms.pos[idx][1] as f64 + offset[1],
-            atoms.pos[idx][2] as f64 + offset[2],
-            atoms.vel[idx][0] as f64 + voff[0],
-            atoms.vel[idx][1] as f64 + voff[1],
-            atoms.vel[idx][2] as f64 + voff[2],
-        ];
-        buf.extend_from_slice(&base);
-        registry.pack_forward_all(idx, buf);
+        let p = atoms.pos[idx];
+        let v = atoms.vel[idx];
+        buf.extend_from_slice(&[
+            p[0] as f64 + offset[0],
+            p[1] as f64 + offset[1],
+            p[2] as f64 + offset[2],
+            v[0] as f64 + voff[0],
+            v[1] as f64 + voff[1],
+            v[2] as f64 + voff[2],
+        ]);
     }
+    registry.pack_forward_rows(&swap.send_indices, buf);
 }
 
 fn pack_forward_base_f32_into(swap: &SwapData, buf: &mut Vec<f32>, atoms: &Atom) {
@@ -777,9 +879,7 @@ fn pack_forward_base_f32_into(swap: &SwapData, buf: &mut Vec<f32>, atoms: &Atom)
 }
 
 fn pack_forward_extra_into(swap: &SwapData, buf: &mut Vec<f64>, registry: &AtomDataRegistry) {
-    for &idx in &swap.send_indices {
-        registry.pack_forward_all(idx, buf);
-    }
+    registry.pack_forward_rows(&swap.send_indices, buf);
 }
 
 /// Pack one swap's outgoing ghost data into `scratch.send`. If the swap is a
@@ -1490,15 +1590,17 @@ fn reverse_accumulate(
     registry: &AtomDataRegistry,
     per_atom: usize,
 ) {
-    for k in 0..swap.send_indices.len() {
-        let base = k * per_atom;
-        let origin = swap.send_indices[k];
-        atoms.force[origin][0] += recv[base] as Accum;
-        atoms.force[origin][1] += recv[base + 1] as Accum;
-        atoms.force[origin][2] += recv[base + 2] as Accum;
-        if per_atom > 3 {
-            registry.unpack_reverse_all(origin, &recv[base + 3..]);
-        }
+    // Wire layout per swap: [force for every atom] then one block per reverse
+    // extension store (see `pack_reverse_into`).
+    let n = swap.send_indices.len();
+    for (rec, &origin) in recv[..3 * n].chunks_exact(3).zip(&swap.send_indices) {
+        let f = &mut atoms.force[origin];
+        f[0] += rec[0] as Accum;
+        f[1] += rec[1] as Accum;
+        f[2] += rec[2] as Accum;
+    }
+    if per_atom > 3 {
+        registry.unpack_reverse_rows(&swap.send_indices, &recv[3 * n..]);
     }
 }
 
@@ -1514,17 +1616,18 @@ fn pack_reverse_into(
     atoms: &Atom,
     registry: &AtomDataRegistry,
 ) {
-    for i in swap.recv_start..(swap.recv_start + swap.recv_count) {
+    let range = swap.recv_start..(swap.recv_start + swap.recv_count);
+    buf.reserve(3 * swap.recv_count);
+    for i in range {
         debug_assert!(
             atoms.is_ghost[i],
             "reverse_send_force: atom {} is not ghost",
             i
         );
-        buf.push(atoms.force[i][0] as f64);
-        buf.push(atoms.force[i][1] as f64);
-        buf.push(atoms.force[i][2] as f64);
-        registry.pack_reverse_all(i, buf);
+        let f = atoms.force[i];
+        buf.extend_from_slice(&[f[0] as f64, f[1] as f64, f[2] as f64]);
     }
+    registry.pack_reverse_rows(swap.recv_start, swap.recv_count, buf);
 }
 
 fn reverse_prepare_swap<'s>(
@@ -1773,12 +1876,10 @@ pub fn exchange(
         // ranks, so the raw comparison mis-routes the atom and a single hop
         // never reaches the owner (the original ≥3-proc SIGSEGV).
         //
-        // Fix: classify by the periodic minimum-image displacement from the
-        // subdomain faces. A wrapped atom near box_high then has a small NEGATIVE
-        // min-image displacement from the low face → correctly routed lo; a
-        // genuine forward migrant just past sub_high keeps a small positive
-        // displacement → routed hi. A single lo/hi swap per dim still suffices
-        // because each atom moves at most one subdomain per step.
+        // Fix: wrap the coordinate into the box, keep it if it is inside the
+        // slab, and otherwise send it toward the nearer face around the ring
+        // (see `exchange_direction`). A single lo/hi swap per dim still
+        // suffices because each atom moves at most one subdomain per step.
         let periodic = domain.periodic_flags()[dim];
         // For a triclinic box, classify ownership in fractional (lamda) coordinates
         // where the box is a unit cube (period 1) and subdomain faces are the
@@ -1786,55 +1887,47 @@ pub fn exchange(
         // even under shear, including simultaneous x+y decomposition.
         let triclinic = domain.triclinic;
         let box_size = if triclinic { 1.0 } else { domain.size[dim] };
-        let half = 0.5 * box_size;
+        let box_lo = if triclinic { 0.0 } else { domain.boundaries_low[dim] };
         let (sub_lo, sub_hi) = if triclinic {
             (domain.sub_lamda_low[dim], domain.sub_lamda_high[dim])
         } else {
             (domain.sub_domain_low[dim], domain.sub_domain_high[dim])
         };
-        let min_image = |delta: f64| -> f64 {
-            if periodic {
-                if delta > half {
-                    delta - box_size
-                } else if delta < -half {
-                    delta + box_size
+        let mut removed = std::mem::take(&mut buffers.exchange_removed);
+        removed.clear();
+        {
+            let store = ParticleStore::new(&mut atoms, &registry);
+            for i in (0..store.atoms().len()).rev() {
+                let pr = store.atoms().pos[i];
+                let pf = [pr[0] as f64, pr[1] as f64, pr[2] as f64];
+                let coord = if triclinic {
+                    domain.x2lamda(pf)[dim]
                 } else {
-                    delta
-                }
-            } else {
-                delta
-            }
-        };
-
-        // Scan local atoms: pack those outside subdomain in this dimension
-        for i in (0..atoms.len()).rev() {
-            let pr = atoms.pos[i];
-            let pf = [pr[0] as f64, pr[1] as f64, pr[2] as f64];
-            let coord = if triclinic {
-                domain.x2lamda(pf)[dim]
-            } else {
-                pf[dim]
-            };
-            let disp_lo = min_image(coord - sub_lo);
-            let disp_hi = min_image(coord - sub_hi);
-            if disp_lo < 0.0 {
-                lo_count += 1.0;
-                ParticleStore::new(&mut atoms, &registry)
-                    .pack_migrant(i, &mut atoms_buff[0])
+                    pf[dim]
+                };
+                let direction =
+                    exchange_direction(coord, sub_lo, sub_hi, box_lo, box_size, periodic);
+                let target = match direction {
+                    -1 => {
+                        lo_count += 1.0;
+                        0
+                    }
+                    1 => {
+                        hi_count += 1.0;
+                        1
+                    }
+                    _ => continue,
+                };
+                store
+                    .pack_migrant(i, &mut atoms_buff[target])
                     .expect("exchange found invalid particle columns");
-                ParticleStore::new(&mut atoms, &registry)
-                    .swap_remove(i)
-                    .expect("exchange found an invalid local particle index");
-            } else if disp_hi >= 0.0 {
-                hi_count += 1.0;
-                ParticleStore::new(&mut atoms, &registry)
-                    .pack_migrant(i, &mut atoms_buff[1])
-                    .expect("exchange found invalid particle columns");
-                ParticleStore::new(&mut atoms, &registry)
-                    .swap_remove(i)
-                    .expect("exchange found an invalid local particle index");
+                removed.push(i);
             }
         }
+        ParticleStore::new(&mut atoms, &registry)
+            .swap_remove_descending(&removed)
+            .expect("exchange found an invalid local particle index");
+        buffers.exchange_removed = removed;
 
         // C7 count-first exchange. Both directions use the same 2-message
         // (meta=[atom_count, payload_len], then payload) protocol on every branch —
@@ -1988,6 +2081,30 @@ pub fn exchange(
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn auto_processor_grid_minimizes_surface() {
+        // Cube: as close to cubic as the factorization allows.
+        assert_eq!(auto_processor_grid(8, [1.0; 3], [0; 3]), Some([2, 2, 2]));
+        assert_eq!(auto_processor_grid(1, [1.0; 3], [0; 3]), Some([1, 1, 1]));
+        assert_eq!(auto_processor_grid(4, [1.0; 3], [0; 3]), Some([2, 2, 1]));
+        // Prime count: a slab along an axis, ties going to x.
+        assert_eq!(auto_processor_grid(7, [1.0; 3], [0; 3]), Some([7, 1, 1]));
+        // Long box: cut the long axis.
+        assert_eq!(auto_processor_grid(4, [8.0, 1.0, 1.0], [0; 3]), Some([4, 1, 1]));
+        assert_eq!(auto_processor_grid(4, [1.0, 1.0, 8.0], [0; 3]), Some([1, 1, 4]));
+        // Flat box: 2D grid in the plane.
+        assert_eq!(auto_processor_grid(16, [4.0, 4.0, 0.25], [0; 3]), Some([4, 4, 1]));
+    }
+
+    #[test]
+    fn auto_processor_grid_honors_fixed_axes() {
+        assert_eq!(auto_processor_grid(8, [1.0; 3], [0, 0, 1]), Some([4, 2, 1]));
+        assert_eq!(auto_processor_grid(12, [1.0; 3], [3, 0, 0]), Some([3, 2, 2]));
+        assert_eq!(auto_processor_grid(6, [1.0; 3], [4, 0, 0]), None);
+        assert_eq!(auto_processor_grid(6, [1.0; 3], [2, 3, 1]), Some([2, 3, 1]));
+        assert_eq!(auto_processor_grid(6, [1.0; 3], [2, 2, 2]), None);
+    }
 
     #[derive(Default)]
     struct CountingComm {
@@ -2151,32 +2268,27 @@ mod tests {
         assert_eq!(binned_buff, linear_buff);
     }
 
-    /// Mirror of the periodic min-image lo/hi classification used in `exchange`.
-    /// Returns -1 for "send lo", +1 for "send hi", 0 for "keep local".
     fn classify(pos: f64, sub_low: f64, sub_high: f64, box_size: f64, periodic: bool) -> i32 {
-        let half = 0.5 * box_size;
-        let min_image = |delta: f64| -> f64 {
-            if periodic {
-                if delta > half {
-                    delta - box_size
-                } else if delta < -half {
-                    delta + box_size
-                } else {
-                    delta
-                }
-            } else {
-                delta
-            }
-        };
-        let disp_lo = min_image(pos - sub_low);
-        let disp_hi = min_image(pos - sub_high);
-        if disp_lo < 0.0 {
-            -1
-        } else if disp_hi >= 0.0 {
-            1
-        } else {
-            0
-        }
+        exchange_direction(pos, sub_low, sub_high, 0.0, box_size, periodic)
+    }
+
+    #[test]
+    fn exchange_classification_handles_slabs_wider_than_half_the_box() {
+        // Two ranks after a rebalance: [0, 11.8) and [11.8, 32.64). Min-image
+        // displacement from the faces would send x=30 "lo" from the wide slab;
+        // it is inside and must stay.
+        let l = 32.64;
+        assert_eq!(classify(30.0, 11.8, l, l, true), 0);
+        assert_eq!(classify(12.0, 11.8, l, l, true), 0);
+        // Owned by the narrow slab now: the nearer face decides.
+        assert_eq!(classify(11.0, 11.8, l, l, true), -1);
+        // From the narrow slab, 14.0 is past the high face.
+        assert_eq!(classify(14.0, 0.0, 11.8, l, true), 1);
+        // Wrapped across the periodic seam (just below 0 -> near l).
+        assert_eq!(classify(32.5, 0.0, 11.8, l, true), -1);
+        // Unwrapped coordinates resolve the same way.
+        assert_eq!(classify(-0.1, 0.0, 11.8, l, true), -1);
+        assert_eq!(classify(l + 1.0, 0.0, 11.8, l, true), 0);
     }
 
     #[test]

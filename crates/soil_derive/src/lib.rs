@@ -160,6 +160,9 @@ struct FieldInfo {
     is_reverse: bool,
     /// Marked with `#[zero]` — zeroed at the start of each step.
     is_zero: bool,
+    /// Marked with `#[no_ghost]` — owner-only: omitted from ghost (border)
+    /// records; ghost rows hold zeros.
+    is_no_ghost: bool,
 }
 
 /// Derive macro that implements the `AtomData` trait for a struct.
@@ -175,6 +178,11 @@ struct FieldInfo {
 ///   atoms via `+=`).
 /// - **`#[zero]`** — the field is resized to `n` atoms and filled with zeros
 ///   in the `zero()` method, which runs at the start of each timestep.
+/// - **`#[no_ghost]`** — the field is owner-only state that no force kernel
+///   reads on a ghost (orientation history, accumulated statistics, ...). It
+///   still migrates and restarts with the particle, but ghost (border) records
+///   omit it and ghost rows hold zeros, which shrinks every ghost rebuild
+///   message. Cannot be combined with `#[forward]`.
 ///
 /// # Generated methods
 ///
@@ -207,7 +215,7 @@ struct FieldInfo {
 /// Produces a compile-time error if:
 /// - Applied to an enum, union, or tuple struct
 /// - Any field is not `Vec<f64>` or `Vec<[f64; N]>`
-#[proc_macro_derive(AtomData, attributes(forward, reverse, zero))]
+#[proc_macro_derive(AtomData, attributes(forward, reverse, zero, no_ghost))]
 pub fn derive_atom_data(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     let name = &input.ident;
@@ -251,12 +259,24 @@ pub fn derive_atom_data(input: TokenStream) -> TokenStream {
             .to_compile_error()
             .into();
         };
+        if has_attr(field, "no_ghost") && has_attr(field, "forward") {
+            return syn::Error::new_spanned(
+                field,
+                format!(
+                    "AtomData: field `{ident}` cannot be both `#[forward]` and `#[no_ghost]`: \
+                     forward fields must be present on ghosts."
+                ),
+            )
+            .to_compile_error()
+            .into();
+        }
         field_infos.push(FieldInfo {
             ident,
             kind,
             is_forward: has_attr(field, "forward"),
             is_reverse: has_attr(field, "reverse"),
             is_zero: has_attr(field, "zero"),
+            is_no_ghost: has_attr(field, "no_ghost"),
         });
     }
 
@@ -350,6 +370,9 @@ pub fn derive_atom_data(input: TokenStream) -> TokenStream {
     // --- zero (#[zero] fields) ---
     let zero_method = build_zero_method(&field_infos);
 
+    // --- pack_border / unpack_border (only when some field is #[no_ghost]) ---
+    let border_methods = build_border_methods(&field_infos);
+
     let expanded = quote! {
         impl AtomData for #name {
             fn as_any(&self) -> &dyn std::any::Any {
@@ -363,6 +386,11 @@ pub fn derive_atom_data(input: TokenStream) -> TokenStream {
             }
 
             fn len(&self) -> usize { #first_len }
+
+            // Generated hooks are per-row `Vec` operations: appends only push,
+            // and in-place operations only touch the validated rows. This lets
+            // `ParticleStore` skip whole-store snapshots for this store.
+            fn row_local_structural_hooks(&self) -> bool { true }
 
             unsafe fn push_default(&mut self) {
                 #(#default_stmts)*
@@ -407,6 +435,7 @@ pub fn derive_atom_data(input: TokenStream) -> TokenStream {
             #forward_methods
             #reverse_methods
             #zero_method
+            #border_methods
         }
     };
 
@@ -433,6 +462,44 @@ fn build_unpack_stmts(fields: &[FieldInfo]) -> (Vec<proc_macro2::TokenStream>, u
         }
     }
     (stmts, offset)
+}
+
+/// Build `pack_border` / `unpack_border` that skip `#[no_ghost]` fields. When
+/// no field is `#[no_ghost]` the trait defaults (`pack` / `unpack`) are kept.
+fn build_border_methods(fields: &[FieldInfo]) -> proc_macro2::TokenStream {
+    if !fields.iter().any(|f| f.is_no_ghost) {
+        return quote! {};
+    }
+    let mut pack = Vec::new();
+    let mut unpack = Vec::new();
+    let mut offset: usize = 0;
+    for f in fields {
+        let id = &f.ident;
+        match (&f.kind, f.is_no_ghost) {
+            (FieldKind::Scalar, true) => unpack.push(quote! { self.#id.push(0.0); }),
+            (FieldKind::Array(n), true) => unpack.push(quote! { self.#id.push([0.0; #n]); }),
+            (FieldKind::Scalar, false) => {
+                pack.push(quote! { buf.push(self.#id[i]); });
+                unpack.push(quote! { self.#id.push(buf[#offset]); });
+                offset += 1;
+            }
+            (FieldKind::Array(n), false) => {
+                pack.push(quote! { buf.extend_from_slice(&self.#id[i]); });
+                let indices: Vec<_> = (0..*n).map(|j| offset + j).collect();
+                unpack.push(quote! { self.#id.push([#(buf[#indices]),*]); });
+                offset += n;
+            }
+        }
+    }
+    quote! {
+        fn pack_border(&self, i: usize, buf: &mut Vec<f64>) {
+            #(#pack)*
+        }
+        unsafe fn unpack_border(&mut self, buf: &[f64]) -> usize {
+            #(#unpack)*
+            #offset
+        }
+    }
 }
 
 /// Direction of ghost-atom communication.

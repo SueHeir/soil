@@ -161,6 +161,7 @@ state and force systems as a plugin.
 | [`soil_core`](crates/soil_core/README.md) | base particle store, `AtomData`, domains, communication, neighbors, regions, groups, and octree |
 | [`soil_derive`](crates/soil_derive/README.md) | `#[derive(AtomData)]` and its communication attributes |
 | [`soil_verlet`](crates/soil_verlet/README.md) | velocity-Verlet translational integration |
+| [`soil_gpu`](crates/soil_gpu/README.md) | optional GPU storage and kernels: resident atoms, neighbor build, integration |
 | [`soil_print`](crates/soil_print/README.md) | thermo, VTP and dump output, and restart files |
 | [`soil_deform`](crates/soil_deform/README.md) | box deformation, target-size loading, and Lees–Edwards shear |
 | [`soil_fixes`](crates/soil_fixes/README.md) | method-neutral position and velocity constraints |

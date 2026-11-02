@@ -1,0 +1,28 @@
+[package]
+name = "soil_gpu"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "GPU storage and particle kernels for SOIL on grass_gpu: resident atoms, neighbor build, integration"
+keywords = ["gpu", "wgpu", "dem", "simulation"]
+categories = ["simulation", "science"]
+
+[features]
+# These set the precision of the CPU-side Atom. Kernels use grass_gpu::GpuReal, which is
+# f32 unless the `cuda` feature below turns on f64.
+default = ["precision-double"]
+precision-double = ["soil_core/precision-double"]
+precision-mixed = ["soil_core/precision-mixed"]
+precision-single = ["soil_core/precision-single"]
+cuda = ["grass_gpu/cuda"]
+
+[dependencies]
+soil_core = { path = "../soil_core", version = "0.1.3", default-features = false }
+grass_app.workspace = true
+grass_gpu.workspace = true
+grass_scheduler.workspace = true
+
+[dev-dependencies]
+grass_derive.workspace = true
+

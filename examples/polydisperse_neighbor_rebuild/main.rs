@@ -36,13 +36,13 @@ fn signed_unit(state: &mut u64) -> f64 {
     2.0 * u - 1.0
 }
 
-fn global_atoms() -> Vec<(u32, [f64; 3], f64)> {
+fn global_atoms() -> Vec<(soil_core::Tag, [f64; 3], f64)> {
     let mut out = Vec::with_capacity(NX * NY * NZ);
     let mut rng = SEED;
     for ix in 0..NX {
         for iy in 0..NY {
             for iz in 0..NZ {
-                let tag = (ix * NY * NZ + iy * NZ + iz) as u32;
+                let tag = (ix * NY * NZ + iy * NZ + iz) as soil_core::Tag;
                 let pos = [
                     (ix as f64 + 0.5) * SPACING + JITTER * signed_unit(&mut rng),
                     (iy as f64 + 0.5) * SPACING + JITTER * signed_unit(&mut rng),

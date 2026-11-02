@@ -178,7 +178,7 @@ impl AtomData for GenericColumn {
 #[allow(clippy::type_complexity)]
 fn fixture_atoms() -> (
     Vec<(
-        u32,
+        soil_core::Tag,
         u32,
         [f64; 3],
         [f64; 3],

@@ -37,7 +37,7 @@ pub struct TagIndex {
     /// `(build_count, nlocal, len)` the map was built for.
     key: Option<(u64, usize, usize)>,
     dense: Vec<u32>,
-    sparse: HashMap<u32, u32>,
+    sparse: HashMap<crate::Tag, u32>,
     use_dense: bool,
 }
 
@@ -85,7 +85,7 @@ impl TagIndex {
 
     /// Row index of `tag` (owned copy preferred), if present on this rank.
     #[inline]
-    pub fn get(&self, tag: u32) -> Option<usize> {
+    pub fn get(&self, tag: crate::Tag) -> Option<usize> {
         if self.use_dense {
             match self.dense.get(tag as usize) {
                 Some(&i) if i != ABSENT => Some(i as usize),
@@ -101,7 +101,7 @@ impl TagIndex {
 mod tests {
     use super::*;
 
-    fn atoms_with_tags(tags: &[u32], nlocal: u32) -> Atom {
+    fn atoms_with_tags(tags: &[crate::Tag], nlocal: u32) -> Atom {
         let mut atoms = Atom::new();
         for (i, &tag) in tags.iter().enumerate() {
             atoms.push_test_atom(tag, [i as f64, 0.0, 0.0], 0.5, 1.0);

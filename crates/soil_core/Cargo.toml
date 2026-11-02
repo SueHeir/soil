@@ -13,6 +13,10 @@ categories = ["simulation", "science"]
 default = ["mpi_backend", "precision-double"]
 mpi_backend = ["grass_mpi/mpi_backend"]
 
+# 64-bit particle tags (`soil_core::Tag = u64`). Off by default while downstream
+# crates move from `u32` to `Tag`; see the `Tag` docs.
+tag-u64 = []
+
 # Mutually-exclusive precision configs (see src/precision.rs). Exactly one must
 # be active; the default feature set selects `precision-double`.
 precision-double = []

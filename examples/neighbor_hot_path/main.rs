@@ -54,7 +54,7 @@ fn radius_for(case: &CaseConfig, tag: usize) -> f64 {
 
 fn build_atoms(case: &CaseConfig) -> Atom {
     let mut atoms = Atom::new();
-    let mut tag = 0u32;
+    let mut tag: soil_core::Tag = 0;
     let margin = case.spacing;
     for ix in 0..case.ncell {
         for iy in 0..case.ncell {
@@ -70,7 +70,7 @@ fn build_atoms(case: &CaseConfig) -> Atom {
             }
         }
     }
-    unsafe { atoms.set_layout_unchecked(tag, 0, tag as u64) };
+    unsafe { atoms.set_layout_unchecked(tag as u32, 0, tag as u64) };
     atoms
 }
 

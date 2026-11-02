@@ -28,7 +28,7 @@ pub struct ParticleSnapshot {
     /// Time step.
     pub dt: f64,
     /// Tags.
-    pub tag: Vec<u32>,
+    pub tag: Vec<crate::Tag>,
     /// Types.
     pub atom_type: Vec<u32>,
     /// Positions.
@@ -127,7 +127,7 @@ mod tests {
         {
             let mut a = app.get_resource_mut::<Atom>().unwrap();
             for (i, (x, v)) in atoms.iter().enumerate() {
-                a.push_test_atom(i as u32 + 1, *x, 0.1, 2.0);
+                a.push_test_atom(i as crate::Tag + 1, *x, 0.1, 2.0);
                 a.vel[i] = *v;
             }
             a.nlocal = atoms.len() as u32;

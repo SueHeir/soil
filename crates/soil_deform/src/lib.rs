@@ -765,7 +765,7 @@ mod tests {
     fn make_atoms(n: usize) -> Atom {
         let mut atom = Atom::new();
         for i in 0..n {
-            unsafe { atom.push_test_atom(i as u32, [i as f64, 0.0, 0.0], 0.5, 1.0) };
+            unsafe { atom.push_test_atom(i as soil_core::Tag, [i as f64, 0.0, 0.0], 0.5, 1.0) };
         }
         unsafe { atom.set_layout_unchecked(n as u32, 0, n as u64) };
         atom.dt = 0.001;

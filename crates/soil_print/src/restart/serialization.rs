@@ -16,7 +16,7 @@ pub(crate) struct RestartData {
     pub(crate) natoms: u64,
     pub(crate) total_cycle: usize,
     pub(crate) dt: f64,
-    pub(crate) tag: Vec<u32>,
+    pub(crate) tag: Vec<soil_core::Tag>,
     pub(crate) atom_type: Vec<u32>,
     pub(crate) pos_x: Vec<f64>,
     pub(crate) pos_y: Vec<f64>,

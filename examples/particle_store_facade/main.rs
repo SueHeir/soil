@@ -1,7 +1,7 @@
 //! Executable validation and representative communication-path measurement for
 //! `ParticleStore`.  It is intentionally a generic scalar extension rather
 //! than a method-specific particle type.
-use soil_core::{Atom, AtomData, AtomDataRegistry, ParticleStore, ParticleStoreError};
+use soil_core::{Atom, AtomData, AtomDataRegistry, ParticleStore, ParticleStoreError, Tag};
 use soil_derive::AtomData as DeriveAtomData;
 use std::{env, fs, time::Instant};
 
@@ -36,7 +36,7 @@ fn source(count: usize) -> (Atom, AtomDataRegistry, Vec<f64>) {
         }
         // The facade owns structural defaults/counters.  A caller still fills
         // scientific values through direct SoA slices afterwards.
-        atoms.tag[i] = (1000 + i) as u32;
+        atoms.tag[i] = (1000 + i) as Tag;
         atoms.pos[i] = [i as f64, 0.0, 0.0];
     }
     for (i, value) in registry

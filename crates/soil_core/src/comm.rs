@@ -2206,7 +2206,7 @@ mod tests {
     fn border_pack_fixture() -> (Atom, Domain, Neighbor, AtomDataRegistry) {
         let mut atoms = Atom::new();
         for (tag, x) in [0.2, 0.8, 1.3, 2.9, 3.8].into_iter().enumerate() {
-            atoms.push_test_atom(tag as u32, [x, 0.5, 0.5], 0.25, 1.0);
+            atoms.push_test_atom(tag as crate::Tag, [x, 0.5, 0.5], 0.25, 1.0);
         }
         atoms.push_test_atom(99, [0.4, 0.5, 0.5], 0.25, 1.0);
         atoms.nlocal = 5;

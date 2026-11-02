@@ -291,7 +291,7 @@ fn seed_lattice(
             c.vmax * (2.0 * rng.next() - 1.0),
             c.vmax * (2.0 * rng.next() - 1.0),
         ];
-        atoms.tag[i] = *tag as u32;
+        atoms.tag[i] = *tag as soil_core::Tag;
         atoms.pos[i] = *p;
         atoms.vel[i] = v;
         atoms.mass[i] = mass;

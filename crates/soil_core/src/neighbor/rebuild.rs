@@ -162,7 +162,7 @@ mod tests {
     fn atom_with_radii(radii: &[f64]) -> Atom {
         let mut atoms = Atom::new();
         for (i, &r) in radii.iter().enumerate() {
-            atoms.push_test_atom(i as u32, [i as f64, 0.0, 0.0], r, 1.0);
+            atoms.push_test_atom(i as crate::Tag, [i as f64, 0.0, 0.0], r, 1.0);
         }
         atoms.nlocal = radii.len() as u32;
         atoms.natoms = radii.len() as u64;

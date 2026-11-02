@@ -129,7 +129,7 @@ pub struct PinDef {
 #[derive(Default)]
 pub struct PinState {
     /// `{group_name → {global_tag → initial_pos}}`.
-    pub captured: HashMap<String, HashMap<u32, [f64; 3]>>,
+    pub captured: HashMap<String, HashMap<soil_core::Tag, [f64; 3]>>,
 }
 
 /// Storage for all configured `[[pin]]` definitions, populated at plugin build
@@ -265,7 +265,7 @@ fn apply_pin_impl(
         }
 
         if !state.captured.contains_key(&def.group) {
-            let mut pinned: HashMap<u32, [f64; 3]> = HashMap::new();
+            let mut pinned: HashMap<soil_core::Tag, [f64; 3]> = HashMap::new();
             for i in 0..nlocal {
                 if group.mask[i] {
                     // Captured pin positions stored in f64 (lossless across precisions).
@@ -329,7 +329,7 @@ mod tests {
     fn make_atoms(n: usize) -> Atom {
         let mut atom = Atom::new();
         for i in 0..n {
-            unsafe { atom.push_test_atom(i as u32, [i as f64, 0.0, 0.0], 0.5, 1.0) };
+            unsafe { atom.push_test_atom(i as soil_core::Tag, [i as f64, 0.0, 0.0], 0.5, 1.0) };
         }
         unsafe { atom.set_layout_unchecked(n as u32, 0, n as u64) };
         atom.dt = 0.001;
@@ -444,7 +444,7 @@ mod tests {
         let registry = make_pin_registry("anchor");
         let mut state = PinState::default();
         let mut captured = HashMap::new();
-        captured.insert(10u32, [7.0, 0.0, 0.0]);
+        captured.insert(10 as soil_core::Tag, [7.0, 0.0, 0.0]);
         state.captured.insert("anchor".to_string(), captured);
 
         let mut app = App::new();

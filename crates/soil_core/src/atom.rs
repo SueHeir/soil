@@ -2005,6 +2005,7 @@ impl Plugin for AtomPlugin {
                 zero_all_forces,
                 ParticleSimScheduleSet::PostInitialIntegration,
             );
+        crate::snapshot::register(app);
     }
 }
 

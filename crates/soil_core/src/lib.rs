@@ -97,6 +97,7 @@ pub mod precision;
 pub mod query;
 pub mod region;
 pub mod schedule;
+pub mod snapshot;
 pub mod tag_index;
 pub mod startup;
 pub mod tree;
@@ -114,6 +115,7 @@ pub enum CommState {
 
 // Re-export all public types at crate root for convenience.
 pub use atom::*;
+pub use snapshot::{ParticleSnapshot, PARTICLES_ENTRY};
 pub use bond::*;
 pub use comm::*;
 pub use domain::*;

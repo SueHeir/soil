@@ -48,7 +48,15 @@ impl Neighbor {
     /// [`pairs`](Self::pairs). Empty before the first build.
     #[inline]
     pub fn neighbors_of(&self, i: usize) -> &[u32] {
-        match (self.neighbor_offsets.get(i), self.neighbor_offsets.get(i + 1)) {
+        debug_assert!(
+            self.build_pairs,
+            "the pair list was read but never built: add soil_core::PairListPlugin \
+             (or NeighborPlugin), or set [neighbor] pairs = true"
+        );
+        match (
+            self.neighbor_offsets.get(i),
+            self.neighbor_offsets.get(i + 1),
+        ) {
             (Some(&s), Some(&e)) => &self.neighbor_indices[s as usize..e as usize],
             _ => &[],
         }
@@ -57,6 +65,11 @@ impl Neighbor {
     /// Iterate over all (i, j) pairs from the CSR neighbor list.
     /// `nlocal` is the number of local atoms (only local atoms own neighbor lists).
     pub fn pairs(&self, nlocal: usize) -> PairIter<'_> {
+        debug_assert!(
+            self.build_pairs,
+            "the pair list was read but never built: add soil_core::PairListPlugin \
+             (or NeighborPlugin), or set [neighbor] pairs = true"
+        );
         let end = if nlocal > 0 {
             self.neighbor_offsets[1] as usize
         } else {

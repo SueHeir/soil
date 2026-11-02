@@ -109,7 +109,6 @@ fn bins_only_mode_bins_atoms_without_pairs() {
         "pairs = false builds no pairs"
     );
     assert_eq!(n.neighbor_offsets, vec![0; 4], "empty but well-formed CSR");
-    assert_eq!(n.pairs(3).count(), 0);
     // Every local atom is in exactly one bin, and that bin contains its position.
     let mut seen = vec![0usize; 3];
     for c in 0..n.bin_total_cells {
@@ -527,4 +526,44 @@ fn triclinic_bin_neighbor_list_matches_reference() {
             pair
         );
     }
+}
+
+/// Run `neighbor_read_input` alone and report whether it turned pairs on.
+fn pairs_built_after_read_input(request_pairs: bool, config_pairs: bool) -> bool {
+    let mut app = App::new();
+    app.add_resource(Neighbor::new());
+    app.add_resource(NeighborConfig {
+        pairs: config_pairs,
+        ..NeighborConfig::default()
+    });
+    app.add_resource(crate::CommResource(Box::new(
+        crate::SingleProcessComm::new(),
+    )));
+    if request_pairs {
+        app.add_resource(PairListRequested);
+    }
+    app.add_setup_system(neighbor_read_input, ScheduleSetupSet::Setup);
+    app.organize_systems();
+    app.setup();
+    let built = app.get_resource_ref::<Neighbor>().unwrap().build_pairs;
+    built
+}
+
+#[test]
+fn pair_list_is_opt_in() {
+    // BinningPlugin alone: no pairs, whatever the config says.
+    assert!(!pairs_built_after_read_input(false, true));
+    // PairListPlugin (or NeighborPlugin) present: pairs, unless the config turns them off.
+    assert!(pairs_built_after_read_input(true, true));
+    assert!(!pairs_built_after_read_input(true, false));
+}
+
+#[test]
+#[cfg(debug_assertions)]
+#[should_panic(expected = "never built")]
+fn reading_pairs_that_were_never_built_is_caught() {
+    let mut n = Neighbor::new();
+    n.build_pairs = false;
+    n.neighbor_offsets = vec![0, 0];
+    let _ = n.pairs(1).count();
 }

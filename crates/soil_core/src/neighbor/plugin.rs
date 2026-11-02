@@ -32,18 +32,58 @@ impl SystemLabel for SortAtomsSystem {
 /// Stable scheduler key for [`sort_atoms_by_bin`].
 pub const SORT_ATOMS: SystemKey<SortAtomsSystem> = SystemKey::new();
 
+/// Particle binning without a pair list: the bin grid, per-bin CSR
+/// (`bin_start` / `bin_sorted_atoms`), spatial sorting, the rebuild decision,
+/// and with it SOIL's exchange and ghost borders. Provides `"particle_bins"`.
+///
+/// Use this alone for methods whose particles interact through cells or a
+/// grid rather than in pairs (DSMC, PIC, MPM). Pairs are built only when
+/// [`PairListPlugin`] is also present, so a code never pays for a list it
+/// does not read. [`NeighborPlugin`] adds both.
+///
 /// # Systems registered
 ///
 /// - **Setup**: [`neighbor_read_input`] (reads `[neighbor]` config) and
 ///   [`neighbor_setup`] (computes bin grid, ghost cutoff).
 /// - **Update**: [`decide_rebuild`] (displacement check),
 ///   [`sort_atoms_by_bin`] (cache-locality reordering),
-///   [`bin_neighbor_list`] (bin-based neighbor construction).
+///   [`bin_neighbor_list`] (binning, plus pairs when requested).
+pub struct BinningPlugin;
+
+/// Marker resource installed by [`PairListPlugin`]: build the pair list.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct PairListRequested;
+
+/// Opts in to the CSR pair list on top of [`BinningPlugin`] and provides
+/// `"neighbor_list"`. Any plugin that reads `Neighbor::pairs()`,
+/// `neighbors_of` or the raw CSR needs this (directly or via
+/// [`NeighborPlugin`]).
+pub struct PairListPlugin;
+
+impl Plugin for PairListPlugin {
+    fn provides(&self) -> Vec<&str> {
+        vec!["neighbor_list"]
+    }
+
+    fn build(&self, app: &mut App) {
+        app.add_resource(PairListRequested);
+    }
+}
+
+/// Binning plus the pair list: [`BinningPlugin`] + [`PairListPlugin`]. The
+/// right choice for pairwise methods (DEM, SPH, MD, peridynamics family
+/// builds), and what every existing SOIL app already uses.
 pub struct NeighborPlugin;
 
 impl Plugin for NeighborPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_plugins(BinningPlugin).add_plugins(PairListPlugin);
+    }
+}
+
+impl Plugin for BinningPlugin {
     fn provides(&self) -> Vec<&str> {
-        vec!["neighbor_list"]
+        vec!["particle_bins"]
     }
 
     fn default_config(&self) -> Option<&str> {
@@ -63,7 +103,7 @@ sort_every = 1000
 newton = true
 # Neighbor distance kernel: scalar or simd (falls back to scalar if unsupported)
 distance_kernel = "scalar"
-# Build the pair list (false = bins only, for cell-based methods such as DSMC)
+# Build the pair list when PairListPlugin/NeighborPlugin is installed (false = bins only)
 pairs = true"#,
         )
     }
@@ -105,6 +145,7 @@ pub fn neighbor_read_input(
     config: Res<NeighborConfig>,
     mut neighbor: ResMut<Neighbor>,
     comm: Res<CommResource>,
+    pairs_requested: Option<Res<PairListRequested>>,
 ) {
     neighbor.skin_fraction = config.skin_fraction;
     neighbor.bin_min_size = config.bin_size;
@@ -113,7 +154,7 @@ pub fn neighbor_read_input(
     neighbor.sort_every = config.sort_every;
     neighbor.newton = config.newton;
     neighbor.distance_kernel = config.distance_kernel;
-    neighbor.build_pairs = config.pairs;
+    neighbor.build_pairs = pairs_requested.is_some() && config.pairs;
     if comm.rank() == 0 {
         let rebuild_str = if config.every == 0 {
             "displacement".to_string()
@@ -123,12 +164,13 @@ pub fn neighbor_read_input(
             format!("every {}", config.every)
         };
         println!(
-            "Neighbor: skin_fraction={} bin_size={} rebuild={} newton={} distance_kernel={:?}",
+            "Neighbor: skin_fraction={} bin_size={} rebuild={} newton={} distance_kernel={:?} pairs={}",
             config.skin_fraction,
             config.bin_size,
             rebuild_str,
             if config.newton { "on" } else { "off" },
-            config.distance_kernel
+            config.distance_kernel,
+            if neighbor.build_pairs { "on" } else { "off (bins only)" }
         );
     }
 }

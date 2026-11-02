@@ -262,6 +262,14 @@ forward_precision = "f64""#,
             let box_len = app
                 .get_resource_ref::<crate::DomainConfig>()
                 .map(|d| d.box_lengths());
+            if let Some(cuts) = app.get_resource_ref::<crate::FixedCuts>() {
+                let domain = app.get_resource_ref::<crate::DomainConfig>();
+                let (lo, hi) = domain
+                    .map(|d| ([d.x_low, d.y_low, d.z_low], [d.x_high, d.y_high, d.z_high]))
+                    .unwrap_or(([f64::NEG_INFINITY; 3], [f64::INFINITY; 3]));
+                cuts.validate(lo, hi, comm.size()).map_err(AppError::message)?;
+                return Ok(());
+            }
             // `comm_read_input` fills in automatic (0) counts the same way.
             resolve_processor_grid(&config, box_len, comm.size()).map_err(AppError::message)?;
             Ok(())
@@ -309,10 +317,15 @@ forward_precision = "f64""#,
 pub fn comm_read_input(
     mut config: ResMut<CommConfig>,
     domain_config: Option<Res<crate::DomainConfig>>,
+    fixed_cuts: Option<Res<crate::FixedCuts>>,
     mut comm: ResMut<CommResource>,
 ) {
     let box_len = domain_config.map(|d| d.box_lengths());
-    let decomp = match resolve_processor_grid(&config, box_len, comm.size()) {
+    let resolved = match fixed_cuts {
+        Some(cuts) => Ok(cuts.decomposition()),
+        None => resolve_processor_grid(&config, box_len, comm.size()),
+    };
+    let decomp = match resolved {
         Ok(grid) => grid,
         Err(message) => {
             if comm.rank() == 0 {

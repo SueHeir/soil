@@ -381,6 +381,88 @@ impl Domain {
 
 // ── Domain decomposition ─────────────────────────────────────────────────────
 
+/// Cut planes SOIL must use instead of choosing its own decomposition.
+///
+/// Insert this resource before setup to make SOIL split its particles exactly
+/// where another code splits its data, so a particle and the grid cells it
+/// talks to live on the same rank (MPM, particle-in-cell). `planes[d]` holds
+/// `p + 1` physical positions for `p` ranks along axis `d`, strictly
+/// increasing. Only the interior planes are used; the outer two stand for the
+/// box edges, which stay SOIL's own `[domain]` bounds. Ranks are numbered
+/// x-major like the rest of SOIL.
+///
+/// With this resource present SOIL takes its processor grid from the planes
+/// (ignoring `[comm] processors_*`) and load balancing leaves the cuts alone.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FixedCuts {
+    /// Physical cut positions per axis, `p + 1` values for `p` ranks.
+    pub planes: [Vec<f64>; 3],
+}
+
+impl FixedCuts {
+    /// Ranks per axis implied by the planes.
+    pub fn decomposition(&self) -> [i32; 3] {
+        std::array::from_fn(|d| self.planes[d].len().saturating_sub(1) as i32)
+    }
+
+    /// Check the cuts against SOIL's box and the rank count.
+    // Negated comparisons on purpose: they also reject NaN.
+    #[allow(clippy::neg_cmp_op_on_partial_ord)]
+    pub fn validate(&self, box_low: [f64; 3], box_high: [f64; 3], nprocs: i32) -> Result<(), String> {
+        let decomp = self.decomposition();
+        for d in 0..3 {
+            let p = &self.planes[d];
+            if p.len() < 2 {
+                return Err(format!("FixedCuts axis {d} needs at least two planes"));
+            }
+            if p.windows(2).any(|w| !(w[1] > w[0])) {
+                return Err(format!("FixedCuts planes on axis {d} must increase strictly"));
+            }
+            if let Some(&x) = p[1..p.len() - 1]
+                .iter()
+                .find(|&&x| !(x > box_low[d] && x < box_high[d]))
+            {
+                return Err(format!(
+                    "FixedCuts plane {x} on axis {d} is not inside SOIL's box ({}, {})",
+                    box_low[d], box_high[d]
+                ));
+            }
+        }
+        let product = decomp[0] * decomp[1] * decomp[2];
+        if product != nprocs {
+            return Err(format!(
+                "FixedCuts describe {product} ranks ({decomp:?}) but the run has {nprocs}"
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Apply [`FixedCuts`] to a freshly decomposed orthogonal [`Domain`]: this
+/// rank's slab becomes `[plane[pos], plane[pos + 1])` on every axis, exactly
+/// at the given positions, and `lamda_planes` records every rank's cuts.
+pub fn apply_fixed_cuts(domain: &mut Domain, cuts: &FixedCuts, position: [i32; 3]) {
+    assert!(!domain.triclinic, "FixedCuts support orthogonal boxes only");
+    for d in 0..3 {
+        let p = cuts.planes[d].len() - 1;
+        let (blo, bhi) = (domain.boundaries_low[d], domain.boundaries_high[d]);
+        let size = domain.size[d];
+        let mut phys = cuts.planes[d].clone();
+        phys[0] = blo;
+        phys[p] = bhi;
+        let mut lamda: Vec<f64> = phys.iter().map(|x| (x - blo) / size).collect();
+        lamda[0] = 0.0;
+        lamda[p] = 1.0;
+        let r = position[d] as usize;
+        domain.sub_domain_low[d] = phys[r];
+        domain.sub_domain_high[d] = phys[r + 1];
+        domain.sub_length[d] = phys[r + 1] - phys[r];
+        domain.sub_lamda_low[d] = lamda[r];
+        domain.sub_lamda_high[d] = lamda[r + 1];
+        domain.lamda_planes[d] = lamda;
+    }
+}
+
 /// Compute [`Domain`] from config using uniform Cartesian grid decomposition.
 pub fn decompose_domain(config: &DomainConfig, comm: &dyn CommBackend) -> Domain {
     let boundaries_low = [config.x_low, config.y_low, config.z_low];
@@ -725,7 +807,12 @@ fn load_balance_system(
     topo: Option<Res<crate::CommTopology>>,
     comm_state: Res<CurrentState<CommState>>,
     mut counter: ResMut<LoadBalanceCounter>,
+    fixed_cuts: Option<Res<FixedCuts>>,
 ) {
+    if fixed_cuts.is_some() {
+        // Another code owns the cuts; moving them would break the alignment.
+        return;
+    }
     counter.0 += 1;
     if cfg.every == 0 || counter.0 < cfg.every || comm_state.0 != CommState::FullRebuild {
         return;
@@ -863,6 +950,7 @@ fn boundary_type_char(bt: BoundaryType) -> char {
 pub fn domain_read_input(
     config: Res<DomainConfig>,
     comm: Res<CommResource>,
+    fixed_cuts: Option<Res<FixedCuts>>,
     mut domain: ResMut<Domain>,
 ) {
     let boundary_types = config.boundary_types();
@@ -896,6 +984,9 @@ pub fn domain_read_input(
     }
 
     *domain = decompose_domain(&config, &**comm);
+    if let Some(cuts) = fixed_cuts {
+        apply_fixed_cuts(&mut domain, &cuts, comm.processor_position());
+    }
 }
 
 /// Core shrink-wrap logic: update domain bounds to encompass all atom positions + padding.

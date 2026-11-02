@@ -305,7 +305,7 @@ fn main() {
         for gx in 0..NCELL {
             for gy in 0..NCELL {
                 for gz in 0..NCELL {
-                    let tag = (gx * NCELL * NCELL + gy * NCELL + gz) as u32;
+                    let tag = (gx * NCELL * NCELL + gy * NCELL + gz) as soil_core::Tag;
                     // Jitter the lattice slightly so the boundary populations are
                     // non-degenerate, but keep it deterministic.
                     let pos = [

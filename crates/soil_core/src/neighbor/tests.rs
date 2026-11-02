@@ -18,7 +18,7 @@ fn classify_boundary_atoms_flags_ghost_neighbours() {
     assert_eq!(mask, vec![false, true, false]);
 }
 
-fn push_atom(atom: &mut Atom, tag: u32, pos: [f64; 3], radius: f64) {
+fn push_atom(atom: &mut Atom, tag: crate::Tag, pos: [f64; 3], radius: f64) {
     atom.push_test_atom(tag, pos, radius, 1.0);
 }
 
@@ -205,7 +205,7 @@ fn bin_neighbor_list_matches_reference() {
     let mut app_bin = App::new();
     let mut atom_bin = Atom::new();
     for i in 0..n {
-        push_atom(&mut atom_bin, i as u32, positions[i], radius);
+        push_atom(&mut atom_bin, i as crate::Tag, positions[i], radius);
     }
     atom_bin.nlocal = n as u32;
     atom_bin.natoms = n as u64;
@@ -397,7 +397,7 @@ fn full_bin_neighbor_list_matches_legacy_self_cell_scan() {
     let mut app = App::new();
     let mut atom = Atom::new();
     for i in 0..n {
-        push_atom(&mut atom, i as u32, positions[i], cutoffs[i]);
+        push_atom(&mut atom, i as crate::Tag, positions[i], cutoffs[i]);
     }
     atom.nlocal = n as u32;
     atom.natoms = n as u64;
@@ -468,7 +468,7 @@ fn triclinic_bin_neighbor_list_matches_reference() {
     let mut app = App::new();
     let mut atom = Atom::new();
     for i in 0..n {
-        push_atom(&mut atom, i as u32, positions[i], radius);
+        push_atom(&mut atom, i as crate::Tag, positions[i], radius);
     }
     atom.nlocal = n as u32;
     atom.natoms = n as u64;

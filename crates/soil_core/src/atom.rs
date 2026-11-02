@@ -1023,6 +1023,25 @@ impl AtomDataRegistry {
     }
 }
 
+/// Globally unique particle identifier (persists across migration and restart).
+///
+/// Every SOIL API that carries a particle tag uses this alias, so the width can
+/// change in one place. It is `u32` today, which caps a run at about 4.3 × 10⁹
+/// particles; large DSMC and PIC runs need `u64`. Tags travel through `f64`
+/// halo and reduction buffers, which hold integers exactly only up to 2⁵³, so
+/// a `u64` tag stays exact for any realistic run size but not for the full
+/// `u64` range. Downstream crates should name `Tag`, not `u32`, so that the
+/// switch is a one-line change here.
+///
+/// The `tag-u64` feature switches it to `u64` now; CI builds and tests SOIL
+/// both ways so the wide path does not rot while downstream crates migrate.
+#[cfg(not(feature = "tag-u64"))]
+pub type Tag = u32;
+/// Globally unique particle identifier (`tag-u64` build). See the `u32` build's
+/// documentation for the trade-offs.
+#[cfg(feature = "tag-u64")]
+pub type Tag = u64;
+
 // ── Atom Vec field macro ─────────────────────────────────────────────────────
 
 /// Enumerates all per-atom Vec fields with their element types.
@@ -1032,7 +1051,7 @@ impl AtomDataRegistry {
 macro_rules! for_each_atom_vec {
     ($callback:ident) => {
         $callback! {
-            (tag, u32),
+            (tag, $crate::Tag),
             (atom_type, u32),
             (origin_index, i32),
             (is_ghost, bool),
@@ -1189,7 +1208,7 @@ pub struct Atom {
     pub dt: f64,
 
     /// Globally unique atom identifier (persists across migration/restart).
-    pub tag: AtomColumn<u32>,
+    pub tag: AtomColumn<Tag>,
     /// Per-atom type index in `0..ntypes`.
     pub atom_type: AtomColumn<u32>,
     /// For a ghost, the local index of its owner atom on the sending rank
@@ -1225,7 +1244,7 @@ pub struct Atom {
 #[derive(Debug, Default)]
 pub struct LocalAtomRows {
     /// Globally unique particle tags.
-    pub tag: Vec<u32>,
+    pub tag: Vec<Tag>,
     /// Per-particle type indices.
     pub atom_type: Vec<u32>,
     /// Particle positions.
@@ -1424,7 +1443,7 @@ impl Atom {
     }
 
     /// Returns the highest global tag among all stored atoms, or 0 if empty.
-    pub fn get_max_tag(&self) -> u32 {
+    pub fn get_max_tag(&self) -> Tag {
         self.tag.iter().cloned().max().unwrap_or(0)
     }
 
@@ -1481,7 +1500,7 @@ impl Atom {
 
     /// Unpack one atom from `buf` (ghost or exchanged). Returns [`ATOM_PACK_SIZE`].
     pub(crate) fn unpack_atom(&mut self, buf: &[f64], is_ghost: bool) -> usize {
-        self.tag.push(buf[0] as u32);
+        self.tag.push(buf[0] as Tag);
         self.origin_index.push(buf[1] as i32);
         self.cutoff_radius.push(buf[2] as Real);
         self.atom_type.push(buf[3] as u32);
@@ -1507,7 +1526,7 @@ impl Atom {
     /// only be used when there are no registered extensions, followed by the
     /// caller setting a matching ownership partition. Production code must use
     /// `ParticleStore::push_default_local`.
-    unsafe fn push_test_atom_unchecked(&mut self, tag: u32, pos: [f64; 3], radius: f64, mass: f64) {
+    unsafe fn push_test_atom_unchecked(&mut self, tag: Tag, pos: [f64; 3], radius: f64, mass: f64) {
         self.tag.push(tag);
         self.atom_type.push(0);
         self.origin_index.push(0);
@@ -1531,12 +1550,12 @@ impl Atom {
     /// caller setting a matching ownership partition. Production code must use
     /// `ParticleStore::push_default_local`.
     #[cfg(not(test))]
-    pub unsafe fn push_test_atom(&mut self, tag: u32, pos: [f64; 3], radius: f64, mass: f64) {
+    pub unsafe fn push_test_atom(&mut self, tag: Tag, pos: [f64; 3], radius: f64, mass: f64) {
         unsafe { self.push_test_atom_unchecked(tag, pos, radius, mass) }
     }
 
     #[cfg(test)]
-    pub(crate) fn push_test_atom(&mut self, tag: u32, pos: [f64; 3], radius: f64, mass: f64) {
+    pub(crate) fn push_test_atom(&mut self, tag: Tag, pos: [f64; 3], radius: f64, mass: f64) {
         // SAFETY: crate tests construct core-only fixtures and set their
         // ownership partition before handing them to a ParticleStore.
         unsafe { self.push_test_atom_unchecked(tag, pos, radius, mass) }
@@ -2386,7 +2405,7 @@ mod tests {
     fn batched_swap_remove_matches_sequential_backward_removal() {
         let build = || {
             let mut atoms = Atom::new();
-            for tag in 0..8u32 {
+            for tag in 0..8 as Tag {
                 atoms.push_test_atom(tag, [tag as f64, 0.0, 0.0], 1.0, 1.0);
             }
             atoms.nlocal = 8;

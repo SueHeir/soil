@@ -1464,14 +1464,14 @@ mod tests {
             let x = lo + (hi - lo) * u * u;
             let y = (i % 10) as f64 / 10.0 + 0.005;
             let z = (i % 7) as f64 / 7.0 + 0.005;
-            atoms.push_test_atom(i, [x, y, z], 0.1, 1.0);
+            atoms.push_test_atom(i as crate::Tag, [x, y, z], 0.1, 1.0);
         }
         atoms.nlocal = n;
         atoms.natoms = n as u64;
 
         // Snapshot the "before" set: tag → stored position (positions must be
         // carried through redecomposition untouched).
-        let before: std::collections::HashMap<u32, [Real; 3]> = (0..n as usize)
+        let before: std::collections::HashMap<crate::Tag, [Real; 3]> = (0..n as usize)
             .map(|i| (atoms.tag[i], atoms.pos[i]))
             .collect();
         let global_count = n as usize;
@@ -1555,7 +1555,7 @@ mod tests {
 
         // (2) The set of (id, position) after rebalance == the set before. Rebuild
         // it from the per-rank owned lists and compare against the snapshot.
-        let mut after: std::collections::HashMap<u32, [Real; 3]> = std::collections::HashMap::new();
+        let mut after: std::collections::HashMap<crate::Tag, [Real; 3]> = std::collections::HashMap::new();
         for r in 0..px {
             for &i in &owned[r] {
                 let prev = after.insert(atoms.tag[i], atoms.pos[i]);

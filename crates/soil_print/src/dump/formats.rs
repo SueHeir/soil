@@ -71,7 +71,15 @@ pub(crate) fn write_dump_binary(frame: &DumpFrame) -> std::io::Result<()> {
 
     w.write_all(&(frame.n() as u32).to_le_bytes())?;
     for i in 0..frame.n() {
-        w.write_all(&(frame.tag[i] as u32).to_le_bytes())?;
+        // The record format fixes the tag at 32 bits. Refuse to truncate a wider
+        // `soil_core::Tag` silently; widen the record when tags outgrow it.
+        let tag = u32::try_from(frame.tag[i]).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("tag {} does not fit the binary dump's u32 tag field", frame.tag[i]),
+            )
+        })?;
+        w.write_all(&tag.to_le_bytes())?;
         w.write_all(&(frame.atom_type[i] as u32).to_le_bytes())?;
         for c in 0..3 {
             w.write_all(&frame.pos[i][c].to_le_bytes())?;

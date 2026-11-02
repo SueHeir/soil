@@ -8,7 +8,7 @@ use std::any::Any;
 
 use grass_app::prelude::*;
 
-use crate::{apply_permutation_in_place, AtomData};
+use crate::{apply_permutation_in_place, AtomData, Tag};
 
 // ── BondEntry & BondStore ────────────────────────────────────────────────────
 
@@ -16,7 +16,7 @@ use crate::{apply_permutation_in_place, AtomData};
 #[derive(Clone, Debug)]
 pub struct BondEntry {
     /// Global tag of the bonded partner atom.
-    pub partner_tag: u32,
+    pub partner_tag: Tag,
     /// Bond type index (for future coefficient table lookups).
     pub bond_type: u32,
     /// Reference (equilibrium) bond length.
@@ -40,7 +40,7 @@ impl BondStore {
     }
 
     /// Returns true if local atom `i` has a bond to the atom with global tag `partner_tag`.
-    pub fn has_bond(&self, i: usize, partner_tag: u32) -> bool {
+    pub fn has_bond(&self, i: usize, partner_tag: Tag) -> bool {
         if i >= self.bonds.len() {
             return false;
         }
@@ -54,7 +54,7 @@ impl BondStore {
     /// - **1-3**: atoms i and j share a common bonded neighbor
     ///
     /// `tags` is the global tag array so we can look up `tag[i]` and `tag[j]`.
-    pub fn are_excluded(&self, i: usize, j: usize, tags: &[u32]) -> bool {
+    pub fn are_excluded(&self, i: usize, j: usize, tags: &[Tag]) -> bool {
         if i >= self.bonds.len() || j >= self.bonds.len() {
             return false;
         }
@@ -145,7 +145,7 @@ impl AtomData for BondStore {
         let mut list = Vec::with_capacity(count);
         let mut pos = 1;
         for _ in 0..count {
-            let partner_tag = buf[pos] as u32;
+            let partner_tag = buf[pos] as Tag;
             let bond_type = buf[pos + 1] as u32;
             let r0 = buf[pos + 2];
             list.push(BondEntry {
@@ -269,7 +269,7 @@ mod tests {
     #[test]
     fn exclusion_1_2_direct_bond() {
         let store = make_store_with_bonds();
-        let tags: Vec<u32> = vec![10, 20, 30, 40];
+        let tags: Vec<Tag> = vec![10, 20, 30, 40];
         // 10-20 are directly bonded
         assert!(store.are_excluded(0, 1, &tags));
         assert!(store.are_excluded(1, 0, &tags));
@@ -278,7 +278,7 @@ mod tests {
     #[test]
     fn exclusion_1_3_shared_neighbor() {
         let store = make_store_with_bonds();
-        let tags: Vec<u32> = vec![10, 20, 30, 40];
+        let tags: Vec<Tag> = vec![10, 20, 30, 40];
         // 10 and 30 are NOT directly bonded, but share neighbor 20
         assert!(store.are_excluded(0, 2, &tags));
         assert!(store.are_excluded(2, 0, &tags));
@@ -287,7 +287,7 @@ mod tests {
     #[test]
     fn no_exclusion_for_unrelated_atoms() {
         let store = make_store_with_bonds();
-        let tags: Vec<u32> = vec![10, 20, 30, 40];
+        let tags: Vec<Tag> = vec![10, 20, 30, 40];
         // 10 and 40 have no bond relationship
         assert!(!store.are_excluded(0, 3, &tags));
         assert!(!store.are_excluded(3, 0, &tags));
@@ -465,7 +465,7 @@ mod tests {
         // Second unpack was atom tag 10 (two bonds).
         assert_eq!(atoms_b.tag[1], 10);
         assert_eq!(store_b.bonds[1].len(), 2);
-        let partners: Vec<u32> = store_b.bonds[1].iter().map(|b| b.partner_tag).collect();
+        let partners: Vec<Tag> = store_b.bonds[1].iter().map(|b| b.partner_tag).collect();
         assert!(partners.contains(&20));
         assert!(partners.contains(&30));
     }

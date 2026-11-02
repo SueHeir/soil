@@ -77,7 +77,7 @@ fn seed_atoms(app: &mut App, cfg: DsmcConfig) {
 
     for c in 0..cfg.cells_x {
         for p in 0..cfg.particles_per_cell {
-            let tag = (c * cfg.particles_per_cell + p) as u32;
+            let tag = (c * cfg.particles_per_cell + p) as soil_core::Tag;
             let fx = (p as f64 + 0.5) / cfg.particles_per_cell as f64;
             store.push_default_local(n as u64).unwrap();
             let i = store.atoms().len() - 1;

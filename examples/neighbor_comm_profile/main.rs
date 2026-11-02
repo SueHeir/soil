@@ -372,7 +372,7 @@ fn push_rank_lattice(atoms: &mut Atom, domain: &Domain, case: &ProfileCase) {
                 if (0..3).all(|d| {
                     pos[d] >= domain.sub_domain_low[d] && pos[d] < domain.sub_domain_high[d]
                 }) {
-                    let tag = (ix * case.ncell * case.ncell + iy * case.ncell + iz) as u32;
+                    let tag = (ix * case.ncell * case.ncell + iy * case.ncell + iz) as soil_core::Tag;
                     // SAFETY: core-only fixture; the layout is set below.
                     unsafe { atoms.push_test_atom(tag, pos, case.radius, 1.0) };
                     local += 1;

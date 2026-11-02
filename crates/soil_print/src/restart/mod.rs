@@ -204,7 +204,7 @@ pub fn check_stage_end_save(
     let stage_label = stage.name.as_deref().unwrap_or("(unnamed)");
 
     if rank == 0 {
-        println!(
+        grass_app::say!(
             "Stage {} [{}] finished — saving dump + restart at step {}",
             index, stage_label, step
         );
@@ -293,7 +293,7 @@ pub fn read_restart(
         Some(s) => s,
         None => {
             if rank == 0 {
-                println!("Restart: no restart files found in {}", base_dir);
+                grass_app::say!("Restart: no restart files found in {}", base_dir);
             }
             return;
         }
@@ -301,7 +301,7 @@ pub fn read_restart(
 
     let filename = format!("{}/restart_{}_rank{}.{}", base_dir, step, rank, ext);
     if rank == 0 {
-        println!("Restart: reading from {}", filename);
+        grass_app::say!("Restart: reading from {}", filename);
     }
 
     let file = File::open(&filename).unwrap_or_else(|e| {
@@ -362,7 +362,7 @@ pub fn read_restart(
 
     run_state.total_cycle = data.total_cycle;
     if rank == 0 {
-        println!("Restart: loaded {} atoms from step {}", n, data.total_cycle);
+        grass_app::say!("Restart: loaded {} atoms from step {}", n, data.total_cycle);
     }
 }
 

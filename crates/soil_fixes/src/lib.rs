@@ -237,7 +237,7 @@ fn setup_pins(registry: Res<PinRegistry>, comm: Res<CommResource>, groups: Res<G
         return;
     }
     for f in &registry.pins {
-        println!(
+        grass_app::say!(
             "Fix pin: group='{}' (hard translational constraint)",
             f.group
         );

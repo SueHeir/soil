@@ -52,13 +52,13 @@ pub fn print_banner() {
         Err(_) => true,
     };
     if is_rank0 {
-        println!();
-        println!("   o-o  o-o  o  o   ");
-        println!("  |     | |  |  |   ");
-        println!("   o-o  | |  |  |   ");
-        println!("      | | |  |  |   ");
-        println!("   o-o  o-o  o  o-o ");
-        println!("  Substrate for Off-lattice Interacting Lagrangians");
-        println!();
+        grass_app::say!();
+        grass_app::say!("   o-o  o-o  o  o   ");
+        grass_app::say!("  |     | |  |  |   ");
+        grass_app::say!("   o-o  | |  |  |   ");
+        grass_app::say!("      | | |  |  |   ");
+        grass_app::say!("   o-o  o-o  o  o-o ");
+        grass_app::say!("  Substrate for Off-lattice Interacting Lagrangians");
+        grass_app::say!();
     }
 }

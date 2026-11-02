@@ -961,11 +961,11 @@ pub fn domain_read_input(
         .expect("DomainPlugin validates configuration before setup");
 
     if comm.rank() == 0 {
-        println!(
+        grass_app::say!(
             "Domain: {} {} {} {} {} {}",
             config.x_low, config.x_high, config.y_low, config.y_high, config.z_low, config.z_high
         );
-        println!(
+        grass_app::say!(
             "Domain: boundary {} {} {}",
             boundary_type_char(boundary_types[0]),
             boundary_type_char(boundary_types[1]),
@@ -973,12 +973,12 @@ pub fn domain_read_input(
         );
         if has_shrink_wrap {
             if config.shrink_wrap_padding > 0.0 {
-                println!(
+                grass_app::say!(
                     "Domain: shrink-wrap padding = {}",
                     config.shrink_wrap_padding
                 );
             } else {
-                println!("Domain: shrink-wrap padding = auto (ghost cutoff)");
+                grass_app::say!("Domain: shrink-wrap padding = auto (ghost cutoff)");
             }
         }
     }

@@ -277,7 +277,7 @@ pub fn setup_groups(
                 continue;
             }
             if comm.rank() == 0 {
-                println!("Group '{}': {:?}", def.name, def);
+                grass_app::say!("Group '{}': {:?}", def.name, def);
             }
             groups.groups.push(Group {
                 name: def.name.clone(),
@@ -299,7 +299,7 @@ pub fn setup_groups(
             if let Some(existing) = groups.groups.iter_mut().find(|g| g.name == def.name) {
                 // Replace definition, clear mask to force rebuild
                 if comm.rank() == 0 {
-                    println!(
+                    grass_app::say!(
                         "Stage {}: redefining group '{}': {:?}",
                         index, def.name, def
                     );
@@ -309,7 +309,7 @@ pub fn setup_groups(
             } else {
                 // Add new group
                 if comm.rank() == 0 {
-                    println!("Stage {}: adding group '{}': {:?}", index, def.name, def);
+                    grass_app::say!("Stage {}: adding group '{}': {:?}", index, def.name, def);
                 }
                 groups.groups.push(Group {
                     name: def.name.clone(),

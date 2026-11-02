@@ -213,6 +213,12 @@ pub struct Domain {
     pub sub_lamda_low: [f64; 3],
     /// Upper sub-domain bound in fractional (lamda) coordinates; see [`sub_lamda_low`](Self::sub_lamda_low).
     pub sub_lamda_high: [f64; 3],
+    /// Every rank's cut planes per axis in fractional (lamda) coordinates:
+    /// `p + 1` values from `0.0` to `1.0` for `p` ranks on that axis.
+    /// Identical on all ranks; load balancing keeps it current. This is what
+    /// [`ParticlePartitionDirectory::from_domain`](crate::ParticlePartitionDirectory::from_domain)
+    /// reads to tell a coupler which rank owns a point.
+    pub lamda_planes: [Vec<f64>; 3],
 }
 
 impl Default for Domain {
@@ -242,6 +248,7 @@ impl Domain {
             boundary_vel: [0.0; 3],
             sub_lamda_low: [0.0; 3],
             sub_lamda_high: [1.0; 3],
+            lamda_planes: [vec![0.0, 1.0], vec![0.0, 1.0], vec![0.0, 1.0]],
         }
     }
 
@@ -302,15 +309,39 @@ impl Domain {
         let [xy, xz, yz] = self.tilt;
         // Fractional components via back-substitution through H (upper
         // triangular), computed from the *unwrapped* separation, then wrapped.
-        let lz = if self.size[2] != 0.0 { d[2] / self.size[2] } else { 0.0 };
-        let ly = if self.size[1] != 0.0 { (d[1] - yz * lz) / self.size[1] } else { 0.0 };
-        let lx = if self.size[0] != 0.0 { (d[0] - xy * ly - xz * lz) / self.size[0] } else { 0.0 };
+        let lz = if self.size[2] != 0.0 {
+            d[2] / self.size[2]
+        } else {
+            0.0
+        };
+        let ly = if self.size[1] != 0.0 {
+            (d[1] - yz * lz) / self.size[1]
+        } else {
+            0.0
+        };
+        let lx = if self.size[0] != 0.0 {
+            (d[0] - xy * ly - xz * lz) / self.size[0]
+        } else {
+            0.0
+        };
         let wrap = |l: f64, axis: usize| if pflags[axis] { l - l.round() } else { l };
         let (lx, ly, lz) = (wrap(lx, 0), wrap(ly, 1), wrap(lz, 2));
         [
-            if self.size[0] != 0.0 { self.size[0] * lx + xy * ly + xz * lz } else { d[0] },
-            if self.size[1] != 0.0 { self.size[1] * ly + yz * lz } else { d[1] },
-            if self.size[2] != 0.0 { self.size[2] * lz } else { d[2] },
+            if self.size[0] != 0.0 {
+                self.size[0] * lx + xy * ly + xz * lz
+            } else {
+                d[0]
+            },
+            if self.size[1] != 0.0 {
+                self.size[1] * ly + yz * lz
+            } else {
+                d[1]
+            },
+            if self.size[2] != 0.0 {
+                self.size[2] * lz
+            } else {
+                d[2]
+            },
         ]
     }
 
@@ -411,7 +442,16 @@ pub fn decompose_domain(config: &DomainConfig, comm: &dyn CommBackend) -> Domain
         boundary_vel: [0.0; 3],
         sub_lamda_low,
         sub_lamda_high,
+        lamda_planes: std::array::from_fn(|d| uniform_lamda_planes(proc_decomp[d])),
     }
+}
+
+/// `p + 1` evenly spaced planes on `[0, 1]`, ending exactly at `1.0`.
+pub(crate) fn uniform_lamda_planes(p: i32) -> Vec<f64> {
+    let p = p.max(1) as usize;
+    (0..=p)
+        .map(|i| if i == p { 1.0 } else { i as f64 / p as f64 })
+        .collect()
 }
 
 /// Validate a [`DomainConfig`] against the active communicator.
@@ -500,6 +540,7 @@ pub fn rebalance_x(atoms: &Atom, domain: &mut Domain, comm: &dyn CommBackend, nb
     domain.sub_length[0] = planes[r + 1] - planes[r];
     domain.sub_lamda_low[0] = (planes[r] - lo) / domain.size[0];
     domain.sub_lamda_high[0] = (planes[r + 1] - lo) / domain.size[0];
+    domain.lamda_planes[0] = planes.iter().map(|x| (x - lo) / domain.size[0]).collect();
     domain.bounds_changed = true;
 }
 
@@ -625,6 +666,11 @@ pub fn rebalance_shift(
             continue;
         }
         let planes = damped_planes(old, &target);
+        // Every rank computed the same planes, so every rank records them,
+        // including ranks whose own slab did not move.
+        if planes != domain.lamda_planes[d] {
+            domain.lamda_planes[d] = planes.clone();
+        }
         let r = position[d] as usize;
         let (lo_l, hi_l) = (planes[r], planes[r + 1]);
         if lo_l == domain.sub_lamda_low[d] && hi_l == domain.sub_lamda_high[d] {
@@ -1209,7 +1255,11 @@ mod tests {
     fn minimum_image_wraps_only_periodic_axes() {
         let mut d = Domain::new();
         d.size = [10.0, 10.0, 10.0];
-        d.boundary_type = [BoundaryType::Periodic, BoundaryType::Fixed, BoundaryType::Periodic];
+        d.boundary_type = [
+            BoundaryType::Periodic,
+            BoundaryType::Fixed,
+            BoundaryType::Periodic,
+        ];
         let w = d.minimum_image([9.0, 9.0, -6.0]);
         assert!((w[0] - -1.0).abs() < 1e-12);
         assert!((w[1] - 9.0).abs() < 1e-12);
@@ -1227,7 +1277,10 @@ mod tests {
         d.boundary_type = [BoundaryType::Periodic; 3];
         // A shift by one full lattice vector of H (column 2) must wrap to zero.
         let w = d.minimum_image([1.0 + 0.3, 0.5, 6.0]);
-        assert!((w[0] - 0.3).abs() < 1e-12 && w[1].abs() < 1e-12 && w[2].abs() < 1e-12, "{w:?}");
+        assert!(
+            (w[0] - 0.3).abs() < 1e-12 && w[1].abs() < 1e-12 && w[2].abs() < 1e-12,
+            "{w:?}"
+        );
     }
 
     #[test]

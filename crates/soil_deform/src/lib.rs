@@ -583,13 +583,13 @@ fn setup_deform(
                 let range = ax.hi_0 - ax.lo_0;
                 match &ax.style {
                     DeformStyle::Erate { rate } => {
-                        println!(
+                        grass_app::say!(
                             "Deform {}: erate rate={:.6e}, L0={:.6e} [{:.6e}, {:.6e}]",
                             AXIS_NAMES[dim], rate, range, ax.lo_0, ax.hi_0
                         );
                     }
                     DeformStyle::Vel { velocity } => {
-                        println!(
+                        grass_app::say!(
                             "Deform {}: vel velocity={:.6e}, L0={:.6e} [{:.6e}, {:.6e}]",
                             AXIS_NAMES[dim], velocity, range, ax.lo_0, ax.hi_0
                         );
@@ -598,7 +598,7 @@ fn setup_deform(
                         target_lo,
                         target_hi,
                     } => {
-                        println!(
+                        grass_app::say!(
                             "Deform {}: final [{:.6e}, {:.6e}] -> [{:.6e}, {:.6e}]",
                             AXIS_NAMES[dim], ax.lo_0, ax.hi_0, target_lo, target_hi
                         );
@@ -608,7 +608,7 @@ fn setup_deform(
         }
         if let Some(rate) = state.shear_xy_rate {
             let ly = domain.boundaries_high[1] - domain.boundaries_low[1];
-            println!(
+            grass_app::say!(
                 "Deform xy: Lees-Edwards shear erate={:.6e} (γ̇), Δv=γ̇·Ly={:.6e}",
                 rate,
                 rate * ly

@@ -329,7 +329,7 @@ pub fn comm_read_input(
         Ok(grid) => grid,
         Err(message) => {
             if comm.rank() == 0 {
-                println!("{message}");
+                grass_app::say!("{message}");
             }
             panic!("CommunicationPlugin startup validation was bypassed: {message}");
         }
@@ -338,7 +338,7 @@ pub fn comm_read_input(
     config.processors_y = decomp[1];
     config.processors_z = decomp[2];
     if comm.rank() == 0 {
-        println!("Comm: processors {} {} {}", decomp[0], decomp[1], decomp[2]);
+        grass_app::say!("Comm: processors {} {} {}", decomp[0], decomp[1], decomp[2]);
     }
 
     let rank = comm.rank();
@@ -1412,7 +1412,7 @@ pub fn borders(
             for dim in 0..3 {
                 if topo.maxneed[dim] > 1 {
                     let dim_name = ["x", "y", "z"][dim];
-                    println!(
+                    grass_app::say!(
                         "Comm: multi-hop ghost communication in dim {}: need={}",
                         dim_name, topo.maxneed[dim]
                     );

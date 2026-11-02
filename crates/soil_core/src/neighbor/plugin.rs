@@ -163,7 +163,7 @@ pub fn neighbor_read_input(
         } else {
             format!("every {}", config.every)
         };
-        println!(
+        grass_app::say!(
             "Neighbor: skin_fraction={} bin_size={} rebuild={} newton={} distance_kernel={:?} pairs={}",
             config.skin_fraction,
             config.bin_size,
@@ -217,7 +217,7 @@ pub fn neighbor_setup(
     neighbor.cached_max_cutoff = max_cutoff;
     domain.ghost_cutoff = ghost_cut;
     if comm.rank() == 0 {
-        println!(
+        grass_app::say!(
             "Neighbor: ghost_cutoff={:.4} (pair_cutoff={:.4})",
             ghost_cut, max_cutoff
         );
@@ -240,7 +240,7 @@ pub fn neighbor_setup(
         || domain.sub_length[2] / min_bin < 1.0)
         && comm.rank() == 0
     {
-        println!(
+        grass_app::say!(
             "WARNING: subdomain smaller than bin_size in at least one dimension, clamping to 1 bin"
         );
     }
@@ -250,7 +250,7 @@ pub fn neighbor_setup(
     neighbor.pbc_flags = domain.periodic_flags();
 
     if comm.rank() == 0 {
-        println!(
+        grass_app::say!(
             "Neighbor: bins {}x{}x{} (with ghost layers), {} forward stencil cells",
             neighbor.bin_count[0],
             neighbor.bin_count[1],

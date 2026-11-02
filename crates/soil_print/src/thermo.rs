@@ -199,7 +199,7 @@ pub fn setup_thermo(
     }
 
     if comm.rank() == 0 {
-        println!();
+        grass_app::say!();
         let header: String = thermo
             .columns
             .iter()
@@ -208,8 +208,8 @@ pub fn setup_thermo(
             .join(" ");
         let total_width: usize = thermo.columns.iter().map(|c| c.width).sum::<usize>()
             + thermo.columns.len().saturating_sub(1);
-        println!("{}", header);
-        println!("{}", "-".repeat(total_width));
+        grass_app::say!("{}", header);
+        grass_app::say!("{}", "-".repeat(total_width));
     }
 }
 
@@ -322,7 +322,7 @@ pub fn print_thermo(
             };
             parts.push(val_str);
         }
-        println!("{}", parts.join(" "));
+        grass_app::say!("{}", parts.join(" "));
         thermo.start_time = Instant::now();
         thermo.last_printed_step = step;
     }

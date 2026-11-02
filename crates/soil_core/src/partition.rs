@@ -278,4 +278,27 @@ mod tests {
         );
         assert_eq!(after.lamda_planes(0)[1], domain.sub_lamda_high[0]);
     }
+
+    #[test]
+    fn fixed_cuts_set_exact_slabs_and_route_like_the_cuts() {
+        let cuts = crate::FixedCuts {
+            planes: [vec![0.0, 0.8, 2.0], vec![-1.0, 0.0, 1.0], vec![0.5, 1.5]],
+        };
+        assert_eq!(cuts.decomposition(), [2, 2, 1]);
+        cuts.validate([0.0, -1.0, 0.5], [2.0, 1.0, 1.5], 4).unwrap();
+        assert!(cuts.validate([0.0, -1.0, 0.5], [2.0, 1.0, 1.5], 6).is_err());
+        assert!(cuts.validate([0.9, -1.0, 0.5], [2.0, 1.0, 1.5], 4).is_err());
+
+        let mut domain = Domain::new();
+        domain.boundaries_low = [0.0, -1.0, 0.5];
+        domain.boundaries_high = [2.0, 1.0, 1.5];
+        domain.update_derived();
+        crate::apply_fixed_cuts(&mut domain, &cuts, [1, 0, 0]);
+        assert_eq!(domain.sub_domain_low, [0.8, -1.0, 0.5]);
+        assert_eq!(domain.sub_domain_high, [2.0, 0.0, 1.5]);
+        let d = ParticlePartitionDirectory::from_domain(&domain).unwrap();
+        assert_eq!(d.decomposition(), [2, 2, 1]);
+        assert_eq!(d.owner_rank([0.79, 0.5, 1.0]), Some(1));
+        assert_eq!(d.owner_rank([0.81, -0.5, 1.0]), Some(2));
+    }
 }

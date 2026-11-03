@@ -21,6 +21,7 @@ repository = "https://github.com/SueHeir/soil"
 grass_app = { git = "https://github.com/SueHeir/grass.git", branch = "main" }
 grass_derive = { git = "https://github.com/SueHeir/grass.git", branch = "main" }
 grass_io = { git = "https://github.com/SueHeir/grass.git", branch = "main" }
+grass_gpu = { git = "https://github.com/SueHeir/grass.git", branch = "main" }
 grass_mpi = { git = "https://github.com/SueHeir/grass.git", branch = "main", default-features = false }
 grass_scheduler = { git = "https://github.com/SueHeir/grass.git", branch = "main" }
 bincode = "1"

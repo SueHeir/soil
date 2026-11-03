@@ -1,0 +1,36 @@
+name: soil_gpu
+
+# Runs real kernels on Mesa's software Vulkan driver, since GitHub's runners have no GPU.
+# This covers correctness; it says nothing about speed.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "crates/soil_gpu/**"
+      - ".github/workflows/soil_gpu.yml"
+  pull_request:
+    paths:
+      - "crates/soil_gpu/**"
+      - ".github/workflows/soil_gpu.yml"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install OpenMPI and software Vulkan
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libopenmpi-dev openmpi-bin mesa-vulkan-drivers
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Test
+        run: cargo test -p soil_gpu

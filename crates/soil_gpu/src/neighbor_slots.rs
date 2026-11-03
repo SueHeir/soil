@@ -12,18 +12,35 @@
 
 use std::cell::Cell;
 
-use cubecl::prelude::*;
 use cubecl::bytes::Bytes;
+use cubecl::prelude::*;
 use cubecl::server::Handle;
 use grass_gpu::cubecl;
 use grass_gpu::{GpuDevice, GpuReal};
 
 /// Fixed per-atom slot capacity.
 pub const MAX_CONTACTS: usize = 32;
-/// Payload floats per slot.
+/// Payload floats per slot, unless [`NeighborSlots::with_payload`] says otherwise.
 pub const PAYLOAD: usize = 3;
 /// Empty-slot marker.
 pub const SENTINEL: u32 = 0xFFFF_FFFF;
+
+/// The old slot atom `i` holds for `partner`, or [`SENTINEL`] if there is none. For a payload
+/// other than [`PAYLOAD`], where a kernel reads and writes the floats itself.
+#[cube]
+pub fn slot_find(old_partner: &[u32], i: u32, partner: u32) -> u32 {
+    let base = i * comptime!(MAX_CONTACTS as u32);
+    let mut found = 0xFFFF_FFFFu32;
+    let mut k = 0u32;
+    while k < comptime!(MAX_CONTACTS as u32) {
+        if old_partner[(base + k) as usize] == partner {
+            found = base + k;
+            break;
+        }
+        k += 1u32;
+    }
+    found
+}
 
 /// Atom `i`'s old payload for `partner`, or zero if there is none.
 #[cube]
@@ -84,6 +101,7 @@ pub fn slot_clear_from(new_partner: &mut [u32], i: u32, start: u32) {
 pub struct NeighborSlots {
     gpu: GpuDevice,
     n: usize,
+    payload_len: usize,
     partner: [Handle; 2],
     payload: [Handle; 2],
     /// Which pair of buffers the next kernel reads as old.
@@ -91,20 +109,31 @@ pub struct NeighborSlots {
 }
 
 impl NeighborSlots {
-    /// Empty slots for `n` atoms.
+    /// Empty slots for `n` atoms, with [`PAYLOAD`] floats each.
     pub fn new(gpu: GpuDevice, n: usize) -> Self {
+        Self::with_payload(gpu, n, PAYLOAD)
+    }
+
+    /// Empty slots for `n` atoms, with `payload_len` floats each.
+    pub fn with_payload(gpu: GpuDevice, n: usize, payload_len: usize) -> Self {
         let handle = |bytes: usize| gpu.client.empty(bytes.max(4));
         let partner_bytes = n * MAX_CONTACTS * 4;
-        let payload_bytes = n * MAX_CONTACTS * PAYLOAD * std::mem::size_of::<GpuReal>();
+        let payload_bytes = n * MAX_CONTACTS * payload_len * std::mem::size_of::<GpuReal>();
         let slots = Self {
             partner: [handle(partner_bytes), handle(partner_bytes)],
             payload: [handle(payload_bytes), handle(payload_bytes)],
             old: Cell::new(0),
             n,
+            payload_len,
             gpu,
         };
         slots.clear();
         slots
+    }
+
+    /// Floats per slot.
+    pub fn payload_len(&self) -> usize {
+        self.payload_len
     }
 
     /// How many atoms the slots hold.
@@ -123,17 +152,24 @@ impl NeighborSlots {
             return;
         }
         let partner = vec![SENTINEL; self.n * MAX_CONTACTS];
-        let payload = vec![0.0 as GpuReal; self.n * MAX_CONTACTS * PAYLOAD];
+        let payload = vec![0.0 as GpuReal; self.n * MAX_CONTACTS * self.payload_len];
         for k in 0..2 {
-            self.gpu.client.write(&self.partner[k], Bytes::from_elems(partner.clone()));
-            self.gpu.client.write(&self.payload[k], Bytes::from_elems(payload.clone()));
+            self.gpu
+                .client
+                .write(&self.partner[k], Bytes::from_elems(partner.clone()));
+            self.gpu
+                .client
+                .write(&self.payload[k], Bytes::from_elems(payload.clone()));
         }
     }
 
     /// `(old_partner, old_payload, new_partner, new_payload)` for this step's kernel.
     pub fn args(&self) -> (BufferArg, BufferArg, BufferArg, BufferArg) {
         let (old, new) = (self.old.get(), 1 - self.old.get());
-        let (slots, floats) = (self.n.max(1) * MAX_CONTACTS, self.n.max(1) * MAX_CONTACTS * PAYLOAD);
+        let (slots, floats) = (
+            self.n.max(1) * MAX_CONTACTS,
+            self.n.max(1) * MAX_CONTACTS * self.payload_len,
+        );
         // SAFETY: the handles were allocated for this many elements.
         unsafe {
             (
@@ -151,7 +187,7 @@ impl NeighborSlots {
     }
 
     /// Each slot's partner and payload as last written, for the first `rows` atoms, in the
-    /// layout `partner[rows * MAX_CONTACTS]`, `payload[rows * MAX_CONTACTS * PAYLOAD]`.
+    /// layout `partner[rows * MAX_CONTACTS]`, `payload[rows * MAX_CONTACTS * payload_len]`.
     /// Blocks until kernels already launched have finished.
     pub fn read_latest(&self, rows: usize) -> (Vec<u32>, Vec<GpuReal>) {
         let old = self.old.get();
@@ -160,10 +196,12 @@ impl NeighborSlots {
             .client
             .read(vec![self.partner[old].clone(), self.payload[old].clone()])
             .expect("soil_gpu: slot read failed");
-        self.gpu.counts().record_download((data[0].len() + data[1].len()) as u64);
+        self.gpu
+            .counts()
+            .record_download((data[0].len() + data[1].len()) as u64);
         (
             u32::from_bytes(&data[0])[..rows * MAX_CONTACTS].to_vec(),
-            GpuReal::from_bytes(&data[1])[..rows * MAX_CONTACTS * PAYLOAD].to_vec(),
+            GpuReal::from_bytes(&data[1])[..rows * MAX_CONTACTS * self.payload_len].to_vec(),
         )
     }
 
@@ -174,9 +212,10 @@ impl NeighborSlots {
         let mut partner = partner.to_vec();
         let mut payload = payload.to_vec();
         partner.resize(self.n * MAX_CONTACTS, SENTINEL);
-        payload.resize(self.n * MAX_CONTACTS * PAYLOAD, 0.0);
+        payload.resize(self.n * MAX_CONTACTS * self.payload_len, 0.0);
         self.gpu.counts().record_upload(
-            std::mem::size_of_val(partner.as_slice()) as u64 + std::mem::size_of_val(payload.as_slice()) as u64,
+            std::mem::size_of_val(partner.as_slice()) as u64
+                + std::mem::size_of_val(payload.as_slice()) as u64,
         );
         client.write(&self.partner[old], Bytes::from_elems(partner));
         client.write(&self.payload[old], Bytes::from_elems(payload));
@@ -199,9 +238,70 @@ mod tests {
         let i = ABSOLUTE_POS as u32;
         if i < sizes[0] {
             let old = slot_lookup::<F>(old_partner, old_payload, i, i);
-            slot_write::<F>(new_partner, new_payload, i, 0u32, i, (old.0 + F::new(1.0f32), old.1, old.2));
+            slot_write::<F>(
+                new_partner,
+                new_payload,
+                i,
+                0u32,
+                i,
+                (old.0 + F::new(1.0f32), old.1, old.2),
+            );
             slot_clear_from(new_partner, i, 1u32);
         }
+    }
+
+    /// A wider payload, read and written by hand, keeps its last float across swaps.
+    #[cube(launch_unchecked)]
+    fn accumulate_wide<F: Float>(
+        sizes: &[u32],
+        old_partner: &[u32],
+        old_payload: &[F],
+        new_partner: &mut [u32],
+        new_payload: &mut [F],
+    ) {
+        let i = ABSOLUTE_POS as u32;
+        if i < sizes[0] {
+            let found = slot_find(old_partner, i, i);
+            let mut last = F::new(0.0f32);
+            if found != 0xFFFF_FFFFu32 {
+                last = old_payload[(found * 7u32 + 6u32) as usize];
+            }
+            let base = i * comptime!(MAX_CONTACTS as u32);
+            new_partner[base as usize] = i;
+            new_payload[(base * 7u32 + 6u32) as usize] = last + F::new(1.0f32);
+            slot_clear_from(new_partner, i, 1u32);
+        }
+    }
+
+    #[test]
+    fn a_wider_payload_persists_too() {
+        let Ok(gpu) = GpuDevice::default_device() else {
+            eprintln!("no GPU adapter; skipping");
+            return;
+        };
+        let n = 50;
+        let slots = NeighborSlots::with_payload(gpu.clone(), n, 7);
+        let sizes = gpu.client.create_from_slice(u32::as_bytes(&[n as u32]));
+        for _ in 0..5 {
+            let (a, b, c, d) = slots.args();
+            // SAFETY: bounded by `sizes`, which is the slots' atom count.
+            unsafe {
+                accumulate_wide::launch_unchecked::<GpuReal>(
+                    &gpu.client,
+                    CubeCount::Static(1, 1, 1),
+                    CubeDim::new_1d(64),
+                    BufferArg::from_raw_parts(sizes.clone(), 1),
+                    a,
+                    b,
+                    c,
+                    d,
+                );
+            }
+            slots.swap();
+        }
+        let (partner, payload) = slots.read_latest(n);
+        assert_eq!(partner[(n - 1) * MAX_CONTACTS], (n - 1) as u32);
+        assert_eq!(payload[((n - 1) * MAX_CONTACTS) * 7 + 6], 5.0);
     }
 
     #[test]

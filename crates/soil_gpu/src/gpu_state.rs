@@ -93,7 +93,13 @@ fn integrate_initial<F: Float>(
 
 /// Second half: the completing velocity kick, with the force from this step.
 #[cube(launch_unchecked)]
-fn integrate_final<F: Float>(sizes: &[u32], params: &[F], inv_mass: &[F], force: &[F], vel: &mut [F]) {
+fn integrate_final<F: Float>(
+    sizes: &[u32],
+    params: &[F],
+    inv_mass: &[F],
+    force: &[F],
+    vel: &mut [F],
+) {
     let i = ABSOLUTE_POS;
     if (i as u32) < sizes[0] {
         let h = F::new(0.5f32) * params[DT] * inv_mass[i];
@@ -244,12 +250,18 @@ impl GpuState {
 
     /// Replace an auxiliary state from the CPU, uploaded by the next launch.
     pub fn set_aux_state(&mut self, i: usize, state: &[GpuReal]) {
-        self.aux_dofs[i].state.host_overwrite().copy_from_slice(state);
+        self.aux_dofs[i]
+            .state
+            .host_overwrite()
+            .copy_from_slice(state);
     }
 
     /// Replace an auxiliary inverse coefficient from the CPU.
     pub fn set_aux_inv_coeff(&mut self, i: usize, inv_coeff: &[GpuReal]) {
-        self.aux_dofs[i].inv_coeff.host_overwrite().copy_from_slice(inv_coeff);
+        self.aux_dofs[i]
+            .inv_coeff
+            .host_overwrite()
+            .copy_from_slice(inv_coeff);
     }
 
     /// Replace positions from the CPU, uploaded by the next launch.
@@ -316,7 +328,13 @@ impl GpuState {
     /// On-device periodic boundaries and Lees-Edwards shear. `lengths` is the box size per
     /// axis (0 for non-periodic), `origin` its low corner, `tilt_xy` the x shift per y image,
     /// `dv_xy` the matching velocity offset.
-    pub fn set_box(&mut self, lengths: [GpuReal; 3], origin: [GpuReal; 3], tilt_xy: GpuReal, dv_xy: GpuReal) {
+    pub fn set_box(
+        &mut self,
+        lengths: [GpuReal; 3],
+        origin: [GpuReal; 3],
+        tilt_xy: GpuReal,
+        dv_xy: GpuReal,
+    ) {
         self.params[LX..LX + 3].copy_from_slice(&lengths);
         self.params[OX..OX + 3].copy_from_slice(&origin);
         self.params[TILT_XY] = tilt_xy;
@@ -544,7 +562,10 @@ mod tests {
         let t = 500.0 * dt;
         let z = 10.0 + 2.0 * t + 0.5 * g * t * t;
         let p = state.pos().to_vec();
-        assert!((p[0] - t).abs() < TOL && (p[2] - z).abs() < TOL, "{p:?} vs z {z}");
+        assert!(
+            (p[0] - t).abs() < TOL && (p[2] - z).abs() < TOL,
+            "{p:?} vs z {z}"
+        );
         let v = state.vel().to_vec();
         assert!((v[2] - (2.0 + g * t)).abs() < TOL, "{v:?}");
     }

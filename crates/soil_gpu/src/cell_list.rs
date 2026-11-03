@@ -41,7 +41,12 @@ impl Grid {
             origin[d] = o;
         }
         let total_cells = (n[0] * n[1] * n[2]) as usize;
-        Grid { n, origin, bin_size: [bin_size; 3], total_cells }
+        Grid {
+            n,
+            origin,
+            bin_size: [bin_size; 3],
+            total_cells,
+        }
     }
 
     /// [`from_positions`](Self::from_positions) with at most `max_cells` cells. A wider cell
@@ -246,7 +251,10 @@ impl DeviceColumn {
     /// A device-only column of `len` elements of `size` bytes.
     pub fn empty(gpu: &GpuDevice, len: usize, size: usize) -> Self {
         let len = len.max(1);
-        Self { handle: gpu.client.empty(len * size), len }
+        Self {
+            handle: gpu.client.empty(len * size),
+            len,
+        }
     }
 
     /// The kernel argument for this column.
@@ -257,12 +265,18 @@ impl DeviceColumn {
 
     /// A column holding `data`.
     pub fn from_slice<T: CubeElement>(gpu: &GpuDevice, data: &[T]) -> Self {
-        Self { handle: gpu.client.create_from_slice(T::as_bytes(data)), len: data.len() }
+        Self {
+            handle: gpu.client.create_from_slice(T::as_bytes(data)),
+            len: data.len(),
+        }
     }
 
     /// The first `n` elements, waiting for kernels already launched.
     pub fn read<T: CubeElement + Copy>(&self, gpu: &GpuDevice, n: usize) -> Vec<T> {
-        let bytes = gpu.client.read_one(self.handle.clone()).expect("soil_gpu: read failed");
+        let bytes = gpu
+            .client
+            .read_one(self.handle.clone())
+            .expect("soil_gpu: read failed");
         T::from_bytes(&bytes)[..n].to_vec()
     }
 }
@@ -327,11 +341,24 @@ impl CellList {
         let inv = grid.bin_size.map(|b| 1.0 / b);
         self.grid_params = DeviceColumn::from_slice(
             &self.gpu,
-            &[grid.origin[0], grid.origin[1], grid.origin[2], inv[0], inv[1], inv[2]],
+            &[
+                grid.origin[0],
+                grid.origin[1],
+                grid.origin[2],
+                inv[0],
+                inv[1],
+                inv[2],
+            ],
         );
         self.sizes = DeviceColumn::from_slice(
             &self.gpu,
-            &[self.n as i32, self.total_cells as i32, grid.n[0], grid.n[1], grid.n[2]],
+            &[
+                self.n as i32,
+                self.total_cells as i32,
+                grid.n[0],
+                grid.n[1],
+                grid.n[2],
+            ],
         );
     }
 
@@ -345,7 +372,13 @@ impl CellList {
         // SAFETY: every index a kernel forms is bounded by `sizes`, which matches the
         // allocations above, or by the cell total the prefix sum computed.
         unsafe {
-            clear_cells::launch_unchecked(client, cells.clone(), dim, self.sizes.arg(), self.cell_count.arg());
+            clear_cells::launch_unchecked(
+                client,
+                cells.clone(),
+                dim,
+                self.sizes.arg(),
+                self.cell_count.arg(),
+            );
             assign_cells::launch_unchecked::<GpuReal>(
                 client,
                 atoms.clone(),
@@ -356,7 +389,14 @@ impl CellList {
                 self.atom_cell.arg(),
                 self.cell_count.arg(),
             );
-            chunk_sums::launch_unchecked(client, chunks.clone(), dim, self.sizes.arg(), self.cell_count.arg(), self.sums.arg());
+            chunk_sums::launch_unchecked(
+                client,
+                chunks.clone(),
+                dim,
+                self.sizes.arg(),
+                self.cell_count.arg(),
+                self.sums.arg(),
+            );
             chunk_offsets::launch_unchecked(
                 client,
                 CubeCount::Static(1, 1, 1),
@@ -375,8 +415,23 @@ impl CellList {
                 self.cell_start.arg(),
                 self.cursor.arg(),
             );
-            scatter::launch_unchecked(client, atoms, dim, self.sizes.arg(), self.atom_cell.arg(), self.cursor.arg(), self.sorted_atoms.arg());
-            sort_cells::launch_unchecked(client, cells, dim, self.sizes.arg(), self.cell_start.arg(), self.sorted_atoms.arg());
+            scatter::launch_unchecked(
+                client,
+                atoms,
+                dim,
+                self.sizes.arg(),
+                self.atom_cell.arg(),
+                self.cursor.arg(),
+                self.sorted_atoms.arg(),
+            );
+            sort_cells::launch_unchecked(
+                client,
+                cells,
+                dim,
+                self.sizes.arg(),
+                self.cell_start.arg(),
+                self.sorted_atoms.arg(),
+            );
         }
     }
 
@@ -418,7 +473,11 @@ mod tests {
         let mut pos = Vec::with_capacity(3 * n);
         for i in 0..n {
             let f = i as GpuReal;
-            pos.extend_from_slice(&[(f * 0.137).fract() * 4.0, (f * 0.371).fract() * 4.0, (f * 0.713).fract() * 4.0]);
+            pos.extend_from_slice(&[
+                (f * 0.137).fract() * 4.0,
+                (f * 0.371).fract() * 4.0,
+                (f * 0.713).fract() * 4.0,
+            ]);
         }
         let grid = Grid::from_positions(&pos, 0.5);
         let mut column = DualBuffer::new(&gpu, pos.clone());

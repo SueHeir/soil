@@ -12,17 +12,17 @@ resolver = "2"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.1.3"
+version = "0.1.4"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/SueHeir/soil"
 
 [workspace.dependencies]
-grass_app = { git = "https://github.com/SueHeir/grass.git", branch = "main" }
-grass_derive = { git = "https://github.com/SueHeir/grass.git", branch = "main" }
-grass_io = { git = "https://github.com/SueHeir/grass.git", branch = "main" }
-grass_mpi = { git = "https://github.com/SueHeir/grass.git", branch = "main", default-features = false }
-grass_scheduler = { git = "https://github.com/SueHeir/grass.git", branch = "main" }
+grass_app = { git = "https://github.com/SueHeir/grass.git", rev = "83198be92efa43320b32f986d7dd72550e3bc141" }
+grass_derive = { git = "https://github.com/SueHeir/grass.git", rev = "83198be92efa43320b32f986d7dd72550e3bc141" }
+grass_io = { git = "https://github.com/SueHeir/grass.git", rev = "83198be92efa43320b32f986d7dd72550e3bc141" }
+grass_mpi = { git = "https://github.com/SueHeir/grass.git", rev = "83198be92efa43320b32f986d7dd72550e3bc141", default-features = false }
+grass_scheduler = { git = "https://github.com/SueHeir/grass.git", rev = "83198be92efa43320b32f986d7dd72550e3bc141" }
 bincode = "1"
 proc-macro2 = "1"
 quote = "1"
@@ -54,10 +54,10 @@ precision-single = [
 [dependencies]
 grass_app.workspace = true
 grass_scheduler.workspace = true
-soil_core = { path = "crates/soil_core", version = "0.1.3", default-features = false }
-soil_derive = { path = "crates/soil_derive", version = "0.1.3" }
-soil_print = { path = "crates/soil_print", version = "0.1.3", default-features = false }
-soil_verlet = { path = "crates/soil_verlet", version = "0.1.3", default-features = false }
+soil_core = { path = "crates/soil_core", version = "0.1.4", default-features = false }
+soil_derive = { path = "crates/soil_derive", version = "0.1.4" }
+soil_print = { path = "crates/soil_print", version = "0.1.4", default-features = false }
+soil_verlet = { path = "crates/soil_verlet", version = "0.1.4", default-features = false }
 rand.workspace = true
 serde.workspace = true
 toml.workspace = true
@@ -106,16 +106,6 @@ required-features = ["precision-double"]
 name = "neighbor_hot_path"
 path = "examples/neighbor_hot_path/main.rs"
 required-features = ["precision-double"]
-
-[[example]]
-name = "polydisperse_neighbor_rebuild"
-path = "examples/polydisperse_neighbor_rebuild/main.rs"
-required-features = ["mpi_backend", "precision-double"]
-
-[[example]]
-name = "neighbor_comm_profile"
-path = "examples/neighbor_comm_profile/main.rs"
-required-features = ["mpi_backend", "precision-double"]
 
 [[example]]
 name = "orbit_nbody_gravity"

@@ -17,7 +17,7 @@ precision-mixed = ["soil_core/precision-mixed"]
 precision-single = ["soil_core/precision-single"]
 
 [dependencies]
-soil_core = { path = "../soil_core", version = "0.1.3", default-features = false }
+soil_core = { path = "../soil_core", version = "0.1.4", default-features = false }
 grass_app.workspace = true
 grass_scheduler.workspace = true
 serde.workspace = true

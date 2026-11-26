@@ -1390,6 +1390,35 @@ impl<'a> ParticleStore<'a> {
         self.replace_from_restart(replacement, extension_buffers)
     }
 
+    /// Transactionally append `count` locally-owned particles with core
+    /// defaults, under one snapshot.
+    ///
+    /// Same contract as [`push_default_local`](Self::push_default_local), but a
+    /// bulk loader pays the O(N) snapshot once instead of once per row, so
+    /// reading an N-particle file is O(N) rather than O(N²).
+    pub fn push_default_locals(
+        &mut self,
+        count: usize,
+        global_natoms: u64,
+    ) -> Result<(), ParticleStoreError> {
+        if !self.has_valid_layout() || self.atoms.nghost != 0 {
+            return Err(ParticleStoreError::InvalidStructuralOperation);
+        }
+        if count == 0 {
+            return Ok(());
+        }
+        let expected = self.atoms.len() + count;
+        self.reserve(count);
+        self.structural_transaction(expected, |atoms, registry| {
+            for _ in 0..count {
+                atoms.push_default_row();
+                registry.push_default_all();
+            }
+            atoms.nlocal += count as u32;
+            atoms.natoms = global_natoms;
+        })
+    }
+
     /// Transactionally append one locally-owned particle with core defaults.
     ///
     /// `global_natoms` is supplied by the caller that owns the necessary
@@ -2088,6 +2117,31 @@ mod tests {
             ),
             (0, 0, 0)
         );
+        assert!(failing_registry.validate_rows(0));
+    }
+
+    #[test]
+    fn particle_store_bulk_default_push_is_atomic() {
+        let mut atoms = Atom::new();
+        let mut registry = AtomDataRegistry::new();
+        registry.try_register(ManualRows::default(), 0).unwrap();
+
+        let mut store = ParticleStore::new(&mut atoms, &registry);
+        store.push_default_locals(0, 0).unwrap();
+        store.push_default_local(1).unwrap();
+        store.push_default_locals(3, 40).unwrap();
+        assert_eq!((atoms.nlocal, atoms.nghost, atoms.natoms), (4, 0, 40));
+        assert_eq!(atoms.mass, vec![1.0; 4]);
+        assert_eq!(registry.get::<ManualRows>().unwrap().rows, vec![-1.0; 4]);
+
+        let mut failing_atoms = Atom::new();
+        let mut failing_registry = AtomDataRegistry::new();
+        failing_registry.try_register(BrokenDefaults, 0).unwrap();
+        assert_eq!(
+            ParticleStore::new(&mut failing_atoms, &failing_registry).push_default_locals(5, 5),
+            Err(ParticleStoreError::MalformedExtensionRecord)
+        );
+        assert!(failing_atoms.is_empty());
         assert!(failing_registry.validate_rows(0));
     }
 

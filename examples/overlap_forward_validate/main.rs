@@ -3,8 +3,8 @@
 //!
 //! This is a **substrate-level** proof, with no DEM/granular logic: the only
 //! physics is a Lennard-Jones pair potential (generic molecular dynamics), so
-//! the same overlap machinery it exercises serves DEM, MD, SPH, and
-//! Peridynamics alike. It complements dirt's `mpi_loadbalance_validate` (which
+//! the same overlap machinery it exercises serves any particle method built on
+//! SOIL. It complements dirt's `mpi_loadbalance_validate` (which
 //! proves the *DEM* force overlaps) by proving the overlap correct one tier
 //! down, at the point substrate itself.
 //!
@@ -66,7 +66,8 @@ use grass_scheduler::prelude::*;
 use soil_core::{
     classify_boundary_atoms, forward_comm_overlap, Accum, Atom, AtomDataRegistry, AtomPlugin,
     CommBuffers, CommConfig, CommResource, CommTopology, CommunicationPlugin, Config, Domain,
-    DomainPlugin, ForwardCommPrecision, Neighbor, NeighborPlugin, ParticleSimScheduleSet, Real,
+    DomainPlugin, ForwardCommPrecision, Neighbor, NeighborPlugin, ParticleSimScheduleSet,
+    ParticleStore, Real,
 };
 
 // ── Lennard-Jones parameters (reduced units: ε = σ = m = 1) ──────────────────
@@ -223,7 +224,7 @@ fn force_overlap(
 fn initial_integration(mut atoms: ResMut<Atom>) {
     let dt = atoms.dt as Accum;
     let nlocal = atoms.nlocal() as usize;
-    for i in 0..nlocal() {
+    for i in 0..nlocal {
         let half_dt_over_m = 0.5 * dt * atoms.inv_mass[i] as Accum;
         for k in 0..3 {
             let v = atoms.vel[i][k] as Accum + half_dt_over_m * atoms.force[i][k];
@@ -235,7 +236,7 @@ fn initial_integration(mut atoms: ResMut<Atom>) {
 fn final_integration(mut atoms: ResMut<Atom>) {
     let dt = atoms.dt as Accum;
     let nlocal = atoms.nlocal() as usize;
-    for i in 0..nlocal() {
+    for i in 0..nlocal {
         let half_dt_over_m = 0.5 * dt * atoms.inv_mass[i] as Accum;
         for k in 0..3 {
             atoms.vel[i][k] =
@@ -291,15 +292,21 @@ fn main() {
         )
     };
     let a = lattice_spacing();
-    let mut local = 0u32;
     {
-        let cell = app
-            .get_mut_resource(std::any::TypeId::of::<Atom>())
+        let atom_cell = app
+            .resource_cell(std::any::TypeId::of::<Atom>())
             .expect("AtomPlugin registers the Atom resource");
-        let mut binder = cell.borrow_mut();
-        let atoms = binder.downcast_mut::<Atom>().unwrap();
+        let registry_cell = app
+            .resource_cell(std::any::TypeId::of::<AtomDataRegistry>())
+            .expect("AtomPlugin registers the AtomDataRegistry resource");
+        let mut atom_resource = atom_cell.borrow_mut();
+        let registry_resource = registry_cell.borrow();
+        let atoms = atom_resource.downcast_mut::<Atom>().unwrap();
+        let registry = registry_resource
+            .downcast_ref::<AtomDataRegistry>()
+            .unwrap();
         atoms.dt = DT;
-        atoms.natoms() = (NCELL * NCELL * NCELL) as u64;
+        let global_natoms = (NCELL * NCELL * NCELL) as u64;
         // One PRNG stream, drawn identically on every rank so all ranks agree on
         // the global system; each rank keeps only atoms inside its subdomain.
         let mut rng: u64 = SEED;
@@ -321,15 +328,20 @@ fn main() {
                     ];
                     let owned = (0..3).all(|k| pos[k] >= sub_low[k] && pos[k] < sub_high[k]);
                     if owned {
-                        atoms.push_test_atom(tag, pos, ATOM_RADIUS, 1.0);
-                        let idx = atoms.tag.len() - 1;
+                        ParticleStore::new(atoms, registry)
+                            .push_default_local(global_natoms)
+                            .expect("seed a locally owned atom");
+                        let idx = atoms.len() - 1;
+                        atoms.tag[idx] = tag;
+                        atoms.pos[idx] = [pos[0] as Real, pos[1] as Real, pos[2] as Real];
                         atoms.vel[idx] = [vel[0] as Real, vel[1] as Real, vel[2] as Real];
-                        local += 1;
+                        atoms.cutoff_radius[idx] = ATOM_RADIUS as Real;
+                        atoms.mass[idx] = 1.0;
+                        atoms.inv_mass[idx] = 1.0;
                     }
                 }
             }
         }
-        atoms.nlocal() = local;
     }
 
     // Time-step the gas.

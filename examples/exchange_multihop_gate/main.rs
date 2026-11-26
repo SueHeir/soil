@@ -9,7 +9,8 @@ use std::{any::TypeId, fs};
 
 use grass_app::prelude::*;
 use soil_core::{
-    Atom, AtomPlugin, CommResource, CommunicationPlugin, Config, DomainPlugin, NeighborPlugin,
+    Atom, AtomDataRegistry, AtomPlugin, CommResource, CommunicationPlugin, Config, DomainPlugin,
+    NeighborPlugin, ParticleStore,
 };
 
 fn main() {
@@ -34,16 +35,28 @@ fn main() {
     };
     assert_eq!(size, 4, "exchange_multihop_gate must run with 4 MPI ranks");
 
-    {
-        let cell = app
-            .get_mut_resource(TypeId::of::<Atom>())
+    if rank == 0 {
+        let atom_cell = app
+            .resource_cell(TypeId::of::<Atom>())
             .expect("AtomPlugin registers the Atom resource");
-        let mut binder = cell.borrow_mut();
-        let atoms = binder.downcast_mut::<Atom>().unwrap();
-        if rank == 0 {
-            atoms.push_test_atom(42, [0.625, 0.5, 0.5], 0.01, 1.0);
-            unsafe { atoms.set_layout_unchecked(1, 0, 1) };
-        }
+        let registry_cell = app
+            .resource_cell(TypeId::of::<AtomDataRegistry>())
+            .expect("AtomPlugin registers the AtomDataRegistry resource");
+        let mut atom_resource = atom_cell.borrow_mut();
+        let registry_resource = registry_cell.borrow();
+        let atoms = atom_resource.downcast_mut::<Atom>().unwrap();
+        let registry = registry_resource
+            .downcast_ref::<AtomDataRegistry>()
+            .unwrap();
+
+        ParticleStore::new(atoms, registry)
+            .push_default_local(1)
+            .expect("seed the deliberately mis-owned atom");
+        atoms.tag[0] = 42;
+        atoms.pos[0] = [0.625, 0.5, 0.5];
+        atoms.cutoff_radius[0] = 0.01;
+        atoms.mass[0] = 1.0;
+        atoms.inv_mass[0] = 1.0;
     }
 
     // One full-rebuild step runs PBC, exchange, and then neighbor rebuild. The

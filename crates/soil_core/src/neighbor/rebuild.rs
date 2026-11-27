@@ -20,6 +20,7 @@ pub(super) fn save_build_positions(atoms: &Atom, neighbor: &mut Neighbor) {
     }
     neighbor.last_build_total = atoms.len();
     neighbor.steps_since_build = 0;
+    neighbor.build_valid = true;
     let (min_skin, max_skin) = atoms.cutoff_radius[..nlocal]
         .iter()
         .fold((f64::MAX, f64::MIN), |(mn, mx), &s| {
@@ -120,10 +121,13 @@ fn displacement_exceeded(atoms: &Atom, neighbor: &Neighbor) -> bool {
 /// step count, and displacement since last build.
 fn needs_rebuild(atoms: &Atom, neighbor: &Neighbor, comm_state: &CurrentState<CommState>) -> bool {
     let nlocal = atoms.nlocal as usize;
-    // Always rebuild on first call or local atom count change
-    if neighbor.last_build_pos.len() != nlocal
+    // Always rebuild on first call, after an invalidation, or when the local
+    // atom count changed. An empty rank (nlocal == 0) with a valid build does
+    // NOT vote for a rebuild: the vote is global, so one empty rank used to
+    // force every rank to rebuild every step.
+    if !neighbor.build_valid
+        || neighbor.last_build_pos.len() != nlocal
         || neighbor.last_build_radius.len() != nlocal
-        || nlocal == 0
     {
         return true;
     }
@@ -189,6 +193,35 @@ mod tests {
 
         atoms.cutoff_radius[0] = 0.6 as Real;
         assert!(displacement_exceeded(&atoms, &neighbor));
+    }
+
+    #[test]
+    fn empty_rank_with_valid_build_does_not_force_rebuild() {
+        let atoms = atom_with_radii(&[]);
+        let mut neighbor = Neighbor::new();
+        neighbor.skin_fraction = 1.2;
+        let state = CurrentState(CommState::CommunicateOnly);
+        // Never built: must rebuild even though the rank is empty.
+        assert!(needs_rebuild(&atoms, &neighbor, &state));
+        save_build_positions(&atoms, &mut neighbor);
+        assert!(
+            !needs_rebuild(&atoms, &neighbor, &state),
+            "an empty rank must not vote for a rebuild every step"
+        );
+        neighbor.invalidate_build();
+        assert!(needs_rebuild(&atoms, &neighbor, &state));
+    }
+
+    #[test]
+    fn invalidate_build_forces_rebuild_on_nonempty_rank() {
+        let atoms = atom_with_radii(&[0.5, 0.5]);
+        let mut neighbor = Neighbor::new();
+        neighbor.skin_fraction = 1.2;
+        save_build_positions(&atoms, &mut neighbor);
+        let state = CurrentState(CommState::CommunicateOnly);
+        assert!(!needs_rebuild(&atoms, &neighbor, &state));
+        neighbor.invalidate_build();
+        assert!(needs_rebuild(&atoms, &neighbor, &state));
     }
 
     #[test]

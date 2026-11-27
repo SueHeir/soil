@@ -747,7 +747,7 @@ fn apply_deform(
         domain.bounds_changed = true;
 
         // Force neighbor rebuild by clearing last build positions
-        neighbor.last_build_pos.clear();
+        neighbor.invalidate_build();
     }
 }
 

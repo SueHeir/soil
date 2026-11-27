@@ -29,6 +29,11 @@ pub struct Neighbor {
     pub last_build_radius: Vec<f64>,
     /// Number of timesteps since the last neighbor list rebuild.
     pub steps_since_build: usize,
+    /// `true` once a neighbor list has been built and not invalidated since.
+    /// Set by the build; cleared by [`Neighbor::invalidate_build`]. A rank with
+    /// zero local atoms keeps a valid build, so it does not force a global
+    /// rebuild every step.
+    pub build_valid: bool,
     /// Total atom count (local + ghost) at the last neighbor build.
     pub last_build_total: usize,
     /// Full simulation box dimensions `[Lx, Ly, Lz]` for minimum-image displacement checks.
@@ -123,6 +128,15 @@ impl Default for Neighbor {
 }
 
 impl Neighbor {
+    /// Mark the current neighbor list as stale so the next rebuild check
+    /// forces a full rebuild on this rank (and, through the global vote, on
+    /// every rank). Clears the saved build positions too.
+    pub fn invalidate_build(&mut self) {
+        self.last_build_pos.clear();
+        self.last_build_radius.clear();
+        self.build_valid = false;
+    }
+
     /// Creates a new `Neighbor` with default values.
     ///
     /// All arrays start empty; the bin grid and stencil are computed during
@@ -138,6 +152,7 @@ impl Neighbor {
             last_build_pos: Vec::new(),
             last_build_radius: Vec::new(),
             steps_since_build: 0,
+            build_valid: false,
             last_build_total: 0,
             pbc_box: [0.0; 3],
             pbc_flags: [false; 3],

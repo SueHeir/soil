@@ -1,12 +1,14 @@
 //! Atom groups: named subsets selected by type and/or spatial region.
 
-use std::{error::Error, fmt};
+use std::{collections::HashMap, error::Error, fmt};
 
 use grass_app::prelude::*;
 use grass_scheduler::prelude::*;
 use serde::Deserialize;
 
-use crate::{Atom, Config, ParticleSimScheduleSet, Region, ScheduleSetupSet, StageOverrides};
+use crate::{
+    Atom, CommBackend, Config, ParticleSimScheduleSet, Region, ScheduleSetupSet, StageOverrides,
+};
 
 // ── Config ──────────────────────────────────────────────────────────────────
 
@@ -57,6 +59,45 @@ pub struct Group {
 pub struct GroupRegistry {
     /// All registered groups, including the built-in "all" group.
     pub groups: Vec<Group>,
+    /// Membership of each static group, keyed by group name, held by atom tag
+    /// so it survives the particle sort and MPI migration. A static group's
+    /// `mask` is re-derived from this whenever the local atom order changes.
+    static_members: HashMap<String, StaticMembership>,
+}
+
+/// Global membership of one static group: a bitset over atom tags, plus the
+/// local tag order the group's current `mask` was derived for.
+#[derive(Debug, Default)]
+struct StaticMembership {
+    /// Bit `t` set ⇔ the atom with tag `t` is in the group. Tags beyond the
+    /// end (e.g. atoms inserted after setup) are not members.
+    bits: Vec<u64>,
+    /// `atoms.tag[..nlocal]` at the time `mask` was last built from `bits`.
+    mask_tags: Vec<u32>,
+}
+
+impl StaticMembership {
+    fn from_tags(tags: impl IntoIterator<Item = u32>) -> Self {
+        let mut bits = Vec::new();
+        for t in tags {
+            let word = (t / 64) as usize;
+            if word >= bits.len() {
+                bits.resize(word + 1, 0u64);
+            }
+            bits[word] |= 1u64 << (t % 64);
+        }
+        StaticMembership {
+            bits,
+            mask_tags: Vec::new(),
+        }
+    }
+
+    #[inline]
+    fn contains(&self, tag: u32) -> bool {
+        self.bits
+            .get((tag / 64) as usize)
+            .is_some_and(|w| w & (1u64 << (tag % 64)) != 0)
+    }
 }
 
 /// Error returned when a named group lookup fails.
@@ -93,7 +134,10 @@ impl Error for GroupLookupError {}
 impl GroupRegistry {
     /// Create an empty registry (the "all" group is added during setup).
     pub fn new() -> Self {
-        GroupRegistry { groups: Vec::new() }
+        GroupRegistry {
+            groups: Vec::new(),
+            static_members: HashMap::new(),
+        }
     }
 
     /// Look up a group by name.
@@ -173,30 +217,112 @@ fn evaluate_membership(def: &GroupDef, atoms: &Atom, i: usize) -> bool {
     true
 }
 
-fn rebuild_group_masks(groups: &mut GroupRegistry, atoms: &Atom) {
+/// Gather every rank's `local` tags onto every rank (ring of sendrecvs).
+/// Used once per static group at setup, never per step.
+fn all_gather_tags(comm: &dyn CommBackend, local: &[u32]) -> Vec<u32> {
+    let size = comm.size();
+    if size <= 1 {
+        return local.to_vec();
+    }
+    let rank = comm.rank();
+    let next = (rank + 1) % size;
+    let prev = (rank + size - 1) % size;
+    let mut all: Vec<u32> = local.to_vec();
+    // Tags are u32, so they round-trip through f64 exactly.
+    let mut passing: Vec<f64> = local.iter().map(|&t| t as f64).collect();
+    for _ in 1..size {
+        passing = comm.sendrecv_f64(next, &passing, prev);
+        all.extend(passing.iter().map(|&t| t as u32));
+    }
+    all
+}
+
+/// Rebuild every group's mask over the current local atoms.
+///
+/// * Dynamic groups are re-evaluated from their type/region filters.
+/// * Static groups keep the membership they had when first evaluated. That
+///   membership is held by atom tag (see [`StaticMembership`]), so the mask
+///   follows atoms through the particle sort and MPI migration; it is only
+///   re-derived when the local tag order changed since the last build.
+/// * A static group seen for the first time is evaluated here. With `comm`
+///   the member tags are gathered from every rank (setup path); without it
+///   (per-step path, e.g. a group added by hand) only local members are known.
+fn rebuild_group_masks_inner(
+    groups: &mut GroupRegistry,
+    atoms: &Atom,
+    comm: Option<&dyn CommBackend>,
+) {
     let nlocal = atoms.nlocal as usize;
-    for group in groups.groups.iter_mut() {
-        // Skip static groups that are already initialized
-        if !group.def.is_dynamic() && !group.mask.is_empty() {
+    let local_tags = &atoms.tag[..nlocal];
+    let GroupRegistry {
+        groups: list,
+        static_members,
+    } = groups;
+    for group in list.iter_mut() {
+        if group.name == "all" {
+            if group.mask.len() != nlocal || group.count != nlocal {
+                group.mask.clear();
+                group.mask.resize(nlocal, true);
+                group.count = nlocal;
+            }
             continue;
         }
-        group.mask.clear();
-        group.mask.resize(nlocal, false);
-        group.count = 0;
-        if group.name == "all" {
-            for m in group.mask.iter_mut() {
-                *m = true;
-            }
-            group.count = nlocal;
-        } else {
+        if group.def.is_dynamic() {
+            group.mask.clear();
+            group.mask.resize(nlocal, false);
+            group.count = 0;
             for i in 0..nlocal {
                 if evaluate_membership(&group.def, atoms, i) {
                     group.mask[i] = true;
                     group.count += 1;
                 }
             }
+            continue;
         }
+        // Static group.
+        let membership = static_members.entry(group.name.clone()).or_insert_with(|| {
+            let local_members: Vec<u32> = if group.mask.len() == nlocal && !group.mask.is_empty()
+            {
+                // Mask supplied by hand for the current atoms: adopt it as is.
+                (0..nlocal)
+                    .filter(|&i| group.mask[i])
+                    .map(|i| local_tags[i])
+                    .collect()
+            } else {
+                (0..nlocal)
+                    .filter(|&i| evaluate_membership(&group.def, atoms, i))
+                    .map(|i| local_tags[i])
+                    .collect()
+            };
+            let all = match comm {
+                Some(c) => all_gather_tags(c, &local_members),
+                None => local_members,
+            };
+            let mut m = StaticMembership::from_tags(all);
+            // Force the mask to be derived below.
+            m.mask_tags.clear();
+            m.mask_tags.push(u32::MAX);
+            m
+        });
+        if membership.mask_tags.as_slice() == local_tags && group.mask.len() == nlocal {
+            continue; // local order unchanged since the last build
+        }
+        group.mask.clear();
+        group.mask.resize(nlocal, false);
+        group.count = 0;
+        for (i, &tag) in local_tags.iter().enumerate() {
+            if membership.contains(tag) {
+                group.mask[i] = true;
+                group.count += 1;
+            }
+        }
+        membership.mask_tags.clear();
+        membership.mask_tags.extend_from_slice(local_tags);
     }
+}
+
+fn rebuild_group_masks(groups: &mut GroupRegistry, atoms: &Atom) {
+    rebuild_group_masks_inner(groups, atoms, None);
 }
 
 // ── Plugin ──────────────────────────────────────────────────────────────────
@@ -257,6 +383,7 @@ pub fn setup_groups(
 
         // Always start with the built-in "all" group.
         groups.groups.clear();
+        groups.static_members.clear();
         groups.groups.push(Group {
             name: "all".to_string(),
             def: GroupDef {
@@ -296,7 +423,10 @@ pub fn setup_groups(
                 }
                 continue;
             }
+            let groups = &mut *groups;
             if let Some(existing) = groups.groups.iter_mut().find(|g| g.name == def.name) {
+                // A redefined static group is re-evaluated from its new filters.
+                groups.static_members.remove(&def.name);
                 // Replace definition, clear mask to force rebuild
                 if comm.rank() == 0 {
                     println!(
@@ -322,7 +452,7 @@ pub fn setup_groups(
     }
     // else: no group overrides in this stage, keep existing groups as-is
 
-    rebuild_group_masks(&mut groups, &atoms);
+    rebuild_group_masks_inner(&mut groups, &atoms, Some(&**comm));
 }
 
 /// Per-step system: recompute every dynamic group's membership mask against the
@@ -604,6 +734,66 @@ mod tests {
         rebuild_group_masks(&mut registry, &atom);
         assert_eq!(registry.groups[0].mask, vec![false, false, false]);
         assert_eq!(registry.groups[0].count, 0);
+    }
+
+    #[test]
+    fn static_group_follows_atoms_through_reorder_and_migration() {
+        // Tags 0..4 at z = 1, 3, 5, 7; a static group of everything below z = 4
+        // (tags 0 and 1), locked at first evaluation.
+        let mut atom = make_atom(
+            &[
+                (0.0, 0.0, 1.0),
+                (0.0, 0.0, 3.0),
+                (0.0, 0.0, 5.0),
+                (0.0, 0.0, 7.0),
+            ],
+            &[0, 0, 0, 0],
+        );
+        let mut def = make_group_def(
+            "grip",
+            None,
+            Some(Region::Block {
+                min: [f64::NEG_INFINITY, f64::NEG_INFINITY, 0.0],
+                max: [f64::INFINITY, f64::INFINITY, 4.0],
+            }),
+        );
+        def.dynamic = Some(false);
+        let mut registry = GroupRegistry::new();
+        registry.groups.push(Group {
+            name: "grip".to_string(),
+            def,
+            mask: Vec::new(),
+            count: 0,
+        });
+        rebuild_group_masks(&mut registry, &atom);
+        assert_eq!(registry.expect("grip").mask, vec![true, true, false, false]);
+
+        // Members move out of the region: a static group must keep them.
+        atom.pos[0][2] = 9.0;
+        // Spatial sort reverses the local order.
+        let n = atom.nlocal as usize;
+        let mut scratch = Vec::new();
+        atom.apply_permutation_with_scratch(&[3, 2, 1, 0], n, &mut scratch);
+        rebuild_group_masks(&mut registry, &atom);
+        assert_eq!(atom.tag[..4], [3, 2, 1, 0]);
+        assert_eq!(registry.expect("grip").mask, vec![false, false, true, true]);
+        assert_eq!(registry.expect("grip").count, 2);
+
+        // Migration: tag 1 leaves this rank, a new atom (tag 9) arrives.
+        let idx = atom.tag.iter().position(|&t| t == 1).unwrap();
+        atom.swap_remove(idx);
+        atom.nlocal -= 1;
+        atom.push_test_atom(9, [0.0, 0.0, 2.0], 0.5, 1.0);
+        atom.nlocal += 1;
+        rebuild_group_masks(&mut registry, &atom);
+        let g = registry.expect("grip");
+        assert_eq!(g.mask.len(), atom.nlocal as usize);
+        let members: Vec<u32> = (0..g.mask.len())
+            .filter(|&i| g.mask[i])
+            .map(|i| atom.tag[i])
+            .collect();
+        assert_eq!(members, vec![0], "tag 9 arrived later and is not a member");
+        assert_eq!(g.count, 1);
     }
 
     #[test]

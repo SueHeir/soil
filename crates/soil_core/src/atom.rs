@@ -1401,7 +1401,7 @@ impl<'a> ParticleStore<'a> {
             return Err(ParticleStoreError::InvalidStructuralOperation);
         }
         let expected = self.atoms.len() + 1;
-        self.structural_transaction(expected, |atoms, registry| {
+        self.append_transaction(expected, |atoms, registry| {
             atoms.push_default_row();
             registry.push_default_all();
             atoms.nlocal += 1;
@@ -1442,6 +1442,42 @@ impl<'a> ParticleStore<'a> {
     /// Run a legacy extension callback behind one all-or-nothing boundary.
     /// Snapshot availability is checked before the core is touched, and a
     /// successful-but-malformed callback is treated the same as a panic.
+    /// Run an append-only structural operation (one that only pushes rows
+    /// onto the end of the core and every extension) and roll it back by
+    /// truncation on failure.
+    ///
+    /// Unlike [`Self::structural_transaction`] this never clones the core or
+    /// snapshots the extensions, so appending N particles one at a time is
+    /// O(N) overall instead of O(N^2). An extension whose `truncate` cannot
+    /// undo its own partial append falls back to the invariant check below.
+    fn append_transaction(
+        &mut self,
+        expected_rows: usize,
+        operation: impl FnOnce(&mut Atom, &AtomDataRegistry),
+    ) -> Result<(), ParticleStoreError> {
+        let rows_before = self.atoms.len();
+        let nlocal_before = self.atoms.nlocal;
+        let nghost_before = self.atoms.nghost;
+        let natoms_before = self.atoms.natoms;
+        let result = catch_unwind(AssertUnwindSafe(|| operation(self.atoms, self.registry)));
+        if result.is_ok()
+            && self.registry.validate_rows(expected_rows)
+            && self.atoms.len() == expected_rows
+        {
+            return Ok(());
+        }
+        self.atoms.truncate_to(rows_before);
+        self.atoms.nlocal = nlocal_before;
+        self.atoms.nghost = nghost_before;
+        self.atoms.natoms = natoms_before;
+        self.registry.truncate_all(rows_before);
+        assert!(
+            self.atoms.validate_rows() && self.registry.validate_rows(rows_before),
+            "an AtomData extension failed to roll back a partial append"
+        );
+        Err(ParticleStoreError::MalformedExtensionRecord)
+    }
+
     fn structural_transaction(
         &mut self,
         expected_rows: usize,

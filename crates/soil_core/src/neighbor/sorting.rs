@@ -44,8 +44,7 @@ pub fn sort_atoms_by_bin(
         if periodic_sort {
             let global_did_sort = comm.all_reduce_sum_f64(0.0);
             if global_did_sort > 0.0 {
-                neighbor.last_build_pos.clear();
-                neighbor.last_build_radius.clear();
+                neighbor.invalidate_build();
                 comm_state.0 = CommState::FullRebuild;
             }
         }
@@ -188,8 +187,7 @@ pub fn sort_atoms_by_bin(
         let local_did_sort = if already_sorted { 0.0 } else { 1.0 };
         let global_did_sort = comm.all_reduce_sum_f64(local_did_sort);
         if global_did_sort > 0.0 {
-            neighbor.last_build_pos.clear();
-            neighbor.last_build_radius.clear();
+            neighbor.invalidate_build();
             comm_state.0 = CommState::FullRebuild;
         }
     }
